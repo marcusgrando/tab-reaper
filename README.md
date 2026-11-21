@@ -4,45 +4,44 @@ Keep Chrome fast and bounded in RAM. Tab Reaper enforces a strict memory budget 
 
 Everything runs locally on your machine. No accounts, no telemetry, no external servers. See [PRIVACY.md](PRIVACY.md).
 
-## Install
+## Quick Install (macOS, Linux, Windows)
 
-### Option 1: Chrome Web Store (Recommended)
+One command downloads the extension into a permanent app folder (never `Downloads` or `/tmp`), pre-installs the optional native memory host with your Extension ID already registered, and copies the extension folder path to your clipboard:
 
-> Coming soon — `tab-reaper-extension.zip` is ready for Chrome Web Store submission.
+- **macOS / Linux (Terminal):**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash
+  ```
+- **Windows (PowerShell):**
+  ```powershell
+  irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex
+  ```
 
-### Option 2: Manual Install (No Developer Tools Needed)
+Then do the one-time Chrome step:
+1. Open `chrome://extensions` and turn on **Developer mode** (top right).
+2. Click **Load unpacked** and paste the path already copied to your clipboard (`Cmd+Shift+G` then `Cmd+V` on macOS).
+3. *(Optional)* Open Tab Reaper **Settings** -> **Optional Capabilities** -> click **Enable** and **Test** next to **Exact Chrome RAM** (no extra command needed).
 
-Works on **macOS, Windows, and Linux** in Chrome, Chromium, and Brave:
+### Uninstall
 
-1. Download **`tab-reaper-extension.zip`** from the [latest GitHub Release](https://github.com/marcusgrando/tab-reaper/releases/latest).
-2. Unzip the file to a folder you will keep (for example, `Documents/tab-reaper`).
-3. Open `chrome://extensions` in Chrome.
-4. Turn on **Developer mode** (top-right toggle).
-5. Click **Load unpacked** and select the unzipped folder.
+- **macOS / Linux:**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash -s -- --uninstall
+  ```
+- **Windows (PowerShell):**
+  ```powershell
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1))) -Uninstall
+  ```
 
-Tab Reaper works immediately out of the box using Chrome's built-in memory API — no extra software required.
+### Alternative: Chrome Web Store / Manual ZIP
 
-## Optional: Exact Chrome RAM (macOS, Linux, Windows)
+- **Chrome Web Store:** Coming soon (`tab-reaper-extension.zip` is ready for submission).
+- **Manual ZIP (extension only, no native host):** Download `tab-reaper-extension.zip` from the [latest GitHub Release](https://github.com/marcusgrando/tab-reaper/releases/latest), unzip to a permanent folder, and load via `chrome://extensions` -> **Developer mode** -> **Load unpacked**.
 
-By default, Chrome only exposes total system RAM to extensions. If you want Tab Reaper to measure **exact Chrome process memory** (PSS/RSS on Linux, RSS on macOS, Working Set on Windows), install the lightweight native helper (~300 KB, zero dependencies):
+## Optional Capabilities
 
-1. Open Tab Reaper **Settings** -> **Optional Capabilities**.
-2. Click **Copy** next to **Exact Chrome RAM** and run the command in your terminal:
-   - **macOS / Linux (Terminal):**
-     ```bash
-     curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.sh | bash -s -- <your-extension-id>
-     ```
-   - **Windows (PowerShell):**
-     ```powershell
-     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.ps1))) <your-extension-id>
-     ```
-3. Back in Tab Reaper **Settings**, click **Enable** and then **Test**.
-
-Prebuilt binaries are downloaded automatically from GitHub Releases (no Rust required).
-
-## Optional: Weighted Eviction
-
-In **Settings** -> **Optional Capabilities**, click **Enable** next to **Weighted Eviction** to discard heavier tabs (higher JS heap, DOM size, or media elements) before lightweight ones. Tab Reaper samples candidate tabs on demand with zero content scripts loaded at startup.
+- **Exact Chrome RAM:** Measures exact Chrome process memory (PSS/RSS on Linux, RSS on macOS, Working Set on Windows) instead of OS-wide RAM. Pre-installed by the Quick Install command above; if you installed via manual ZIP or CWS, copy the one-liner shown in Tab Reaper **Settings** -> **Optional Capabilities**.
+- **Weighted Eviction:** In **Settings** -> **Optional Capabilities**, enable **Weighted Eviction** to discard heavier tabs (higher JS heap, DOM size, or media elements) before lightweight ones. Zero content scripts at startup.
 
 ## Shortcuts
 
@@ -58,7 +57,7 @@ bun install
 bun run typecheck
 bun test
 bun run build        # outputs unpacked extension to dist/
-bun run package      # creates dist/tab-reaper-extension.zip (for CWS / manual install)
+bun run package      # creates dist/tab-reaper-extension.zip
 bun run test:rust    # runs native-host unit tests
 ```
 
