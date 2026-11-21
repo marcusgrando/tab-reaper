@@ -33,6 +33,8 @@ export interface TabActivityRecord {
 export interface ActivityState {
   byTabId: Record<string, TabActivityRecord>;
   byUrl: Record<string, number>;
+  /** Last known active tabId per windowId, so leaving a tab stamps its idle clock at deactivation. */
+  activeByWindow?: Record<string, number>;
 }
 
 export interface TabWeightSample {

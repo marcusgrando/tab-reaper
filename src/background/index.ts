@@ -1,5 +1,5 @@
 import { isInternalUrl, loadConfig, saveConfig } from "../shared/config.ts";
-import type { BackgroundMessage, OpenTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
+import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
 import {
   archiveTabs,
   deleteArchivedTab,
@@ -34,6 +34,7 @@ import {
   removeKeptTabId,
   removeTrackedTab,
   saveActivityState,
+  syncActiveTabs,
   toggleKeptTabId,
 } from "./tracker.ts";
 
@@ -107,12 +108,18 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
     const now = Date.now();
     const config = await loadConfig();
     const tabs = await queryAllTabs();
-    let activity = await loadActivityState();
+    let activity!: ActivityState;
 
-    if (mode === "startup") {
-      activity = reconcileActivityOnStartup(activity, tabs, now);
-      await saveActivityState(activity);
-    }
+    await enqueueActivityUpdate(async () => {
+      const loaded = await loadActivityState();
+      activity =
+        mode === "startup"
+          ? reconcileActivityOnStartup(loaded, tabs, now)
+          : syncActiveTabs(loaded, tabs, now);
+      if (mode === "startup" || activity !== loaded) {
+        await saveActivityState(activity);
+      }
+    });
 
     const memory = mode === "startup" ? null : await getMemorySnapshot(config, now);
     const online = isBrowserOnline();
@@ -311,13 +318,13 @@ chrome.runtime.onStartup.addListener(async () => {
   }
 });
 
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
     if (tab.incognito) return;
     const url = tab.url ?? tab.pendingUrl;
     await enqueueActivityUpdate(async () => {
-      const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
+      const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now(), windowId);
       await saveActivityState(state);
     });
     await runSweep("sweep");
@@ -330,8 +337,9 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   if (typeof tab.id !== "number" || tab.incognito || isRestoreInFlight()) return;
   const tabId = tab.id;
   const url = tab.url ?? tab.pendingUrl;
+  const activeWindowId = tab.active ? tab.windowId : undefined;
   await enqueueActivityUpdate(async () => {
-    const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
+    const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now(), activeWindowId);
     await saveActivityState(state);
   });
   await runSweep("sweep");
@@ -343,7 +351,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (tab.active) {
       const nextUrl = changeInfo.url;
       await enqueueActivityUpdate(async () => {
-        const state = recordTabVisit(await loadActivityState(), tabId, nextUrl, Date.now());
+        const state = recordTabVisit(await loadActivityState(), tabId, nextUrl, Date.now(), tab.windowId);
         await saveActivityState(state);
       });
     }
