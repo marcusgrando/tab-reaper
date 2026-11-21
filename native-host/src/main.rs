@@ -182,23 +182,80 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
     };
 
     let ps_out = Command::new("ps")
-        .args(["-axo", "rss=,comm="])
+        .args(["-axo", "pid=,rss=,comm="])
         .output()
         .map_err(|e| format!("failed to run ps: {}", e))?;
     if !ps_out.status.success() {
         return Err("ps command failed".to_string());
     }
 
-    let (chrome_bytes, process_count) =
-        parse_macos_ps_chrome(&String::from_utf8_lossy(&ps_out.stdout));
+    let procs = parse_macos_ps_chrome(&String::from_utf8_lossy(&ps_out.stdout));
+    let mut chrome_bytes: u64 = 0;
+    let mut used_footprint = false;
+
+    for &(pid, rss_bytes) in &procs {
+        // macOS Activity Monitor reports phys_footprint (includes compressed RAM and GPU/IOKit
+        // allocations), which is often 2-3x higher than uncompressed RSS from `ps`.
+        if let Some(fp) = read_macos_phys_footprint(pid) {
+            chrome_bytes = chrome_bytes.saturating_add(fp);
+            used_footprint = true;
+        } else {
+            chrome_bytes = chrome_bytes.saturating_add(rss_bytes);
+        }
+    }
 
     Ok(MemoryReport {
         chrome_bytes,
-        process_count,
+        process_count: procs.len(),
         system_total_bytes,
         system_available_bytes,
-        metric: "rss",
+        metric: if used_footprint { "phys_footprint" } else { "rss" },
     })
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_phys_footprint(pid: i32) -> Option<u64> {
+    use std::ffi::c_void;
+    use std::mem::zeroed;
+
+    const RUSAGE_INFO_V2: i32 = 2;
+
+    #[repr(C)]
+    struct RusageInfoV2 {
+        ri_uuid: [u8; 16],
+        ri_user_time: u64,
+        ri_system_time: u64,
+        ri_pkg_idle_wkups: u64,
+        ri_interrupt_wkups: u64,
+        ri_pageins: u64,
+        ri_wired_size: u64,
+        ri_resident_size: u64,
+        ri_phys_footprint: u64,
+        ri_proc_start_abstime: u64,
+        ri_proc_exit_abstime: u64,
+        ri_child_user_time: u64,
+        ri_child_system_time: u64,
+        ri_child_pkg_idle_wkups: u64,
+        ri_child_interrupt_wkups: u64,
+        ri_child_pageins: u64,
+        ri_child_elapsed_abstime: u64,
+        ri_diskio_bytesread: u64,
+        ri_diskio_byteswritten: u64,
+    }
+
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut c_void) -> i32;
+    }
+
+    unsafe {
+        let mut info: RusageInfoV2 = zeroed();
+        let ret = proc_pid_rusage(pid, RUSAGE_INFO_V2, (&mut info as *mut RusageInfoV2).cast());
+        if ret == 0 {
+            Some(info.ri_phys_footprint)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -364,20 +421,19 @@ fn parse_macos_vm_stat(output: &str) -> Option<u64> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn parse_macos_ps_chrome(output: &str) -> (u64, usize) {
-    let mut total_bytes: u64 = 0;
-    let mut count: usize = 0;
+fn parse_macos_ps_chrome(output: &str) -> Vec<(i32, u64)> {
+    let mut procs = Vec::new();
 
     for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.splitn(2, char::is_whitespace);
-        let Some(rss_str) = parts.next() else {
+        let trimmed = line.trim_start();
+        let Some((pid_str, after_pid)) = trimmed.split_once(char::is_whitespace) else {
             continue;
         };
-        let Some(comm) = parts.next().map(str::trim) else {
+        let Some((rss_str, after_rss)) = after_pid.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let comm = after_rss.trim();
+        let Ok(pid) = pid_str.parse::<i32>() else {
             continue;
         };
         let Ok(rss_kb) = rss_str.parse::<u64>() else {
@@ -392,12 +448,11 @@ fn parse_macos_ps_chrome(output: &str) -> (u64, usize) {
             || lower.contains("chromium")
             || lower.contains("brave browser");
         if is_chrome {
-            total_bytes = total_bytes.saturating_add(rss_kb.saturating_mul(1024));
-            count += 1;
+            procs.push((pid, rss_kb.saturating_mul(1024)));
         }
     }
 
-    (total_bytes, count)
+    procs
 }
 
 #[cfg(target_os = "linux")]
@@ -516,11 +571,14 @@ mod tests {
         assert_eq!(parse_macos_vm_stat(vm), Some(3500 * 16384));
 
         let ps = "\
-  250000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
-  180000 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/130/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)\n\
-   12000 /Users/dev/.local/bin/tab-reaper-host\n\
-   90000 /usr/bin/vim\n";
-        assert_eq!(parse_macos_ps_chrome(ps), (430_000 * 1024, 2));
+ 5061 250000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
+ 5284 180000 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/130/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)\n\
+ 9999  12000 /Users/dev/.local/bin/tab-reaper-host\n\
+ 1234  90000 /usr/bin/vim\n";
+        assert_eq!(
+            parse_macos_ps_chrome(ps),
+            vec![(5061, 250_000 * 1024), (5284, 180_000 * 1024)]
+        );
     }
 
     #[test]
