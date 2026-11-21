@@ -134,12 +134,32 @@ btnCopyInstall.addEventListener("click", async () => {
   }
 });
 
+const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
+
+async function reloadToActivatePermission(): Promise<void> {
+  await chrome.storage.local.set({ [REOPEN_OPTIONS_KEY]: true });
+  chrome.runtime.reload();
+}
+
 btnNativePerm.addEventListener("click", async () => {
   const hasNative = await chrome.permissions.contains({ permissions: ["nativeMessaging"] });
   if (hasNative) {
     await chrome.permissions.remove({ permissions: ["nativeMessaging"] });
-  } else {
-    await chrome.permissions.request({ permissions: ["nativeMessaging"] });
+    await refreshPermissionsUI();
+    return;
+  }
+  const granted = await chrome.permissions.request({ permissions: ["nativeMessaging"] });
+  if (granted) {
+    const check = (await chrome.runtime.sendMessage({ type: "test_native_host" })) as {
+      ok?: boolean;
+      needsReload?: boolean;
+    };
+    if (check?.needsReload) {
+      nativeStatus.textContent = "Activating native messaging...";
+      nativeStatus.className = "status-text";
+      await reloadToActivatePermission();
+      return;
+    }
   }
   await refreshPermissionsUI();
 });
@@ -152,7 +172,13 @@ btnNativeTest.addEventListener("click", async () => {
     version?: string;
     platform?: string;
     error?: string;
+    needsReload?: boolean;
   };
+  if (resp?.needsReload) {
+    nativeStatus.textContent = "Reloading extension to activate native messaging...";
+    await reloadToActivatePermission();
+    return;
+  }
   if (resp?.ok) {
     nativeStatus.textContent = `Connected: tab-reaper-host v${resp.version} (${resp.platform})`;
     nativeStatus.className = "status-text ok";
@@ -166,8 +192,15 @@ btnHostPerm.addEventListener("click", async () => {
   const hasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
   if (hasHost) {
     await chrome.permissions.remove(WEIGHTED_EVICTION_PERMS);
-  } else {
-    await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
+    await refreshPermissionsUI();
+    return;
+  }
+  const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
+  if (granted && !chrome.scripting?.executeScript) {
+    hostStatus.textContent = "Activating weighted eviction...";
+    hostStatus.className = "status-text";
+    await reloadToActivatePermission();
+    return;
   }
   await refreshPermissionsUI();
 });

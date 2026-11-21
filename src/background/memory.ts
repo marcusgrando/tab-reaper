@@ -18,6 +18,7 @@ interface NativePingResponse {
   version?: string;
   platform?: string;
   error?: string;
+  needsReload?: boolean;
 }
 
 export async function hasNativeMessagingPermission(): Promise<boolean> {
@@ -33,6 +34,15 @@ export async function pingNativeHost(): Promise<NativePingResponse> {
   if (!granted) {
     return { ok: false, error: "nativeMessaging permission not granted" };
   }
+  // Chrome MV3 does not attach sendNativeMessage to an already-running service worker
+  // when nativeMessaging is granted as an optional permission until the extension reloads.
+  if (typeof chrome.runtime.sendNativeMessage !== "function") {
+    return {
+      ok: false,
+      error: "Extension reload required to activate native messaging.",
+      needsReload: true,
+    };
+  }
   try {
     const response = (await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
       cmd: "ping",
@@ -45,7 +55,7 @@ export async function pingNativeHost(): Promise<NativePingResponse> {
 
 export async function getMemorySnapshot(config: TabReaperConfig, now = Date.now()): Promise<MemorySnapshot> {
   const nativeAllowed = await hasNativeMessagingPermission();
-  if (nativeAllowed) {
+  if (nativeAllowed && typeof chrome.runtime.sendNativeMessage === "function") {
     try {
       const response = (await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
         cmd: "chrome_memory",

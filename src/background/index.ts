@@ -22,7 +22,20 @@ import {
 } from "./tracker.ts";
 
 const SWEEP_ALARM = "tabReaper.sweep";
+const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 let sweepInFlight = false;
+
+async function maybeReopenOptions(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(REOPEN_OPTIONS_KEY);
+    if (stored[REOPEN_OPTIONS_KEY]) {
+      await chrome.storage.local.remove(REOPEN_OPTIONS_KEY);
+      await chrome.runtime.openOptionsPage();
+    }
+  } catch {
+    // Best-effort reopen after optional-permission reload.
+  }
+}
 
 function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
   if (typeof tab.id !== "number") return null;
@@ -292,3 +305,4 @@ function escapeXml(value: string): string {
 }
 
 void ensureAlarm();
+void maybeReopenOptions();
