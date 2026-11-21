@@ -86,68 +86,98 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
   return weights;
 }
 
-function detectUnsavedFormInPage(): boolean {
-  const host = location.hostname.toLowerCase();
-  // Auto-saving cloud editors continuously persist changes and use hidden/JS-populated inputs.
-  const autoSaveHosts = [
-    "docs.google.com",
-    "notion.so",
-    "www.notion.so",
-    "figma.com",
-    "www.figma.com",
-    "miro.com",
-    "coda.io",
-    "airtable.com",
-  ];
-  if (autoSaveHosts.some((h) => host === h || host.endsWith(`.${h}`))) {
-    return false;
-  }
-
-  const isVisibleEditable = (el: HTMLElement): boolean => {
-    if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
-    if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
-    if (el.closest("header, nav, [role='toolbar'], [role='search'], [role='menubar']")) return false;
-    const role = (el.getAttribute("role") || "").toLowerCase();
-    if (role === "searchbox" || role === "combobox") return false;
-    return true;
-  };
-
-  const textareas = document.querySelectorAll("textarea");
-  for (const ta of textareas) {
-    if (ta.disabled || ta.readOnly || !isVisibleEditable(ta)) continue;
-    if (ta.value !== ta.defaultValue && ta.value.trim().length >= 3) {
-      return true;
+function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
+  const detectUnsavedForm = (): boolean => {
+    const host = location.hostname.toLowerCase();
+    // Auto-saving cloud editors continuously persist changes and use hidden/JS-populated inputs.
+    const autoSaveHosts = [
+      "docs.google.com",
+      "notion.so",
+      "www.notion.so",
+      "figma.com",
+      "www.figma.com",
+      "miro.com",
+      "coda.io",
+      "airtable.com",
+    ];
+    if (autoSaveHosts.some((h) => host === h || host.endsWith(`.${h}`))) {
+      return false;
     }
-  }
 
-  const skipTypes = new Set([
-    "hidden",
-    "password",
-    "submit",
-    "button",
-    "reset",
-    "image",
-    "checkbox",
-    "radio",
-    "file",
-    "search",
-    "range",
-    "color",
-  ]);
-  const forms = document.querySelectorAll("form");
-  for (const form of forms) {
-    if (!form.querySelector("button[type='submit'], input[type='submit'], button:not([type])")) continue;
-    const inputs = form.querySelectorAll("input");
-    for (const input of inputs) {
-      const type = (input.type || "text").toLowerCase();
-      if (skipTypes.has(type) || input.disabled || input.readOnly || !isVisibleEditable(input)) continue;
-      if (input.value !== input.defaultValue && input.value.trim().length > 0) {
+    const isVisibleEditable = (el: HTMLElement): boolean => {
+      if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
+      if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
+      if (el.closest("header, nav, [role='toolbar'], [role='search'], [role='menubar']")) return false;
+      const role = (el.getAttribute("role") || "").toLowerCase();
+      if (role === "searchbox" || role === "combobox") return false;
+      return true;
+    };
+
+    const textareas = document.querySelectorAll("textarea");
+    for (const ta of textareas) {
+      if (ta.disabled || ta.readOnly || !isVisibleEditable(ta)) continue;
+      if (ta.value !== ta.defaultValue) {
         return true;
       }
     }
+
+    const skipTypes = new Set([
+      "hidden",
+      "password",
+      "submit",
+      "button",
+      "reset",
+      "image",
+      "search",
+    ]);
+    const inputs = document.querySelectorAll("input");
+    for (const input of inputs) {
+      const type = (input.type || "text").toLowerCase();
+      if (skipTypes.has(type) || input.disabled || input.readOnly || !isVisibleEditable(input)) continue;
+      if (type === "checkbox" || type === "radio") {
+        if (input.checked !== input.defaultChecked) return true;
+      } else if (input.value !== input.defaultValue) {
+        if (type !== "range" && type !== "color") return true;
+        // The browser supplies a value even when the markup omits one.
+        const pristine = input.cloneNode(false) as HTMLInputElement;
+        pristine.value = input.defaultValue;
+        if (input.value !== pristine.value) return true;
+      }
+    }
+    const selects = document.querySelectorAll("select");
+    for (const select of selects) {
+      if (select.disabled || !isVisibleEditable(select)) continue;
+      const options = Array.from(select.options);
+      if (select.multiple) {
+        if (options.some((opt) => opt.selected !== opt.defaultSelected)) return true;
+      } else {
+        let initialIndex = -1;
+        for (let i = 0; i < options.length; i++) {
+          if (options[i]!.defaultSelected) initialIndex = i;
+        }
+        if (initialIndex === -1 && select.size <= 1) {
+          initialIndex = options.findIndex((opt) => !opt.disabled && !opt.closest("optgroup[disabled]"));
+        }
+        if (select.selectedIndex !== initialIndex) return true;
+      }
+    }
+
+    return false;
+  };
+
+  const hasUnsavedForm = detectUnsavedForm();
+  if (!includeMetrics) return hasUnsavedForm;
+  if (window !== window.top) {
+    return { jsHeapBytes: 0, domNodes: 0, mediaNodes: 0, hasUnsavedForm };
   }
 
-  return false;
+  const perf = performance as Performance & {
+    memory?: { usedJSHeapSize?: number };
+  };
+  const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
+  const domNodes = document.getElementsByTagName("*").length;
+  const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
+  return { jsHeapBytes, domNodes, mediaNodes, hasUnsavedForm };
 }
 
 export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
@@ -156,10 +186,11 @@ export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
   if (!hostAccess) return false;
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: detectUnsavedFormInPage,
+      target: { tabId, allFrames: true },
+      func: inspectPageInTab,
+      args: [false],
     });
-    return Boolean(results[0]?.result);
+    return results.some((frame) => Boolean(frame?.result));
   } catch {
     return false;
   }
@@ -168,33 +199,26 @@ export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
 async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSample | null> {
   if (!chrome.scripting?.executeScript) return null;
   try {
-    const [metricsResults, formResults] = await Promise.all([
-      chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => {
-          const perf = performance as Performance & {
-            memory?: { usedJSHeapSize?: number };
-          };
-          const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
-          const domNodes = document.getElementsByTagName("*").length;
-          const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
-          return { jsHeapBytes, domNodes, mediaNodes };
-        },
-      }),
-      chrome.scripting.executeScript({
-        target: { tabId },
-        func: detectUnsavedFormInPage,
-      }),
-    ]);
-    const metrics = metricsResults[0]?.result as RawPageMetrics | undefined;
-    if (!metrics) return null;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: inspectPageInTab,
+      args: [true],
+    });
+    const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
+    const metrics = topFrame?.result as RawPageMetrics | undefined;
+    if (!metrics || typeof metrics !== "object") return null;
+
+    const hasUnsavedForm = results.some((frame) => {
+      const res = frame?.result as RawPageMetrics | undefined;
+      return Boolean(res && typeof res === "object" && res.hasUnsavedForm);
+    });
 
     return {
       jsHeapBytes: metrics.jsHeapBytes,
       domNodes: metrics.domNodes,
       mediaNodes: metrics.mediaNodes,
       weightMultiplier: computeWeightMultiplier(metrics),
-      hasUnsavedForm: Boolean(formResults[0]?.result),
+      hasUnsavedForm,
       sampledAt: now,
     };
   } catch {

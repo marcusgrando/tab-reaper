@@ -8,20 +8,19 @@ Tab Reaper runs entirely on your device. It does not collect, transmit, sell, or
 
 By default, all data used by Tab Reaper stays inside your browser profile:
 
-- **Extension settings** (`chrome.storage.local`): your memory budget, tab limits, timeouts, and protected domain allowlist.
-- **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to decide when an idle tab should be discarded or archived across browser restarts.
-- **Archived tabs** (`chrome.storage.local` and `chrome.bookmarks`): titles, URLs, and favicon URLs of tabs archived by Tab Reaper. Bookmarks stored in your chosen folder follow your browser's own Chrome Sync settings if you have Chrome Sync enabled.
-- **Local session snapshots** (`chrome.storage.local`, key `tabReaper.sessionSnapshots`): up to 5 recent auto snapshots (plus pending manual snapshots, capped at 1 MB total) of open `http(s)` tabs (URL, title, order, pinned/kept state, window state, and tab group metadata) captured locally every 5 minutes when tabs change, before restores, and on window close for crash recovery. Snapshots never sync via Chrome Sync and can be disabled or cleared at any time in Settings.
-- **Window recovery cache** (`chrome.storage.session`): while automatic snapshots are enabled, Tab Reaper keeps open tabs’ URLs, titles, and window metadata in session storage to capture a closing window after the extension worker restarts.
+- **Extension settings** (`chrome.storage.local`): your memory budget, eviction thresholds, timeouts, snapshot interval, and protected domain allowlist.
+- **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to decide when an idle tab should be discarded across browser restarts.
+- **Local session snapshot cache** (`chrome.storage.local`, key `tabReaper.sessionSnapshots`): active only when Folder Sync is configured. Stores up to 5 recent auto snapshots (plus pending manual snapshots, capped at 1 MB total) of open `http(s)` tabs (URL, title, order, pinned/kept state, window state, and tab group metadata) captured on your configured interval (`1` to `1440` minutes, default `5`), before restores, on window close, and on manual save. Snapshots never sync via Chrome Sync and can be cleared at any time in Settings.
+- **Window recovery cache** (`chrome.storage.session`): active only when Folder Sync and automatic snapshots are enabled. Keeps open tabs' URLs, titles, and window metadata in session storage to capture a closing window after the extension worker restarts.
 - **Transient weight cache** (`chrome.storage.session`): short-lived numeric metrics (JS heap size, DOM node count, media element count) cleared when Chrome closes.
 
 ## Optional Folder Sync (Off by Default)
 
-If you install the optional Local Companion (`com.tabreaper.host`) **and** explicitly select a sync folder for this Chrome profile in Settings, Tab Reaper writes JSON files inside that user-chosen directory under `devices/<deviceId>/`:
+Session snapshots are gated on Folder Sync. If you install the optional Local Companion (`com.tabreaper.host`) **and** explicitly select a sync folder for this Chrome profile in Settings, Tab Reaper writes JSON files inside that user-chosen directory under `devices/<deviceId>/`:
 
-- **Session snapshots** (`snapshots/*.json`, `index.json`, and `index-parts/*.json` for larger collections): retained with up to 20 recent, 24 hourly, 30 daily, and unlimited manual snapshots.
-- **Extension settings** (`config.json`): your Tab Reaper configuration and allowlist.
-- **Archived tabs and deletion markers** (`archive.json` and its generation-specific part files): archived tab metadata and the normalized URLs of deleted entries. Turning off Folder Sync clears the deletion markers from your browser profile. If a deletion had not reached the folder, the entry can reappear from another device when you turn sync back on.
+- **Device metadata** (`meta.json`): device ID, device name (defaults to and follows the computer's hostname automatically, or uses your optional Settings override), and last seen timestamp.
+- **Session snapshots** (`snapshots/*.json`, `index.json`, and `index-parts/*.json` for larger collections): retained with up to 20 recent, 24 hourly, 30 daily, and unlimited manual snapshots. Rotation keeps the newest whole-session backup. Automatic capture interval is configurable from `1` to `1440` minutes (default `5`).
+- **Extension settings** include your configuration and domain allowlist in `config-v2.json`.
 
 Tab Reaper itself makes zero network requests. If you choose a folder managed by an OS cloud client (such as iCloud Drive, Google Drive, OneDrive, Dropbox, or Syncthing), that provider replicates those files according to your own account settings and privacy policy. Each Chrome profile opts in independently via its own `deviceId`.
 
@@ -29,12 +28,11 @@ Tab Reaper itself makes zero network requests. If you choose a folder managed by
 
 ### Core Permissions
 
-- `tabs`: list open tabs, discard inactive tabs to free RAM, close tabs after archiving, and restore saved snapshots.
-- `storage`: persist settings, activity timestamps, local session snapshots, and the local archive index.
+- `tabs`: list open tabs, discard inactive tabs to free RAM, and restore saved snapshots.
+- `storage`: persist settings, activity timestamps, and the local session snapshot cache when Folder Sync is configured.
 - `alarms`: run periodic memory, snapshot, and idle-tab checks in the background.
-- `bookmarks`: save and remove archived tabs in your dedicated bookmark folder.
 - `system.memory`: read total and available system RAM to enforce the memory budget without external software.
-- `tabGroups`: preserve and restore tab group metadata for archived tabs and local session snapshots.
+- `tabGroups`: preserve and restore tab group metadata for session snapshots.
 
 ### Optional Permissions (Off by Default)
 

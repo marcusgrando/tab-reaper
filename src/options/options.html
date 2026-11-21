@@ -12,7 +12,10 @@
 
       <form id="settings-form">
         <section class="card">
-          <h2>Memory &amp; Tab Limits</h2>
+          <h2>Memory &amp; Eviction Bands</h2>
+          <p class="hint">
+            Below the idle threshold, all tabs stay loaded. Between the idle and size thresholds, idle tabs sleep oldest first (up to 2 per cycle). At or above the size threshold, heaviest tabs sleep first when Weighted Eviction is enabled (otherwise oldest idle).
+          </p>
 
           <div class="field">
             <div class="field-header">
@@ -43,26 +46,26 @@
 
           <div class="field">
             <div class="field-header">
-              <label for="max-active-tabs">Max loaded tabs kept in RAM</label>
-              <button type="button" class="reset-btn hidden" data-reset="maxActiveTabs"></button>
+              <label for="idle-eviction-percent">Start sleeping idle tabs at (% of budget, 10 – 100)</label>
+              <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
             </div>
-            <input id="max-active-tabs" type="number" min="1" max="200" step="1" />
+            <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
           </div>
 
           <div class="field">
             <div class="field-header">
-              <label for="discard-minutes">Discard idle tabs after (minutes, 0 = disabled)</label>
+              <label for="size-eviction-percent">Start sleeping heaviest tabs first at (% of budget, 10 – 100)</label>
+              <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
+            </div>
+            <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
+          </div>
+
+          <div class="field">
+            <div class="field-header">
+              <label for="discard-minutes">Idle time before sleeping a tab (minutes, 0 = disabled)</label>
               <button type="button" class="reset-btn hidden" data-reset="discardAfterMinutes"></button>
             </div>
             <input id="discard-minutes" type="number" min="0" max="10080" step="1" />
-          </div>
-
-          <div class="field">
-            <div class="field-header">
-              <label for="archive-hours">Auto-archive inactive tabs after (hours, default 168 = 7 days, 0 = disabled)</label>
-              <button type="button" class="reset-btn hidden" data-reset="archiveAfterHours"></button>
-            </div>
-            <input id="archive-hours" type="number" min="0" max="8760" step="1" />
           </div>
 
           <div class="checkbox-row">
@@ -75,7 +78,7 @@
         </section>
 
         <section class="card">
-          <h2>Protections &amp; Auto-Bookmark</h2>
+          <h2>Protections</h2>
 
           <div class="checkbox-row">
             <label class="checkbox">
@@ -117,22 +120,6 @@
             <button type="button" class="reset-btn hidden" data-reset="skipWhenOffline"></button>
           </div>
 
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="enable-snapshots" type="checkbox" />
-              <span>Save automatic local session snapshots (every 5 min)</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="enableSessionSnapshots"></button>
-          </div>
-
-          <div class="field">
-            <div class="field-header">
-              <label for="bookmark-folder">Bookmark folder name (under Other Bookmarks)</label>
-              <button type="button" class="reset-btn hidden" data-reset="bookmarkFolderName"></button>
-            </div>
-            <input id="bookmark-folder" type="text" />
-          </div>
-
           <div class="field">
             <div class="field-header">
               <label for="allowlist">Protected domains or glob patterns (one per line)</label>
@@ -155,7 +142,7 @@
           <div>
             <strong>Local Companion (Exact Chrome RAM + Folder Sync)</strong>
             <p class="hint">
-              Optional. Measures exact Chrome process memory on macOS, Linux, and Windows instead of OS-wide RAM, and enables conflict-free backup &amp; sync of snapshots, settings, and archived tabs to any local or cloud-synced folder (iCloud Drive, Google Drive, OneDrive, Dropbox).
+              Optional. Measures exact Chrome process memory on macOS, Linux, and Windows instead of OS-wide RAM, and enables conflict-free backup &amp; sync of snapshots and settings to any local or cloud-synced folder (iCloud Drive, Google Drive, OneDrive, Dropbox).
             </p>
             <div class="install-cmd-row">
               <code id="install-cmd"></code>
@@ -192,7 +179,7 @@
           </div>
         </div>
         <p class="hint">
-          Sync snapshots, settings, and archived tabs across devices using a folder synced by your OS (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing). Each device writes only its own files so concurrent devices never conflict.
+          Sync snapshots and settings across devices using a folder synced by your OS (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing). Each device writes only its own files so concurrent devices never conflict.
         </p>
         <div id="sync-status" class="status-text"></div>
 
@@ -218,10 +205,30 @@
               <button id="btn-device-name" type="button" class="secondary small">Save Name</button>
             </div>
           </div>
+
+          <div id="sync-snapshots-config" class="hidden">
+            <div class="checkbox-row">
+              <label class="checkbox">
+                <input id="enable-snapshots" type="checkbox" />
+                <span>Save automatic session snapshots</span>
+              </label>
+              <button type="button" class="reset-btn hidden" data-reset="enableSessionSnapshots"></button>
+            </div>
+
+            <div class="field">
+              <div class="field-header">
+                <label for="snapshot-interval-minutes">Automatic snapshot interval (minutes, 1 – 1440 / 24h)</label>
+                <button type="button" class="reset-btn hidden" data-reset="snapshotIntervalMinutes"></button>
+              </div>
+              <input id="snapshot-interval-minutes" type="number" min="1" max="1440" step="1" />
+            </div>
+
+            <div id="sync-snapshots-status" class="status-text"></div>
+          </div>
         </div>
       </section>
 
-      <section class="card">
+      <section class="card hidden" id="snapshots-card">
         <div class="section-head">
           <h2>Session Recovery (Snapshots)</h2>
           <div class="cap-buttons">
@@ -229,7 +236,7 @@
           </div>
         </div>
         <p class="hint">
-          Saves up to 5 snapshots locally and, when Folder Sync is enabled, retains 20 recent + 24 hourly + 30 daily + unlimited manual snapshots across all your devices with window, order, pinned, kept, and tab group metadata.
+          Saves up to 5 recent snapshots locally and retains 20 recent + 24 hourly + 30 daily + unlimited manual snapshots in your sync folder across all your devices with window, order, pinned, kept, and tab group metadata.
         </p>
         <div class="inline-row" style="margin-bottom: 8px">
           <input id="snapshot-label" type="text" maxlength="80" placeholder="Optional label for manual snapshot (never auto-pruned)" />

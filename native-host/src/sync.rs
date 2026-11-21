@@ -47,6 +47,24 @@ pub struct SyncStatus {
     pub hostname: String,
 }
 
+impl SyncStatus {
+    fn disabled(hostname: String) -> Self {
+        Self {
+            enabled: false,
+            sync_dir: None,
+            writable: false,
+            hostname,
+        }
+    }
+}
+
+fn temp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
 pub fn get_hostname() -> String {
     if let Ok(h) = env::var("COMPUTERNAME") {
         let trimmed = h.trim();
@@ -160,14 +178,46 @@ fn lock_config(exclusive: bool) -> Result<fs::File, String> {
     Ok(file)
 }
 
-pub fn lock_destination(device_id: &str, expected: Option<&str>) -> Result<fs::File, String> {
+pub struct DestinationGuard {
+    _lock: fs::File,
+    device_id: String,
+    root: PathBuf,
+}
+
+impl DestinationGuard {
+    pub fn write(&self, rel_path: &str, content: &str) -> Result<usize, String> {
+        write_in_root(&self.device_id, &self.root, rel_path, content)
+    }
+
+    pub fn read(&self, rel_path: &str) -> Result<Option<String>, String> {
+        read_in_root(&self.root, rel_path)
+    }
+
+    pub fn delete(&self, rel_path: &str) -> Result<bool, String> {
+        delete_in_root(&self.device_id, &self.root, rel_path)
+    }
+
+    pub fn list(
+        &self,
+        rel_prefix: Option<&str>,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<SyncFileEntry>, String> {
+        list_in_root(&self.root, rel_prefix, max_depth)
+    }
+}
+
+pub fn lock_destination(device_id: &str, expected: Option<&str>) -> Result<DestinationGuard, String> {
     let expected = expected.ok_or("missing expectedDir")?;
     let lock = lock_config(false)?;
-    let (_, root) = require_sync_root_path(device_id)?;
+    let (dev, root) = require_sync_root_path(device_id)?;
     if root.as_os_str() != std::ffi::OsStr::new(expected) {
         return Err("sync folder changed".to_string());
     }
-    Ok(lock)
+    Ok(DestinationGuard {
+        _lock: lock,
+        device_id: dev,
+        root,
+    })
 }
 
 pub fn save_host_config(cfg: &HostConfig) -> Result<(), String> {
@@ -177,11 +227,11 @@ pub fn save_host_config(cfg: &HostConfig) -> Result<(), String> {
         return Err("host config has no parent dir".to_string());
     };
     fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = parent.join(format!(".tmp.{}.{}.host.json", std::process::id(), nanos));
+    let tmp = parent.join(format!(
+        ".tmp.{}.{}.host.json",
+        std::process::id(),
+        temp_nanos()
+    ));
     let mut f = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -216,14 +266,10 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
 }
 
 fn check_writable(dir: &Path) -> bool {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     let Ok(root) = open_root(dir) else {
         return false;
     };
-    let probe = format!(".tab-reaper-probe-{}-{nanos}.tmp", std::process::id());
+    let probe = format!(".tab-reaper-probe-{}-{}.tmp", std::process::id(), temp_nanos());
     match root.open_with(&probe, DirOptions::new().write(true).create_new(true)) {
         Ok(file) => {
             drop(file);
@@ -241,12 +287,7 @@ pub fn set_sync_folder(device_id: &str, raw_path: Option<&str>) -> Result<SyncSt
     let Some(raw) = raw_path.map(str::trim).filter(|s| !s.is_empty()) else {
         cfg.sync_dirs.remove(&dev);
         save_host_config(&cfg)?;
-        return Ok(SyncStatus {
-            enabled: false,
-            sync_dir: None,
-            writable: false,
-            hostname: get_hostname(),
-        });
+        return Ok(SyncStatus::disabled(get_hostname()));
     };
 
     let expanded = expand_tilde(raw)?;
@@ -275,30 +316,15 @@ pub fn set_sync_folder(device_id: &str, raw_path: Option<&str>) -> Result<SyncSt
 pub fn get_sync_status(device_id: Option<&str>) -> SyncStatus {
     let hostname = get_hostname();
     let Some(raw_dev) = device_id else {
-        return SyncStatus {
-            enabled: false,
-            sync_dir: None,
-            writable: false,
-            hostname,
-        };
+        return SyncStatus::disabled(hostname);
     };
     let Ok(dev) = validate_device_id(raw_dev) else {
-        return SyncStatus {
-            enabled: false,
-            sync_dir: None,
-            writable: false,
-            hostname,
-        };
+        return SyncStatus::disabled(hostname);
     };
 
     let cfg = read_host_config().unwrap_or_default();
     let Some(dir) = cfg.sync_dirs.get(&dev).cloned() else {
-        return SyncStatus {
-            enabled: false,
-            sync_dir: None,
-            writable: false,
-            hostname,
-        };
+        return SyncStatus::disabled(hostname);
     };
     let path = Path::new(&dir);
     let writable = path.is_dir() && check_writable(path);
@@ -308,6 +334,86 @@ pub fn get_sync_status(device_id: Option<&str>) -> SyncStatus {
         writable,
         hostname,
     }
+}
+
+fn push_candidate(
+    out: &mut Vec<FolderCandidate>,
+    provider: &str,
+    label: impl Into<String>,
+    base: &Path,
+) {
+    let target = base.join(SYNC_SUBDIR_NAME);
+    out.push(FolderCandidate {
+        provider: provider.to_string(),
+        label: label.into(),
+        path: target.to_string_lossy().to_string(),
+        exists: target.is_dir(),
+    });
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_preserved_cloud_storage_name(name: &str) -> bool {
+    let Some(without_close) = name.strip_suffix(')') else {
+        return false;
+    };
+    let Some((prefix, inner)) = without_close.rsplit_once(" (") else {
+        return false;
+    };
+    if prefix.is_empty() || inner.is_empty() {
+        return false;
+    }
+    let has_digit = inner.bytes().any(|b| b.is_ascii_digit());
+    let has_separator = inner.bytes().any(|b| matches!(b, b'-' | b':'));
+    has_digit
+        && has_separator
+        && inner
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b' '))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_preserved_cloud_storage_dir(dir: &Path) -> bool {
+    let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    is_preserved_cloud_storage_name(name)
+        || dir.join(".drive_fs_ignore_preserved_domain").exists()
+}
+
+#[cfg(target_os = "macos")]
+fn has_file_provider_domain_id(path: &Path) -> bool {
+    use std::ffi::{c_char, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn getxattr(
+            path: *const c_char,
+            name: *const c_char,
+            value: *mut c_void,
+            size: usize,
+            position: u32,
+            options: i32,
+        ) -> isize;
+    }
+
+    const ENOATTR: i32 = 93;
+
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let attr = b"com.apple.file-provider-domain-id\0";
+    let ret = unsafe {
+        getxattr(
+            c_path.as_ptr(),
+            attr.as_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(ENOATTR)
 }
 
 pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
@@ -323,13 +429,7 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
             .join("Mobile Documents")
             .join("com~apple~CloudDocs");
         if icloud.is_dir() {
-            let target = icloud.join(SYNC_SUBDIR_NAME);
-            out.push(FolderCandidate {
-                provider: "icloud".to_string(),
-                label: "iCloud Drive".to_string(),
-                path: target.to_string_lossy().to_string(),
-                exists: target.is_dir(),
-            });
+            push_candidate(&mut out, "icloud", "iCloud Drive", &icloud);
         }
 
         let cloud_storage = home.join("Library").join("CloudStorage");
@@ -341,53 +441,30 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
                 .collect();
             dirs.sort();
             for dir in dirs {
+                if is_preserved_cloud_storage_dir(&dir) || !has_file_provider_domain_id(&dir) {
+                    continue;
+                }
                 let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if name.starts_with("GoogleDrive-") {
+                if let Some(account) = name.strip_prefix("GoogleDrive-") {
                     let my_drive = dir.join("My Drive");
-                    let base = if my_drive.is_dir() {
-                        my_drive
-                    } else {
-                        dir.clone()
-                    };
-                    let target = base.join(SYNC_SUBDIR_NAME);
-                    out.push(FolderCandidate {
-                        provider: "google_drive".to_string(),
-                        label: format!(
-                            "Google Drive ({})",
-                            name.trim_start_matches("GoogleDrive-")
-                        ),
-                        path: target.to_string_lossy().to_string(),
-                        exists: target.is_dir(),
-                    });
-                } else if name.starts_with("OneDrive-") {
-                    let target = dir.join(SYNC_SUBDIR_NAME);
-                    out.push(FolderCandidate {
-                        provider: "onedrive".to_string(),
-                        label: format!("OneDrive ({})", name.trim_start_matches("OneDrive-")),
-                        path: target.to_string_lossy().to_string(),
-                        exists: target.is_dir(),
-                    });
+                    let base = if my_drive.is_dir() { &my_drive } else { &dir };
+                    push_candidate(
+                        &mut out,
+                        "google_drive",
+                        format!("Google Drive ({account})"),
+                        base,
+                    );
+                } else if let Some(account) = name.strip_prefix("OneDrive-") {
+                    push_candidate(&mut out, "onedrive", format!("OneDrive ({account})"), &dir);
                 } else if name.starts_with("Dropbox") {
-                    let target = dir.join(SYNC_SUBDIR_NAME);
-                    out.push(FolderCandidate {
-                        provider: "dropbox".to_string(),
-                        label: "Dropbox".to_string(),
-                        path: target.to_string_lossy().to_string(),
-                        exists: target.is_dir(),
-                    });
+                    push_candidate(&mut out, "dropbox", "Dropbox", &dir);
                 }
             }
         }
 
         let dropbox = home.join("Dropbox");
         if dropbox.is_dir() && !out.iter().any(|c| c.provider == "dropbox") {
-            let target = dropbox.join(SYNC_SUBDIR_NAME);
-            out.push(FolderCandidate {
-                provider: "dropbox".to_string(),
-                label: "Dropbox".to_string(),
-                path: target.to_string_lossy().to_string(),
-                exists: target.is_dir(),
-            });
+            push_candidate(&mut out, "dropbox", "Dropbox", &dropbox);
         }
     }
 
@@ -395,46 +472,22 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
     {
         if let Some(onedrive) = env::var_os("OneDrive").map(PathBuf::from) {
             if onedrive.is_dir() {
-                let target = onedrive.join(SYNC_SUBDIR_NAME);
-                out.push(FolderCandidate {
-                    provider: "onedrive".to_string(),
-                    label: "OneDrive".to_string(),
-                    path: target.to_string_lossy().to_string(),
-                    exists: target.is_dir(),
-                });
+                push_candidate(&mut out, "onedrive", "OneDrive", &onedrive);
             }
         }
         let icloud = home.join("iCloudDrive");
         if icloud.is_dir() {
-            let target = icloud.join(SYNC_SUBDIR_NAME);
-            out.push(FolderCandidate {
-                provider: "icloud".to_string(),
-                label: "iCloud Drive".to_string(),
-                path: target.to_string_lossy().to_string(),
-                exists: target.is_dir(),
-            });
+            push_candidate(&mut out, "icloud", "iCloud Drive", &icloud);
         }
         for gd in [PathBuf::from("G:\\My Drive"), home.join("Google Drive")] {
             if gd.is_dir() {
-                let target = gd.join(SYNC_SUBDIR_NAME);
-                out.push(FolderCandidate {
-                    provider: "google_drive".to_string(),
-                    label: "Google Drive".to_string(),
-                    path: target.to_string_lossy().to_string(),
-                    exists: target.is_dir(),
-                });
+                push_candidate(&mut out, "google_drive", "Google Drive", &gd);
                 break;
             }
         }
         let dropbox = home.join("Dropbox");
         if dropbox.is_dir() {
-            let target = dropbox.join(SYNC_SUBDIR_NAME);
-            out.push(FolderCandidate {
-                provider: "dropbox".to_string(),
-                label: "Dropbox".to_string(),
-                path: target.to_string_lossy().to_string(),
-                exists: target.is_dir(),
-            });
+            push_candidate(&mut out, "dropbox", "Dropbox", &dropbox);
         }
     }
 
@@ -447,13 +500,7 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
             ("documents", "Documents", home.join("Documents")),
         ] {
             if folder.is_dir() {
-                let target = folder.join(SYNC_SUBDIR_NAME);
-                out.push(FolderCandidate {
-                    provider: provider.to_string(),
-                    label: label.to_string(),
-                    path: target.to_string_lossy().to_string(),
-                    exists: target.is_dir(),
-                });
+                push_candidate(&mut out, provider, label, &folder);
             }
         }
     }
@@ -678,22 +725,17 @@ fn optional<T>(result: io::Result<T>) -> Result<Option<T>, String> {
     }
 }
 
-pub fn sync_write(device_id: &str, rel_path: &str, content: &str) -> Result<usize, String> {
+fn write_in_root(device_id: &str, root: &Path, rel_path: &str, content: &str) -> Result<usize, String> {
     if content.len() > MAX_SYNC_FILE_BYTES {
         return Err(format!(
             "file exceeds max size ({MAX_SYNC_FILE_BYTES} bytes)"
         ));
     }
-    let (dev, root) = require_sync_root_path(device_id)?;
-    let parts = require_owned_rel_path(&dev, rel_path)?;
+    let parts = require_owned_rel_path(device_id, rel_path)?;
     let (name, parents) = parts.split_last().ok_or("empty path")?;
-    let dir = open_subdir(open_root(&root).map_err(|e| e.to_string())?, parents, true)
+    let dir = open_subdir(open_root(root).map_err(|e| e.to_string())?, parents, true)
         .map_err(|e| format!("open sync directory: {e}"))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp = format!(".tmp.{}.{nanos}", std::process::id());
+    let tmp = format!(".tmp.{}.{}", std::process::id(), temp_nanos());
     let mut options = DirOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -712,11 +754,10 @@ pub fn sync_write(device_id: &str, rel_path: &str, content: &str) -> Result<usiz
     Ok(content.len())
 }
 
-pub fn sync_read(device_id: &str, rel_path: &str) -> Result<Option<String>, String> {
-    let (_, root) = require_sync_root_path(device_id)?;
+fn read_in_root(root: &Path, rel_path: &str) -> Result<Option<String>, String> {
     let parts = validate_rel_path(rel_path, false)?;
     let (name, parents) = parts.split_last().ok_or("empty path")?;
-    let root = open_root(&root).map_err(|e| format!("open sync folder: {e}"))?;
+    let root = open_root(root).map_err(|e| format!("open sync folder: {e}"))?;
     let Some(dir) = optional(open_subdir(root, parents, false))? else {
         return Ok(None);
     };
@@ -744,28 +785,26 @@ pub fn sync_read(device_id: &str, rel_path: &str) -> Result<Option<String>, Stri
     Ok(Some(result))
 }
 
-pub fn sync_delete(device_id: &str, rel_path: &str) -> Result<bool, String> {
-    let (dev, root) = require_sync_root_path(device_id)?;
-    let parts = require_owned_rel_path(&dev, rel_path)?;
+fn delete_in_root(device_id: &str, root: &Path, rel_path: &str) -> Result<bool, String> {
+    let parts = require_owned_rel_path(device_id, rel_path)?;
     let (name, parents) = parts.split_last().ok_or("empty path")?;
-    let root = open_root(&root).map_err(|e| format!("open sync folder: {e}"))?;
+    let root = open_root(root).map_err(|e| format!("open sync folder: {e}"))?;
     let Some(dir) = optional(open_subdir(root, parents, false))? else {
         return Ok(false);
     };
     Ok(optional(dir.remove_file(name))?.is_some())
 }
 
-pub fn sync_list(
-    device_id: &str,
+fn list_in_root(
+    root: &Path,
     rel_prefix: Option<&str>,
     max_depth: Option<usize>,
 ) -> Result<Vec<SyncFileEntry>, String> {
-    let (_, root) = require_sync_root_path(device_id)?;
     let mut parts = validate_rel_path(rel_prefix.unwrap_or(""), true)?;
     if parts.is_empty() {
         parts.push("devices".to_string());
     }
-    let root = open_root(&root).map_err(|e| format!("open sync folder: {e}"))?;
+    let root = open_root(root).map_err(|e| format!("open sync folder: {e}"))?;
     let Some(dir) = optional(open_subdir(root, &parts, false))? else {
         return Ok(Vec::new());
     };
@@ -783,6 +822,34 @@ pub fn sync_list(
             .then_with(|| a.rel_path.cmp(&b.rel_path))
     });
     Ok(entries)
+}
+
+#[cfg(test)]
+pub fn sync_write(device_id: &str, rel_path: &str, content: &str) -> Result<usize, String> {
+    let (dev, root) = require_sync_root_path(device_id)?;
+    write_in_root(&dev, &root, rel_path, content)
+}
+
+#[cfg(test)]
+pub fn sync_read(device_id: &str, rel_path: &str) -> Result<Option<String>, String> {
+    let (_, root) = require_sync_root_path(device_id)?;
+    read_in_root(&root, rel_path)
+}
+
+#[cfg(test)]
+pub fn sync_delete(device_id: &str, rel_path: &str) -> Result<bool, String> {
+    let (dev, root) = require_sync_root_path(device_id)?;
+    delete_in_root(&dev, &root, rel_path)
+}
+
+#[cfg(test)]
+pub fn sync_list(
+    device_id: &str,
+    rel_prefix: Option<&str>,
+    max_depth: Option<usize>,
+) -> Result<Vec<SyncFileEntry>, String> {
+    let (_, root) = require_sync_root_path(device_id)?;
+    list_in_root(&root, rel_prefix, max_depth)
 }
 
 fn collect_entries(
@@ -1000,6 +1067,51 @@ mod tests {
         assert!(!get_sync_status(Some("dev1")).writable);
 
         env::remove_var("TAB_REAPER_HOST_CONFIG");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn filters_preserved_cloud_storage_names_and_markers() {
+        assert!(!is_preserved_cloud_storage_name("GoogleDrive-eu@marcusgrando.com"));
+        assert!(!is_preserved_cloud_storage_name("OneDrive-Personal"));
+        assert!(!is_preserved_cloud_storage_name("OneDrive-Company (Work)"));
+        assert!(!is_preserved_cloud_storage_name("Dropbox"));
+        assert!(!is_preserved_cloud_storage_name("GoogleDrive-user@example.com ()"));
+
+        assert!(is_preserved_cloud_storage_name(
+            "GoogleDrive-eu@marcusgrando.com (12-12-23 09:22)"
+        ));
+        assert!(is_preserved_cloud_storage_name(
+            "GoogleDrive-marcus.grando@azion.com (08-08-24 09:29)"
+        ));
+        assert!(is_preserved_cloud_storage_name(
+            "OneDrive-Personal (2024-08-08 09:29:15)"
+        ));
+
+        let base = env::temp_dir().join(format!(
+            "tab-reaper-cloudstorage-test-{}-{}",
+            std::process::id(),
+            temp_nanos()
+        ));
+        let active = base.join("GoogleDrive-eu@marcusgrando.com");
+        let preserved_by_name = base.join("GoogleDrive-eu@marcusgrando.com (12-12-23 09:22)");
+        let preserved_by_marker = base.join("GoogleDrive-marcus.grando@azion.com");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&preserved_by_name).unwrap();
+        fs::create_dir_all(&preserved_by_marker).unwrap();
+        fs::write(
+            preserved_by_marker.join(".drive_fs_ignore_preserved_domain"),
+            b"",
+        )
+        .unwrap();
+
+        assert!(!is_preserved_cloud_storage_dir(&active));
+        assert!(is_preserved_cloud_storage_dir(&preserved_by_name));
+        assert!(is_preserved_cloud_storage_dir(&preserved_by_marker));
+
+        #[cfg(target_os = "macos")]
+        assert!(!has_file_provider_domain_id(&active));
+
         let _ = fs::remove_dir_all(&base);
     }
 }

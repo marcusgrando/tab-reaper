@@ -1,14 +1,15 @@
 import type { TabReaperConfig } from "./types.ts";
 
 export const CONFIG_STORAGE_KEY = "tabReaper.config";
+export const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 
 export const DEFAULT_CONFIG: TabReaperConfig = {
   memoryBudgetMode: "fraction",
   memoryBudgetFraction: 0.5,
   memoryBudgetGb: 4,
-  maxActiveTabs: 10,
+  idleEvictionPercent: 80,
+  sizeEvictionPercent: 100,
   discardAfterMinutes: 15,
-  archiveAfterHours: 168,
   startupSweep: true,
   protectActive: true,
   protectAudible: true,
@@ -16,7 +17,7 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   protectUnsavedForms: true,
   skipWhenOffline: true,
   enableSessionSnapshots: true,
-  bookmarkFolderName: "Auto-Archived Tabs",
+  snapshotIntervalMinutes: 5,
   allowlist: [],
 };
 
@@ -35,13 +36,17 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
   const memoryBudgetMode = merged.memoryBudgetMode === "fixed_gb" ? "fixed_gb" : "fraction";
   const memoryBudgetFraction = clampNumber(merged.memoryBudgetFraction, 0.1, 0.9, DEFAULT_CONFIG.memoryBudgetFraction);
   const memoryBudgetGb = clampNumber(merged.memoryBudgetGb, 0.5, 512, DEFAULT_CONFIG.memoryBudgetGb);
-  const maxActiveTabs = Math.round(clampNumber(merged.maxActiveTabs, 1, 200, DEFAULT_CONFIG.maxActiveTabs));
+  const idleEvictionPercent = Math.round(
+    clampNumber(merged.idleEvictionPercent, 10, 100, DEFAULT_CONFIG.idleEvictionPercent),
+  );
+  const rawSizeEvictionPercent = Math.round(
+    clampNumber(merged.sizeEvictionPercent, 10, 100, DEFAULT_CONFIG.sizeEvictionPercent),
+  );
+  const sizeEvictionPercent = Math.max(idleEvictionPercent, rawSizeEvictionPercent);
   const discardAfterMinutes = clampNumber(merged.discardAfterMinutes, 0, 10080, DEFAULT_CONFIG.discardAfterMinutes);
-  const archiveAfterHours = clampNumber(merged.archiveAfterHours, 0, 8760, DEFAULT_CONFIG.archiveAfterHours);
-  const bookmarkFolderName =
-    typeof merged.bookmarkFolderName === "string" && merged.bookmarkFolderName.trim().length > 0
-      ? merged.bookmarkFolderName.trim()
-      : DEFAULT_CONFIG.bookmarkFolderName;
+  const snapshotIntervalMinutes = Math.round(
+    clampNumber(merged.snapshotIntervalMinutes, 1, 1440, DEFAULT_CONFIG.snapshotIntervalMinutes),
+  );
 
   const allowlist = Array.isArray(merged.allowlist)
     ? merged.allowlist
@@ -53,9 +58,9 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     memoryBudgetMode,
     memoryBudgetFraction,
     memoryBudgetGb,
-    maxActiveTabs,
+    idleEvictionPercent,
+    sizeEvictionPercent,
     discardAfterMinutes,
-    archiveAfterHours,
     startupSweep: Boolean(merged.startupSweep),
     protectActive: Boolean(merged.protectActive),
     protectAudible: Boolean(merged.protectAudible),
@@ -63,7 +68,7 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     protectUnsavedForms: Boolean(merged.protectUnsavedForms),
     skipWhenOffline: Boolean(merged.skipWhenOffline),
     enableSessionSnapshots: Boolean(merged.enableSessionSnapshots),
-    bookmarkFolderName,
+    snapshotIntervalMinutes,
     allowlist: [...new Set(allowlist)],
   };
 }
@@ -86,6 +91,19 @@ export function isInternalUrl(url: string | undefined): boolean {
   if (!url) return true;
   const lower = url.toLowerCase();
   return INTERNAL_SCHEMES.some((scheme) => lower.startsWith(scheme));
+}
+
+export function isHttpUrl(url: unknown): url is string {
+  return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
+export function createAsyncQueue(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = tail.then(fn, fn);
+    tail = next.catch(() => {});
+    return next;
+  };
 }
 
 export function normalizeUrl(rawUrl: string): string {
@@ -192,8 +210,7 @@ export async function loadConfig(): Promise<TabReaperConfig> {
 }
 
 export async function saveConfig(partial: Partial<TabReaperConfig>): Promise<TabReaperConfig> {
-  const current = await loadConfig();
-  const next = sanitizeConfig({ ...current, ...partial });
+  const next = sanitizeConfig({ ...await loadConfig(), ...partial });
   await chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: next });
   return next;
 }

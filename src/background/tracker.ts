@@ -1,8 +1,9 @@
-import { isInternalUrl, normalizeUrl } from "../shared/config.ts";
+import { createAsyncQueue, isInternalUrl, normalizeUrl } from "../shared/config.ts";
 import type { ActivityState, TabSummary } from "../shared/types.ts";
 
 export const ACTIVITY_STORAGE_KEY = "tabReaper.activity";
 export const KEPT_TABS_STORAGE_KEY = "tabReaper.keptTabIds";
+export const enqueueActivityUpdate = createAsyncQueue();
 const MAX_TRACKED_URLS = 2000;
 
 export function createEmptyActivityState(): ActivityState {

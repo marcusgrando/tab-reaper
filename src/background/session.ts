@@ -1,4 +1,4 @@
-import { loadConfig, normalizeUrl } from "../shared/config.ts";
+import { createAsyncQueue, isHttpUrl, loadConfig, normalizeUrl } from "../shared/config.ts";
 import type {
   ActivityState,
   RestoreMode,
@@ -9,14 +9,13 @@ import type {
   SnapshotWindow,
   TabSummary,
 } from "../shared/types.ts";
-import { isArchivableUrl } from "./archive.ts";
 import {
   configureSyncFolder,
   getActiveSyncDir,
   deleteSyncedSnapshot,
   isFolderSyncOptedIn,
   loadPublishedSnapshotIds,
-  listDeviceSnapshotEntries,
+  findDeviceSnapshotEntry,
   utf8ByteLength,
   listSyncedSnapshots,
   loadDeviceIdentity,
@@ -25,6 +24,7 @@ import {
   readSyncedSnapshot,
 } from "./sync.ts";
 import {
+  enqueueActivityUpdate,
   getTabLastActiveAt,
   loadActivityState,
   loadKeptTabIds,
@@ -36,6 +36,7 @@ import {
 
 export const SNAPSHOTS_STORAGE_KEY = "tabReaper.sessionSnapshots";
 const UNPUBLISHED_MANUAL_IDS = "tabReaper.unpublishedManualIds";
+const LAST_WHOLE_SNAPSHOT_CACHE_KEY = "tabReaper.lastWholeSnapshotCache";
 export const MAX_SNAPSHOTS = 5;
 export const SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
 export const MAX_SNAPSHOT_URL_LEN = 4096;
@@ -46,17 +47,39 @@ const RECOVERY_MAX_CURRENT_TABS = 2;
 const RECOVERY_MIN_SNAPSHOT_TABS = 5;
 const RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-let restoreInFlight = false;
-let localSnapshotQueue: Promise<unknown> = Promise.resolve();
+interface WholeSnapshotCheck {
+  syncDir: string | null;
+  checkedAt: number;
+  id: string;
+  digest?: string;
+}
 
-function enqueueLocalSnapshotMutation<T>(fn: () => Promise<T>): Promise<T> {
-  const next = localSnapshotQueue.then(fn, fn);
-  localSnapshotQueue = next.catch(() => {});
-  return next;
+let restoreInFlight = false;
+const enqueueLocalSnapshotMutation = createAsyncQueue();
+
+async function loadWholeSnapshotCheck(): Promise<WholeSnapshotCheck | undefined> {
+  const stored = await chrome.storage.session?.get(LAST_WHOLE_SNAPSHOT_CACHE_KEY).catch(() => undefined);
+  return stored?.[LAST_WHOLE_SNAPSHOT_CACHE_KEY] as WholeSnapshotCheck | undefined;
+}
+
+async function rememberWholeSnapshotCheck(entry: WholeSnapshotCheck): Promise<void> {
+  await chrome.storage.session?.set({ [LAST_WHOLE_SNAPSHOT_CACHE_KEY]: entry }).catch(() => undefined);
+}
+
+async function clearWholeSnapshotCheck(): Promise<void> {
+  await chrome.storage.session?.remove(LAST_WHOLE_SNAPSHOT_CACHE_KEY).catch(() => undefined);
+}
+
+export function runSerializedWithSnapshots<T>(fn: () => Promise<T>): Promise<T> {
+  return enqueueLocalSnapshotMutation(fn);
 }
 
 export function isRestoreInFlight(): boolean {
   return restoreInFlight;
+}
+
+export async function isAutoSnapshotsActive(): Promise<boolean> {
+  return (await isFolderSyncOptedIn()) && (await loadConfig()).enableSessionSnapshots;
 }
 
 export async function loadSnapshots(): Promise<SessionSnapshot[]> {
@@ -74,6 +97,7 @@ export function setSyncFolder(path: string | null) {
       await chrome.storage.local.set({ [UNPUBLISHED_MANUAL_IDS]: manuals.filter(s => !published.has(s.id)).map(s => s.id) });
     }
     const status = await configureSyncFolder(path);
+    await clearWholeSnapshotCheck();
     if (status.ok && status.enabled) await chrome.storage.local.remove(UNPUBLISHED_MANUAL_IDS);
     return status;
   });
@@ -83,6 +107,7 @@ export async function clearSnapshots(): Promise<void> {
   await enqueueLocalSnapshotMutation(async () => {
     await chrome.storage.local.remove(SNAPSHOTS_STORAGE_KEY);
     await chrome.storage.local.remove(UNPUBLISHED_MANUAL_IDS);
+    await clearWholeSnapshotCheck();
   });
 }
 
@@ -137,6 +162,7 @@ export async function deleteSnapshot(id: string, folder?: string | null): Promis
     return false;
   });
   const syncRemoved = await deleteSyncedSnapshot(id, syncDir);
+  if (removedLocal || syncRemoved) await clearWholeSnapshotCheck();
   return removedLocal || syncRemoved;
 }
 
@@ -173,6 +199,10 @@ async function storeCapture(created: SessionSnapshot, existing: SessionSnapshot[
       protectedIds = new Set(saved[UNPUBLISHED_MANUAL_IDS] ?? []);
     }
   }
+  if (!created.complete || allowPartial) {
+    const newestWhole = existing.find(s => s.complete);
+    if (newestWhole) protectedIds.add(newestWhole.id);
+  }
   // A closed window captures only part of a session. Reserve the latest whole-session recovery point first.
   const smallAuto = created.trigger === "auto" && created.tabCount < RECOVERY_MIN_SNAPSHOT_TABS;
   const recoveryCandidates = created.trigger === "window_closed" || smallAuto
@@ -185,7 +215,7 @@ async function storeCapture(created: SessionSnapshot, existing: SessionSnapshot[
   let kept = candidates.filter(s => protectedIds.has(s.id) || s === created);
   if (allowPartial && overBudget(kept)) {
     const reserved = kept.filter(s => s !== created);
-    const partial = { ...created, id: crypto.randomUUID(), tabs: [] as SnapshotTab[], tabCount: 0 };
+    const partial = { ...created, complete: false, id: crypto.randomUUID(), tabs: [] as SnapshotTab[], tabCount: 0 };
     let bytes = utf8ByteLength(JSON.stringify([partial, ...reserved])) + String(created.tabCount).length;
     for (const tab of created.tabs) {
       const size = utf8ByteLength(JSON.stringify(tab)) + 1;
@@ -226,19 +256,17 @@ async function storeCapture(created: SessionSnapshot, existing: SessionSnapshot[
   return null;
 }
 
-function snapshotSignature(tabs: SnapshotTab[]): string {
-  return tabs
-    .map(
-      (t) =>
-        `${t.windowId}|${t.index ?? ""}|${normalizeUrl(t.url)}|${t.pinned ? 1 : 0}|${t.kept ? 1 : 0}|${t.groupId ?? ""}|${t.groupTitle ?? ""}|${t.groupColor ?? ""}|${t.groupCollapsed ? 1 : 0}`,
-    )
-    .sort()
-    .join("\n");
+async function snapshotDigest(tabs: SnapshotTab[]): Promise<string> {
+  const ordered = tabs.map(t => JSON.stringify([
+    t.windowId, t.index, normalizeUrl(t.url), Boolean(t.active), t.pinned,
+    t.kept, t.groupId, t.groupTitle, t.groupColor, Boolean(t.groupCollapsed),
+  ])).sort();
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ordered.join("\n")));
+  return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function sanitizeFavIconUrl(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  if (!/^https?:\/\//i.test(url)) return undefined;
+  if (!isHttpUrl(url)) return undefined;
   if (url.length > MAX_SNAPSHOT_FAVICON_LEN) return undefined;
   return url;
 }
@@ -260,7 +288,7 @@ export async function buildSnapshotTabs(
   });
 
   for (const tab of sorted) {
-    if (!isArchivableUrl(tab.url)) continue;
+    if (!isHttpUrl(tab.url)) continue;
     // Skip pathological mega-URLs (e.g., 2 MB hash-state URLs) to protect storage quota.
     if (tab.url.length > MAX_SNAPSHOT_URL_LEN) continue;
 
@@ -331,6 +359,7 @@ export async function captureWindowMetadata(windowIds: Set<number>): Promise<Sna
 export interface CaptureOptions {
   force?: boolean;
   now?: number;
+  intervalMinutes?: number;
   trigger?: SnapshotTrigger;
   label?: string;
   activity?: ActivityState;
@@ -353,6 +382,15 @@ export async function captureSessionSnapshot(
   const now = options.now ?? Date.now();
   const force = Boolean(options.force);
   const trigger: SnapshotTrigger = options.trigger ?? (force ? "manual" : "auto");
+
+  const intervalMs = (options.intervalMinutes ?? (await loadConfig()).snapshotIntervalMinutes) * 60_000;
+  const last = !force ? await loadWholeSnapshotCheck() : undefined;
+  if (!force) {
+    if (!(await isAutoSnapshotsActive())) return null;
+    const syncDir = await getActiveSyncDir();
+    if (last && last.syncDir === syncDir && now >= last.checkedAt && now - last.checkedAt < intervalMs) return null;
+  }
+
   const snapshotTabs = await buildSnapshotTabs(tabs, options.activity, now, options.groups);
   if (snapshotTabs.length === 0) return null;
 
@@ -363,25 +401,55 @@ export async function captureSessionSnapshot(
   ]);
 
   const cleanedLabel = options.label?.trim().slice(0, 80) || undefined;
+  const isAutomaticTrigger = trigger !== "manual";
   return enqueueLocalSnapshotMutation(async () => {
+    const stillAllowed = async (): Promise<boolean> => {
+      if (!(await isFolderSyncOptedIn())) return false;
+      if (isAutomaticTrigger && !(await loadConfig()).enableSessionSnapshots) return false;
+      return true;
+    };
+    if (!(await stillAllowed())) return null;
+
+    const activeDir = await getActiveSyncDir();
     const existing = await loadSnapshots();
+    const digest = trigger === "window_closed" ? undefined : await snapshotDigest(snapshotTabs);
     if (!force) {
-      const local = existing[0];
-      const [disk] = await listDeviceSnapshotEntries();
+      // Measure elapsed time against whole-session captures only so closing a small window
+      // never postpones whole-session backups indefinitely.
+      const local = existing.find((s) => s.trigger !== "window_closed");
+      const disk = await findDeviceSnapshotEntry(s => s.trigger !== "window_closed");
       const newest = disk && (!local || disk.capturedAt > local.capturedAt) ? disk : local;
       if (newest) {
-        if (now - newest.capturedAt < SNAPSHOT_INTERVAL_MS) return null;
-        if (snapshotTabs.length <= RECOVERY_MAX_CURRENT_TABS && newest.tabCount >= RECOVERY_MIN_SNAPSHOT_TABS) return null;
-        if (newest.tabCount === snapshotTabs.length) {
-          const previous = "relPath" in newest ? await readSyncedSnapshot(newest.relPath) : newest;
-          if (previous && snapshotSignature(previous.tabs) === snapshotSignature(snapshotTabs)) return null;
+        const cachedDigest = last?.syncDir === activeDir && last.id === newest.id ? last.digest : undefined;
+        const check = { syncDir: activeDir, checkedAt: now, id: newest.id, digest: cachedDigest };
+        if (now - newest.capturedAt < intervalMs) {
+          await rememberWholeSnapshotCheck({ ...check, checkedAt: newest.capturedAt });
+          return null;
+        }
+        if (snapshotTabs.length <= RECOVERY_MAX_CURRENT_TABS && isRecoverable(newest, now)) {
+          await rememberWholeSnapshotCheck(check);
+          return null;
+        }
+        if (newest.complete === true && newest.tabCount === snapshotTabs.length) {
+          let previousDigest = cachedDigest;
+          if (!previousDigest) {
+            const previous = "relPath" in newest ? await readSyncedSnapshot(newest.relPath) : newest;
+            if (previous) previousDigest = await snapshotDigest(previous.tabs);
+          }
+          if (previousDigest && previousDigest === digest) {
+            await rememberWholeSnapshotCheck({ ...check, digest });
+            return null;
+          }
         }
       }
+      // Re-check after async disk reads in case automatic snapshots or sync were disabled mid-flight.
+      if (!(await stillAllowed())) return null;
     }
 
     const created: SessionSnapshot = {
       id: crypto.randomUUID(),
       schemaVersion: 2,
+      complete: trigger !== "window_closed",
       capturedAt: now,
       tabCount: snapshotTabs.length,
       windowCount: Math.max(1, windowIds.size),
@@ -393,12 +461,19 @@ export async function captureSessionSnapshot(
       tabs: snapshotTabs,
     };
 
-    const stored = await storeCapture(created, existing);
-    if (!options.skipSync || !stored) {
-      if (await pushSnapshotToSync(created, now).catch(() => false)) return created;
+    let saved = await storeCapture(created, existing);
+    if (!options.skipSync || !saved) {
+      if (await pushSnapshotToSync(created, now).catch(() => false)) saved = created;
     }
-    if (stored) return stored;
-    if (trigger !== "manual") return storeCapture(created, existing, true);
+    if (!saved && trigger !== "manual") saved = await storeCapture(created, existing, true);
+    if (saved) {
+      if (trigger !== "window_closed") {
+        await rememberWholeSnapshotCheck({ syncDir: activeDir, checkedAt: now, id: saved.id,
+          digest: saved === created ? digest : await snapshotDigest(saved.tabs) });
+      }
+      return saved;
+    }
+    if (trigger !== "manual") return null;
     throw new Error("Not enough local space. Reconnect the backup folder or delete an older snapshot and try again.");
   });
 }
@@ -408,15 +483,17 @@ export async function findRecoverableSnapshot(
   snapshots: SessionSnapshot[],
   now = Date.now(),
 ): Promise<{ id: string; capturedAt: number; tabCount: number; windowCount?: number; relPath?: string } | null> {
-  const currentHttpCount = currentTabs.filter((t) => isArchivableUrl(t.url)).length;
+  if (!(await isFolderSyncOptedIn())) return null;
+  const currentHttpCount = currentTabs.filter((t) => isHttpUrl(t.url)).length;
   if (currentHttpCount > RECOVERY_MAX_CURRENT_TABS) return null;
 
+  const disk = await findDeviceSnapshotEntry(s => isRecoverable(s, now));
   const candidates = [
     ...snapshots.map(s => ({
       id: s.id, capturedAt: s.capturedAt, tabCount: s.tabCount,
       windowCount: s.windowCount ?? Math.max(1, new Set(s.tabs.map(t => t.windowId)).size),
     })),
-    ...await listDeviceSnapshotEntries(),
+    ...(disk ? [disk] : []),
   ];
   return candidates.sort((a, b) => b.capturedAt - a.capturedAt).find(
     s => isRecoverable(s, now),
@@ -455,7 +532,7 @@ async function restoreTabsIntoWindow(
   const ordered = [...items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 
   for (const item of ordered) {
-    if (!isArchivableUrl(item.url)) continue;
+    if (!isHttpUrl(item.url)) continue;
     const norm = normalizeUrl(item.url);
     if (openUrls && openUrls.has(norm)) {
       skippedExisting++;
@@ -493,10 +570,8 @@ async function restoreTabsIntoWindow(
         if (item.kept) {
           newlyKeptIds.push(createdId);
         }
-        if (item.groupId !== undefined || item.groupTitle || item.groupColor) {
-          const gKey = JSON.stringify(item.groupId !== undefined
-            ? [item.windowId, item.groupId]
-            : [item.windowId, item.groupTitle ?? "", item.groupColor ?? ""]);
+        if (item.groupId !== undefined) {
+          const gKey = JSON.stringify([item.windowId, item.groupId]);
           let bucket = groupBuckets.get(gKey);
           if (!bucket) {
             bucket = {
@@ -571,14 +646,14 @@ export async function restoreSessionSnapshot(
     const currentSummaries: TabSummary[] = [];
     for (const tab of currentTabs) {
       const summary = toTabSummary(tab, kept);
-      if (summary && isArchivableUrl(summary.url)) {
+      if (summary && isHttpUrl(summary.url)) {
         openUrls.add(normalizeUrl(summary.url));
         currentSummaries.push(summary);
       }
     }
 
     // Safety net: capture a pre_restore snapshot if the user currently has an active session.
-    if (currentSummaries.length >= 3 && (await loadConfig()).enableSessionSnapshots) {
+    if (currentSummaries.length >= 3 && (await isAutoSnapshotsActive())) {
       try {
         await captureSessionSnapshot(currentSummaries, {
           force: true,
@@ -598,7 +673,7 @@ export async function restoreSessionSnapshot(
 
     const tabsByWindow = new Map<number, SnapshotTab[]>();
     for (const item of snapshot.tabs) {
-      if (!isArchivableUrl(item.url)) continue;
+      if (!isHttpUrl(item.url)) continue;
       const list = tabsByWindow.get(item.windowId) ?? [];
       list.push(item);
       tabsByWindow.set(item.windowId, list);
@@ -680,22 +755,22 @@ export async function restoreSessionSnapshot(
       skippedExisting += res.skippedExisting;
     }
 
-    // Merge restored kept IDs and fresh activity timestamps BEFORE releasing restoreInFlight
-    // so subsequent sweeps never discard kept tabs or auto-archive restored tabs via stale byUrl entries.
-    if (newlyKeptIds.length > 0) {
-      const keptIds = await loadKeptTabIds();
-      for (const id of newlyKeptIds) keptIds.add(id);
-      await saveKeptTabIds(keptIds);
-    }
-
-    if (createdRecords.length > 0) {
-      const now = Date.now();
-      let activity = await loadActivityState();
-      for (const rec of createdRecords) {
-        activity = recordTabVisit(activity, rec.id, rec.url, now);
+    await enqueueActivityUpdate(async () => {
+      if (newlyKeptIds.length > 0) {
+        const keptIds = await loadKeptTabIds();
+        for (const id of newlyKeptIds) keptIds.add(id);
+        await saveKeptTabIds(keptIds);
       }
-      await saveActivityState(activity);
-    }
+
+      if (createdRecords.length > 0) {
+        const now = Date.now();
+        let activity = await loadActivityState();
+        for (const rec of createdRecords) {
+          activity = recordTabVisit(activity, rec.id, rec.url, now);
+        }
+        await saveActivityState(activity);
+      }
+    });
 
     return { restored, skippedExisting, windowsCreated };
   } finally {

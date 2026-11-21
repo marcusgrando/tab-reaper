@@ -6,12 +6,12 @@ export interface TabReaperConfig {
   memoryBudgetFraction: number;
   /** Explicit Chrome RAM cap in GiB when memoryBudgetMode === "fixed_gb". */
   memoryBudgetGb: number;
-  /** Maximum number of eligible loaded tabs kept in RAM (default 10). */
-  maxActiveTabs: number;
-  /** Idle minutes before a loaded eligible tab is discarded (0 disables time-based discard). */
+  /** Budget percentage at which idle-tab eviction starts (10 to 100, default 80). */
+  idleEvictionPercent: number;
+  /** Budget percentage at which size-based eviction starts (10 to 100, default 100, >= idleEvictionPercent). */
+  sizeEvictionPercent: number;
+  /** Idle minutes before a loaded eligible tab is discarded once memory reaches idleEvictionPercent (0 disables idle discard). */
   discardAfterMinutes: number;
-  /** Idle hours before an eligible tab is closed and auto-bookmarked (0 disables auto-archive). */
-  archiveAfterHours: number;
   /** Discard non-protected background tabs immediately on Chrome startup. */
   startupSweep: boolean;
   protectActive: boolean;
@@ -19,9 +19,11 @@ export interface TabReaperConfig {
   protectPinned: boolean;
   protectUnsavedForms: boolean;
   skipWhenOffline: boolean;
+  /** Automatic session snapshots (active only when Folder Sync is configured). */
   enableSessionSnapshots: boolean;
-  bookmarkFolderName: string;
-  /** Domain or glob patterns excluded from discard and archive. */
+  /** Interval in minutes between automatic session snapshots (1 to 1440, default 5). */
+  snapshotIntervalMinutes: number;
+  /** Domain or glob patterns excluded from discard. */
   allowlist: string[];
 }
 
@@ -61,19 +63,6 @@ export interface MemorySnapshot {
   checkedAt: number;
 }
 
-export interface ArchivedTab {
-  id: string;
-  url: string;
-  normalizedUrl: string;
-  title: string;
-  favIconUrl?: string;
-  groupTitle?: string;
-  groupColor?: string;
-  lastActiveAt: number;
-  archivedAt: number;
-  bookmarkId?: string;
-}
-
 export interface TabSummary {
   id: number;
   url: string;
@@ -104,7 +93,6 @@ export interface OpenTabInfo {
   isPwa: boolean;
   canKeep: boolean;
   canSleep: boolean;
-  canArchive: boolean;
   canClose: boolean;
 }
 
@@ -113,7 +101,7 @@ export interface EvictionCandidate {
   idleMinutes: number;
   weightMultiplier: number;
   score: number;
-  reason: "over_tab_cap" | "over_memory_budget" | "idle_timeout";
+  reason: "startup" | "over_memory_budget" | "idle_timeout";
 }
 
 export type SnapshotTrigger = "auto" | "manual" | "pre_restore" | "window_closed";
@@ -148,6 +136,8 @@ export interface SnapshotTab {
 
 export interface SessionSnapshot {
   id: string;
+  /** Whole session with all eligible tabs. */
+  complete: boolean;
   schemaVersion?: number;
   capturedAt: number;
   tabCount: number;
@@ -206,7 +196,6 @@ export interface StatusPayload {
   loadedCount: number;
   discardedCount: number;
   protectedCount: number;
-  archivedCount: number;
   openTabs: OpenTabInfo[];
   recoverableSnapshot: { id: string; capturedAt: number; tabCount: number; windowCount?: number; relPath?: string } | null;
   permissions: {
@@ -217,15 +206,10 @@ export interface StatusPayload {
 
 export type BackgroundMessage =
   | { type: "get_status" }
-  | { type: "get_archive"; query?: string }
-  | { type: "restore_archived"; id: string }
-  | { type: "delete_archived"; id: string }
   | { type: "discard_tab"; tabId: number }
   | { type: "toggle_keep_tab"; tabId: number }
-  | { type: "archive_tab"; tabId: number }
   | { type: "close_tab"; tabId: number }
   | { type: "discard_idle_now" }
-  | { type: "archive_old_now" }
   | { type: "get_snapshots" }
   | { type: "capture_snapshot_now"; label?: string }
   | { type: "clear_snapshots" }

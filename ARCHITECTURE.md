@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A Chrome Manifest V3 extension that keeps browser RAM strictly bounded, speeds up Chrome startup, and automatically turns long-unused tabs into searchable bookmarks.
+A Chrome Manifest V3 extension that keeps browser RAM bounded with memory-banded tab discarding, speeds up Chrome startup, and provides conflict-free session backup through optional Folder Sync.
 
 ## Design Constraints and Feasibility
 
@@ -11,71 +11,74 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 | Requirement | Mechanism | Status | Hard Platform Limit |
 | --- | --- | --- | --- |
 | Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `proc_pid_rusage` `phys_footprint` (macOS, matching Activity Monitor), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** `chrome.system.memory` OS pressure (`availableCapacity`). | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
-| Keep at most `X` loaded tabs (default `10`) | Event-driven `chrome.tabs.discard()` on `onActivated` / `onCreated` + `chrome.alarms` sweep. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
-| Evict heaviest tabs first | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) fall back to LRU. |
-| Fast, low-memory Chrome startup | Auto-archive keeps open tab count low. `chrome.runtime.onStartup` immediately discards non-protected background tabs. Zero permanent `content_scripts` in manifest. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
-| Protect active, audible, and pinned tabs | Filter `tab.active`, `tab.audible`, `tab.pinned`, and user domain allowlist before discard/archive. | Feasible | None. |
-| Auto-archive old tabs to both Bookmarks and extension UI | `chrome.tabs.remove()` + `chrome.bookmarks.create()` + rich index in `chrome.storage.local`. | Feasible | `tabId` resets on browser restart, so `lastActiveAt` must be persisted in `chrome.storage.local` and reconciled by URL on startup. |
-| Fast recovery via shortcut and address bar | `chrome.commands` opens popup focused on search input. `chrome.omnibox` provides keyword search. Native Chrome address bar searches the synced bookmark folder. | Feasible | None. |
+| Memory-banded discarding (`idleEvictionPercent` / `sizeEvictionPercent`, defaults `80%` / `100%`) | Periodic `chrome.alarms` sweep and event-driven checks using `chrome.tabs.discard()`. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
+| Evict heaviest tabs first at the configured size threshold | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) and disabled Weighted Eviction fall back to oldest idle first. |
+| Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Zero permanent `content_scripts` in manifest. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
+| Protect active, audible, pinned, kept, unsaved-form, and allowlisted tabs | Filter `tab.active`, `tab.audible`, `tab.pinned`, kept state, unsaved form edits, and user domain allowlist before discard. | Feasible | `tabId` resets on browser restart, so `lastActiveAt` is persisted in `chrome.storage.local` and reconciled by URL on startup. |
+| Fast open-tabs palette | `chrome.commands` (`Alt+Shift+K`) opens the Tab Reaper open-tabs palette focused on search. | Feasible | None. |
+| Conflict-free session snapshots | Gated on optional Folder Sync via the local companion (`com.tabreaper.host`). Captures windows, tab order, pinned/kept state, and tab groups. | Feasible | Requires installing the optional native host and selecting a sync folder. |
 
 ## Tab Lifecycle
 
-Every non-protected tab moves through three stages:
+Every non-protected tab moves between two states:
 
-1. **Active (Loaded):** In RAM. Count is capped at `maxActiveTabs` (default `10`) and total memory is capped at `memoryBudget` (default `systemRAM / 2`).
+1. **Active (Loaded):** Running in RAM.
 2. **Discarded:** `chrome.tabs.discard(tabId)` destroys the renderer process while keeping the tab stub, title, favicon, and session history in the tab strip.
-3. **Archived (Auto-Bookmark):** After `archiveAfterHours` without activation (default `72` hours / 3 days), the tab is saved to the archive index and the Chrome bookmark folder, then closed via `chrome.tabs.remove(tabId)`.
+
+Tab Reaper does not close or archive tabs to bookmarks.
 
 ## Memory and Eviction Engine
 
-### Dual Cap Enforcement
+### Memory-Banded Eviction
 
 An eviction sweep runs on:
-- `chrome.runtime.onStartup` (immediate startup sweep)
-- `chrome.tabs.onActivated` and `chrome.tabs.onCreated` (instant cap enforcement)
-- `chrome.alarms` every 1 minute (idle timeout and memory budget check)
+- `chrome.runtime.onStartup` (immediate startup sweep when `startupSweep` is enabled, default `true`)
+- `chrome.alarms` every 30 seconds (memory budget and idle check)
+- Tab creation and activation (memory check only, with no scheduled backup or folder sync)
 
-A sweep evicts eligible loaded tabs until **both** hold:
-- `eligibleLoadedCount <= config.maxActiveTabs`
-- `currentMemoryBytes <= config.memoryBudgetBytes`
+Periodic sweeps evaluate memory usage as a percentage of `memoryBudgetBytes`:
 
-To avoid over-discarding while Chrome asynchronously tears down a renderer process (~200-500 ms), memory-triggered sweeps discard at most 2 tabs per pass and re-check on the next tick (or after a short settle delay) instead of dumping all loaded tabs at once.
+1. **Below `idleEvictionPercent` (default `80%`) of budget:** No background tabs are discarded by periodic sweeps.
+2. **Between `idleEvictionPercent` and `sizeEvictionPercent` (default `80%–99%`) of budget:** Discards eligible idle tabs (`>= discardAfterMinutes`, default `15` min), oldest idle first, up to 2 tabs per sweep pass.
+3. **At or above `sizeEvictionPercent` (default `100%`) of budget:** Discards heaviest loaded tabs first (by JS heap, DOM node count, and media weight) when optional Weighted Eviction is enabled, falling back to oldest idle first when Weighted Eviction is disabled, up to 2 tabs per sweep pass.
+
+On Chrome startup (`startupSweep`, default `true`), Tab Reaper still discards non-protected background tabs immediately so the browser starts with minimal RAM.
+
+To avoid over-discarding while Chrome asynchronously tears down a renderer process (~200-500 ms), periodic sweeps discard at most 2 tabs per pass and re-check on the next tick instead of dumping all loaded tabs at once.
 
 ### Memory Measurement Modes
 
 1. **Exact Chrome RAM (Native Host connected):**
    - Extension calls `chrome.runtime.sendNativeMessage('com.tabreaper.host', { cmd: 'chrome_memory' })`.
-   - Native host sums PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS) across all Chrome processes (`chrome`, `chromium`, `google-chrome`) and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
-   - Budget check compares `chromeBytes > memoryBudgetBytes`.
+   - Native host sums Chrome memory across all Chrome processes: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set (Windows `K32GetProcessMemoryInfo`), and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
+   - Budget percentage is `chromeBytes / memoryBudgetBytes`.
 2. **OS Pressure Fallback (Pure Extension):**
    - Extension calls `chrome.system.memory.getInfo()`.
-   - Uses `osUsedBytes = capacity - availableCapacity` against `memoryBudgetBytes` (or triggers aggressive cap reduction when `availableCapacity < capacity - memoryBudgetBytes`).
+   - Compares `osUsedBytes = capacity - availableCapacity` against `memoryBudgetBytes`.
    - UI clearly indicates whether it is running in **Exact (Native Host)** or **System Memory (Extension-only)** mode.
 
-### Weighted Eviction Score
+### Weighted Eviction
 
-When multiple eligible loaded tabs exist, candidates are ranked by:
-
-```text
-score = idleMinutes * weightMultiplier
-```
-
-Where `weightMultiplier` (1.0 to 5.0) is computed from an on-demand sample cached for 2 minutes in `chrome.storage.session`:
+When memory reaches the size threshold (default `100%` of budget) and optional Weighted Eviction (`scripting` + `<all_urls>`) is enabled, eligible loaded tabs are ranked heaviest first using an on-demand sample cached for 2 minutes in `chrome.storage.session`:
 - `usedJSHeapSize` (MB) from `performance.memory`
 - DOM node count (`document.getElementsByTagName('*').length`)
 - Heavy media elements (`iframe`, `canvas`, `video` count)
-- Optional domain weight overrides configured by the user
+- Unsaved non-password form edits (used to protect dirty forms when `protectUnsavedForms` is enabled)
 
-Pages where scripting is disallowed receive `weightMultiplier = 1.0` (pure LRU). No permanent content scripts are ever registered.
+Pages where scripting is disallowed receive default weight (`1.0`). When Weighted Eviction is disabled, the size band falls back to oldest idle first. No permanent content scripts are ever registered.
 
 ### Protections
 
-A tab is never discarded or archived if any enabled protection matches:
+A tab is never discarded if any enabled protection matches:
 - `tab.active` (active tab in any window)
 - `tab.audible` (currently playing audio)
 - `tab.pinned` (pinned tab)
+- `tab.kept` (explicitly kept by the user in the palette)
+- Unsaved form edits (`protectUnsavedForms`, when Weighted Eviction is enabled)
 - URL matches user allowlist (domain or glob pattern)
-- Internal browser pages (`chrome://`, `chrome-extension://`, `edge://`, `about:`) are never archived.
+- Loading tabs (`tab.status === "loading"`)
+- Internal browser pages (`chrome://`, `chrome-extension://`, `chrome-search://`, `devtools://`, `edge://`, `about:`)
+- Offline state when `skipWhenOffline` is enabled (default `true`)
 
 ## Persistent Activity Tracking Across Restarts
 
@@ -83,46 +86,42 @@ Because Chrome reassigns all `tabId` values on restart and wipes `chrome.storage
 - Active tab timestamps are stored in `chrome.storage.local` in two structures:
   - `byTabId[tabId] = { url, lastActiveAt }` for fast runtime lookups
   - `byUrl[normalizedUrl] = lastActiveAt` for restart reconciliation
-- On `onStartup`, open tabs are matched against `byUrl` so multi-day idle counters survive browser restarts accurately.
-
-## Auto-Bookmark (Dual Storage)
-
-Archived tabs live in two synchronized places:
-
-1. **Extension Archive Index (`chrome.storage.local`):**
-   - Stores `{ id, url, title, favIconUrl, groupTitle, groupColor, lastActiveAt, archivedAt, bookmarkId }`.
-   - Powers the instant fuzzy-search popup (triggered via keyboard shortcut, e.g. `Alt+Shift+K`) and `chrome.omnibox` (`ar <query>`).
-2. **Chrome Bookmark Folder (`chrome.bookmarks`):**
-   - Dedicated folder under `Other Bookmarks` (configurable name, default `Auto-Archived Tabs`).
-   - Automatically searchable from Chrome's native address bar and synced via Chrome Sync.
-
-### Sync and Hygiene Invariants
-
-- **Deduplication on archive:** If `normalizedUrl` already exists in the archive, update `archivedAt` and `lastActiveAt` instead of creating a duplicate bookmark.
-- **Auto-cleanup on restore/visit:** Restoring from the popup/Omnibox or navigating to an archived URL removes the entry from both `chrome.storage.local` and the bookmark folder.
-- **Two-way bookmark deletion:** `chrome.bookmarks.onRemoved` removes the matching record from `chrome.storage.local`.
+- On `onStartup`, open tabs are matched against `byUrl` so idle timers survive browser restarts accurately.
 
 ## Local Companion (Exact Chrome RAM + Folder Sync)
 
-The optional Rust Native Messaging host (`native-host/`) serves both exact Chrome RAM reporting and conflict-free folder sync (snapshots, settings, and archived tabs) to any local or cloud-synced directory (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing).
+The optional Rust Native Messaging host (`native-host/`) serves both exact Chrome RAM reporting and conflict-free Folder Sync (session snapshots and settings) to any local or cloud-synced directory (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing).
+
+### Session Snapshots (Gated on Folder Sync)
+
+Session snapshots are only active when Folder Sync is configured. When enabled, Tab Reaper supports:
+- Automatic periodic captures on a configurable interval from `1` to `1440` minutes (up to 24 hours, default `5` minutes) under Settings -> Folder Sync.
+- Window-close recovery snapshots (backed by `src/background/window-cache.ts` in `chrome.storage.session`).
+- Pre-restore safety snapshots captured before restoring another snapshot.
+- Manual on-demand snapshots with optional labels.
+
+### Device Identity
+
+Each Chrome profile has a stable `deviceId`. Its display name (`deviceName`) defaults to and follows the computer's hostname automatically. Users can set an optional override in Settings.
 
 ### Multi-Device Concurrency Model
 
+During pre-release development, the extension supports one storage format at a time. Developers can start with fresh extension data and a new sync folder when that format changes.
+
 Cloud-synced folders propagate files asynchronously, so distributed locks are unreliable and shared mutable files produce conflicted copies. To eliminate conflicts by construction, **every writable file is strictly single-writer per `deviceId`** under `devices/<deviceId>/`:
 
-- `devices/<deviceId>/meta.json` — device identity and last seen timestamp.
-- `devices/<deviceId>/config.json` — device settings with `updatedAt`; reads across all `devices/*/config.json` resolve deterministically by highest `updatedAt` (tie-break by `deviceId`).
-- `devices/<deviceId>/archive.json` identifies the published generation of archived tabs and deletion markers. The writer saves overflow parts under unique generation names before atomically replacing this file. Readers also accept the original unversioned part names. A deletion marker can expire after 90 days once a complete scan finds no peer still advertising the URL.
-- `devices/<deviceId>/snapshots/<iso>_<id>.json` + `devices/<deviceId>/index.json` — full session snapshots (with window geometry/state, tab index, pinned, kept, active, collapsed tab groups, and sanitized favicon URL) retained under a GFS policy (unlimited manual, 20 recent auto, 1/hour for 24h, 1/day for 30d). Once a snapshot index spans multiple files, `index.json` points to overflow parts under `index-parts/<generation>-p<N>.json`. The writer publishes the manifest only after writing every part. A reader that cannot assemble the published generation retries without replacing the index.
+- `devices/<deviceId>/meta.json` — device identity (including `deviceName`) and last seen timestamp.
+- Devices write settings to `devices/<deviceId>/config-v2.json`. The highest `updatedAt` wins, with `deviceId` breaking ties. This version applies to the whole configuration.
+- `devices/<deviceId>/snapshots/<iso>_<id>.json` + `devices/<deviceId>/index.json` — full session snapshots (window geometry/state, tab index, pinned, kept, active, collapsed tab groups, and sanitized favicon URL) retained under a GFS policy (unlimited manual, 20 recent auto, 1/hour for 24h, 1/day for 30d). New captures record `complete` in the snapshot and index. Window-close captures and copies truncated to fit the local quota set it to `false`. Rotation keeps the newest complete session. In the sync folder, the replacement must be published in the index before the writer removes older files. Once a snapshot index spans multiple files, `index.json` points to overflow parts under `index-parts/<generation>-p<N>.json`. The writer publishes the manifest only after writing every part. A reader that cannot assemble the published generation retries without replacing the index.
 
-Each native file request carries the directory selected at the start of the operation. The host checks it against the profile’s approval in `host.json` while holding a shared lock on `host.lock`. Changing a profile’s approval takes an exclusive lock through the atomic replacement of `host.json`. A request for a previous directory fails before accessing backup files. File operations use directory handles rooted at the approved path.
+Each native file request carries the directory selected at the start of the operation. The host checks it against the profile's approval in `host.json` while holding a shared lock on `host.lock`. Changing a profile's approval takes an exclusive lock through the atomic replacement of `host.json`. A request for a previous directory fails before accessing backup files. File operations use directory handles rooted at the approved path.
 
 ## Permissions and Distribution
 
-- **Core permissions:** `tabs`, `storage`, `alarms`, `bookmarks`, `system.memory`, `tabGroups`.
+- **Core permissions:** `tabs`, `storage`, `alarms`, `system.memory`, `tabGroups`.
 - **Optional permissions (single-codebase Chrome Web Store compatibility):**
-  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand tab weight sampling.
-  - `optional_host_permissions`: `<all_urls>` for on-demand tab weight sampling. Users who skip granting page access fall back to pure LRU ordering.
+  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand tab weight and form sampling.
+  - `optional_host_permissions`: `<all_urls>` for on-demand tab weight sampling. Users who skip granting page access fall back to oldest idle first ordering.
   - Both optional capabilities can be toggled with one click on the Options page, avoiding broad install-time permission warnings on the Chrome Web Store.
 
 ## Configuration Defaults
@@ -131,36 +130,48 @@ All values are user-configurable on the Options page:
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `memoryBudgetMode` | `fraction` (`0.5`) | `memory / 2` of total system RAM, or explicit GB value |
-| `maxActiveTabs` | `10` | Maximum non-protected loaded tabs kept in RAM |
-| `discardAfterMinutes` | `15` | Idle timeout before discarding a loaded tab |
-| `archiveAfterHours` | `72` | Idle timeout (3 days) before closing and auto-bookmarking |
+| `memoryBudgetMode` | `fraction` (`0.5`) | `memory / 2` of total system RAM, or explicit GB value (`fixed_gb`, default `4` GiB) |
+| `idleEvictionPercent` | `80` | Budget percentage at which idle-tab discarding starts (`10` to `100`) |
+| `sizeEvictionPercent` | `100` | Budget percentage at which size-based discarding starts (`10` to `100`, `>= idleEvictionPercent`) |
+| `discardAfterMinutes` | `15` | Idle timeout before discarding a loaded tab in the idle memory band (`0` = disabled) |
 | `startupSweep` | `true` | Discard non-protected background tabs on Chrome startup |
-| `protectActive` | `true` | Never discard/archive active tabs |
-| `protectAudible` | `true` | Never discard/archive tabs playing audio |
-| `protectPinned` | `true` | Never discard/archive pinned tabs |
-| `bookmarkFolderName` | `Auto-Archived Tabs` | Target folder under Other Bookmarks |
-| `allowlist` | `[]` | Domains/patterns excluded from discard and archive |
+| `protectActive` | `true` | Never discard active tabs |
+| `protectAudible` | `true` | Never discard tabs playing audio |
+| `protectPinned` | `true` | Never discard pinned tabs |
+| `protectUnsavedForms` | `true` | Protect tabs with unsaved non-password form edits (when Weighted Eviction is enabled) |
+| `skipWhenOffline` | `true` | Pause automatic discarding while offline |
+| `enableSessionSnapshots` | `true` | Automatic session snapshots (active only when Folder Sync is configured) |
+| `snapshotIntervalMinutes` | `5` | Automatic snapshot interval in minutes (`1` to `1440`, configurable under Folder Sync) |
+| `allowlist` | `[]` | Domains or glob patterns excluded from discard |
 
-## Proposed Project Layout
+## Project Layout
 
 ```text
 tab-reaper/
 ├── ARCHITECTURE.md
-├── package.json              # Bun scripts (build, test, lint, typecheck)
+├── PRIVACY.md
+├── README.md
+├── package.json              # Bun scripts (build, test, typecheck)
 ├── tsconfig.json
 ├── manifest.json             # MV3 manifest
 ├── src/
 │   ├── background/
-│   │   ├── index.ts          # Event listeners (tabs, alarms, startup, bookmarks, omnibox)
-│   │   ├── eviction.ts       # Dual-cap eviction engine + scoring
-│   │   ├── sampler.ts        # On-demand scripting weight sampler
-│   │   ├── memory.ts         # Native host client + chrome.system.memory fallback
-│   │   ├── archive.ts        # Dual archive (storage.local + chrome.bookmarks) sync
-│   │   └── tracker.ts        # Persistent lastActiveAt tracking across restarts
-│   ├── popup/                # Fast Command Palette UI (keyboard-first search & stats)
-│   ├── options/              # Configuration UI
+│   │   ├── index.ts          # Event listeners (tabs, alarms, startup, messages)
+│   │   ├── eviction.ts       # Memory-banded eviction engine and protections
+│   │   ├── sampler.ts        # On-demand scripting weight and form sampler
+│   │   ├── memory.ts         # Native host client and chrome.system.memory fallback
+│   │   ├── session.ts        # Session snapshot capture and restore
+│   │   ├── window-cache.ts   # Session-storage window cache for window-close recovery
+│   │   ├── badge.ts          # Extension toolbar badge state and formatting
+│   │   ├── tracker.ts        # Persistent lastActiveAt and kept-tab tracking across restarts
+│   │   ├── sync.ts           # Folder Sync barrel exports
+│   │   └── sync/
+│   │       ├── client.ts     # Native host Folder Sync RPC client and device identity
+│   │       ├── config.ts     # Deterministic multi-device config sync
+│   │       └── snapshots.ts  # Snapshot upload, sharded index, and GFS retention
+│   ├── popup/                # Open-tabs command palette UI (keyboard-first search & stats)
+│   ├── options/              # Configuration and Folder Sync UI
 │   └── shared/               # Types, config defaults, URL normalization
-├── native-host/              # Optional lightweight Linux/macOS Chrome RAM reporter + installer
-└── tests/                    # Functional/unit tests (Bun test runner)
+├── native-host/              # Optional Rust native host (exact Chrome RAM + Folder Sync)
+└── tests/                    # Functional and unit tests (Bun test runner)
 ```

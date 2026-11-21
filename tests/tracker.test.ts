@@ -9,7 +9,7 @@ import {
   syncActiveTabs,
 } from "../src/background/tracker.ts";
 import { sanitizeConfig } from "../src/shared/config.ts";
-import type { TabSummary } from "../src/shared/types.ts";
+import type { MemorySnapshot, TabSummary } from "../src/shared/types.ts";
 
 function makeTab(id: number, overrides: Partial<TabSummary> = {}): TabSummary {
   return {
@@ -69,7 +69,7 @@ describe("active tab deactivation tracking", () => {
   const t0 = 1_700_000_000_000;
 
   test("does not immediately discard a tab that was active during an idle period when switching away", () => {
-    const cfg = sanitizeConfig({ discardAfterMinutes: 15, maxActiveTabs: 10 });
+    const cfg = sanitizeConfig({ discardAfterMinutes: 15 });
     const tabA = makeTab(1, { url: "https://app.example.com/work", active: true });
     const tabB = makeTab(2, { url: "https://docs.example.com/ref", active: false });
 
@@ -90,12 +90,22 @@ describe("active tab deactivation tracking", () => {
     // Tab A's idle clock must start when the user left it, not when they first opened it.
     expect(getTabLastActiveAt(state, tabsAfterSwitch[0]!, tSwitch)).toBe(tSwitch);
 
+    const warnMemory: MemorySnapshot = {
+      source: "native_host",
+      usedBytes: Math.round(0.85 * 16 * 1024 ** 3),
+      budgetBytes: 16 * 1024 ** 3,
+      systemTotalBytes: 32 * 1024 ** 3,
+      systemAvailableBytes: 8 * 1024 ** 3,
+      overBudget: false,
+      checkedAt: tSwitch,
+    };
+
     const evictions = planEvictions({
       tabs: tabsAfterSwitch,
       activity: state,
       weights: new Map(),
       config: cfg,
-      memory: null,
+      memory: warnMemory,
       now: tSwitch,
       mode: "sweep",
     });
@@ -132,8 +142,8 @@ describe("active tab deactivation tracking", () => {
   });
 
   test("syncActiveTabs bootstraps missing activeByWindow entries and refreshes active tab timestamps", () => {
-    // Simulate legacy stored state without activeByWindow (e.g. after extension update).
-    const legacyState = {
+    const state = {
+      activeByWindow: {},
       byTabId: {
         "1": { url: "https://a.example.com", lastActiveAt: t0 },
         "2": { url: "https://b.example.com", lastActiveAt: t0 },
@@ -150,7 +160,7 @@ describe("active tab deactivation tracking", () => {
     ];
 
     const tSweep = t0 + 20 * min;
-    const synced = syncActiveTabs(legacyState, tabs, tSweep);
+    const synced = syncActiveTabs(state, tabs, tSweep);
     expect(synced.activeByWindow?.["1"]).toBe(1);
     expect(synced.byTabId["1"]?.lastActiveAt).toBe(tSweep);
     expect(synced.byTabId["2"]?.lastActiveAt).toBe(t0);

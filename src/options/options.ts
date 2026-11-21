@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG } from "../shared/config.ts";
+import { DEFAULT_CONFIG, REOPEN_OPTIONS_KEY } from "../shared/config.ts";
 import type {
   MemoryBudgetMode,
   RestoreMode,
@@ -16,9 +16,9 @@ const fractionWrap = document.getElementById("fraction-wrap") as HTMLElement;
 const fixedGbWrap = document.getElementById("fixed-gb-wrap") as HTMLElement;
 const memoryFraction = document.getElementById("memory-fraction") as HTMLInputElement;
 const memoryGb = document.getElementById("memory-gb") as HTMLInputElement;
-const maxActiveTabs = document.getElementById("max-active-tabs") as HTMLInputElement;
+const idleEvictionPercent = document.getElementById("idle-eviction-percent") as HTMLInputElement;
+const sizeEvictionPercent = document.getElementById("size-eviction-percent") as HTMLInputElement;
 const discardMinutes = document.getElementById("discard-minutes") as HTMLInputElement;
-const archiveHours = document.getElementById("archive-hours") as HTMLInputElement;
 const startupSweep = document.getElementById("startup-sweep") as HTMLInputElement;
 const protectActive = document.getElementById("protect-active") as HTMLInputElement;
 const protectAudible = document.getElementById("protect-audible") as HTMLInputElement;
@@ -26,7 +26,7 @@ const protectPinned = document.getElementById("protect-pinned") as HTMLInputElem
 const protectForms = document.getElementById("protect-forms") as HTMLInputElement;
 const skipOffline = document.getElementById("skip-offline") as HTMLInputElement;
 const enableSnapshots = document.getElementById("enable-snapshots") as HTMLInputElement;
-const bookmarkFolder = document.getElementById("bookmark-folder") as HTMLInputElement;
+const snapshotIntervalMinutes = document.getElementById("snapshot-interval-minutes") as HTMLInputElement;
 const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
 const saveStatus = document.getElementById("save-status") as HTMLElement;
 
@@ -37,6 +37,7 @@ const hostStatus = document.getElementById("host-status") as HTMLElement;
 const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonElement;
 const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonElement;
 const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
+const snapshotsCardEl = document.getElementById("snapshots-card") as HTMLElement;
 const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
 const btnClearSnapshots = document.getElementById("btn-clear-snapshots") as HTMLButtonElement;
 const snapshotLabelInput = document.getElementById("snapshot-label") as HTMLInputElement;
@@ -45,6 +46,8 @@ const snapshotList = document.getElementById("snapshot-list") as HTMLElement;
 
 const syncStatusEl = document.getElementById("sync-status") as HTMLElement;
 const syncControlsEl = document.getElementById("sync-controls") as HTMLElement;
+const syncSnapshotsConfigEl = document.getElementById("sync-snapshots-config") as HTMLElement;
+const syncSnapshotsStatusEl = document.getElementById("sync-snapshots-status") as HTMLElement;
 const syncCandidatesWrap = document.getElementById("sync-candidates-wrap") as HTMLElement;
 const syncCandidatesEl = document.getElementById("sync-candidates") as HTMLElement;
 const syncFolderInput = document.getElementById("sync-folder-input") as HTMLInputElement;
@@ -66,165 +69,197 @@ const UNDO_ICON_SVG =
 
 type ConfigKey = keyof TabReaperConfig;
 
-interface FieldBinding {
+interface FieldSpec<T> {
+  read: () => T;
+  write: (value: T) => void;
   isDefault: () => boolean;
-  reset: () => void;
   defaultLabel: string;
 }
 
-const fieldBindings: Record<ConfigKey, FieldBinding> = {
-  memoryBudgetMode: {
-    isDefault: () => memoryMode.value === DEFAULT_CONFIG.memoryBudgetMode,
-    reset: () => {
-      memoryMode.value = DEFAULT_CONFIG.memoryBudgetMode;
-      syncBudgetVisibility();
+type FieldSpecs = { [K in ConfigKey]: FieldSpec<TabReaperConfig[K]> };
+
+function selectField<T extends string>(
+  el: HTMLSelectElement,
+  defaultValue: T,
+  defaultLabel: string,
+  onWrite?: () => void,
+): FieldSpec<T> {
+  return {
+    read: () => el.value as T,
+    write: (value) => {
+      el.value = value;
+      onWrite?.();
     },
-    defaultLabel: "Fraction of system RAM",
-  },
-  memoryBudgetFraction: {
-    isDefault: () => Number(memoryFraction.value) === DEFAULT_CONFIG.memoryBudgetFraction,
-    reset: () => {
-      memoryFraction.value = String(DEFAULT_CONFIG.memoryBudgetFraction);
+    isDefault: () => el.value === defaultValue,
+    defaultLabel,
+  };
+}
+
+function numberField(
+  el: HTMLInputElement,
+  defaultValue: number,
+  defaultLabel = String(defaultValue),
+): FieldSpec<number> {
+  return {
+    read: () => Number(el.value),
+    write: (value) => {
+      el.value = String(value);
     },
-    defaultLabel: String(DEFAULT_CONFIG.memoryBudgetFraction),
-  },
-  memoryBudgetGb: {
-    isDefault: () => Number(memoryGb.value) === DEFAULT_CONFIG.memoryBudgetGb,
-    reset: () => {
-      memoryGb.value = String(DEFAULT_CONFIG.memoryBudgetGb);
+    isDefault: () => Number(el.value) === defaultValue,
+    defaultLabel,
+  };
+}
+
+function boolField(el: HTMLInputElement, defaultValue: boolean): FieldSpec<boolean> {
+  return {
+    read: () => el.checked,
+    write: (value) => {
+      el.checked = value;
     },
-    defaultLabel: `${DEFAULT_CONFIG.memoryBudgetGb} GB`,
-  },
-  maxActiveTabs: {
-    isDefault: () => Number(maxActiveTabs.value) === DEFAULT_CONFIG.maxActiveTabs,
-    reset: () => {
-      maxActiveTabs.value = String(DEFAULT_CONFIG.maxActiveTabs);
+    isDefault: () => el.checked === defaultValue,
+    defaultLabel: defaultValue ? "enabled" : "disabled",
+  };
+}
+
+function linesField(el: HTMLTextAreaElement, defaultValue: string[], defaultLabel = "empty"): FieldSpec<string[]> {
+  const readLines = (): string[] =>
+    el.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  return {
+    read: readLines,
+    write: (value) => {
+      el.value = value.join("\n");
     },
-    defaultLabel: String(DEFAULT_CONFIG.maxActiveTabs),
-  },
-  discardAfterMinutes: {
-    isDefault: () => Number(discardMinutes.value) === DEFAULT_CONFIG.discardAfterMinutes,
-    reset: () => {
-      discardMinutes.value = String(DEFAULT_CONFIG.discardAfterMinutes);
+    isDefault: () => {
+      const lines = readLines();
+      return lines.length === defaultValue.length && lines.every((line, i) => line === defaultValue[i]);
     },
-    defaultLabel: `${DEFAULT_CONFIG.discardAfterMinutes} min`,
-  },
-  archiveAfterHours: {
-    isDefault: () => Number(archiveHours.value) === DEFAULT_CONFIG.archiveAfterHours,
-    reset: () => {
-      archiveHours.value = String(DEFAULT_CONFIG.archiveAfterHours);
-    },
-    defaultLabel: `${DEFAULT_CONFIG.archiveAfterHours}h (7 days)`,
-  },
-  startupSweep: {
-    isDefault: () => startupSweep.checked === DEFAULT_CONFIG.startupSweep,
-    reset: () => {
-      startupSweep.checked = DEFAULT_CONFIG.startupSweep;
-    },
-    defaultLabel: DEFAULT_CONFIG.startupSweep ? "enabled" : "disabled",
-  },
-  protectActive: {
-    isDefault: () => protectActive.checked === DEFAULT_CONFIG.protectActive,
-    reset: () => {
-      protectActive.checked = DEFAULT_CONFIG.protectActive;
-    },
-    defaultLabel: DEFAULT_CONFIG.protectActive ? "enabled" : "disabled",
-  },
-  protectAudible: {
-    isDefault: () => protectAudible.checked === DEFAULT_CONFIG.protectAudible,
-    reset: () => {
-      protectAudible.checked = DEFAULT_CONFIG.protectAudible;
-    },
-    defaultLabel: DEFAULT_CONFIG.protectAudible ? "enabled" : "disabled",
-  },
-  protectPinned: {
-    isDefault: () => protectPinned.checked === DEFAULT_CONFIG.protectPinned,
-    reset: () => {
-      protectPinned.checked = DEFAULT_CONFIG.protectPinned;
-    },
-    defaultLabel: DEFAULT_CONFIG.protectPinned ? "enabled" : "disabled",
-  },
-  protectUnsavedForms: {
-    isDefault: () => protectForms.checked === DEFAULT_CONFIG.protectUnsavedForms,
-    reset: () => {
-      protectForms.checked = DEFAULT_CONFIG.protectUnsavedForms;
-    },
-    defaultLabel: DEFAULT_CONFIG.protectUnsavedForms ? "enabled" : "disabled",
-  },
-  skipWhenOffline: {
-    isDefault: () => skipOffline.checked === DEFAULT_CONFIG.skipWhenOffline,
-    reset: () => {
-      skipOffline.checked = DEFAULT_CONFIG.skipWhenOffline;
-    },
-    defaultLabel: DEFAULT_CONFIG.skipWhenOffline ? "enabled" : "disabled",
-  },
-  enableSessionSnapshots: {
-    isDefault: () => enableSnapshots.checked === DEFAULT_CONFIG.enableSessionSnapshots,
-    reset: () => {
-      enableSnapshots.checked = DEFAULT_CONFIG.enableSessionSnapshots;
-    },
-    defaultLabel: DEFAULT_CONFIG.enableSessionSnapshots ? "enabled" : "disabled",
-  },
-  bookmarkFolderName: {
-    isDefault: () => bookmarkFolder.value.trim() === DEFAULT_CONFIG.bookmarkFolderName,
-    reset: () => {
-      bookmarkFolder.value = DEFAULT_CONFIG.bookmarkFolderName;
-    },
-    defaultLabel: DEFAULT_CONFIG.bookmarkFolderName,
-  },
-  allowlist: {
-    isDefault: () =>
-      allowlist.value
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean).length === DEFAULT_CONFIG.allowlist.length,
-    reset: () => {
-      allowlist.value = DEFAULT_CONFIG.allowlist.join("\n");
-    },
-    defaultLabel: "empty",
-  },
+    defaultLabel,
+  };
+}
+
+const fieldSpecs: FieldSpecs = {
+  memoryBudgetMode: selectField<MemoryBudgetMode>(
+    memoryMode,
+    DEFAULT_CONFIG.memoryBudgetMode,
+    "Fraction of system RAM",
+    syncBudgetVisibility,
+  ),
+  memoryBudgetFraction: numberField(memoryFraction, DEFAULT_CONFIG.memoryBudgetFraction),
+  memoryBudgetGb: numberField(memoryGb, DEFAULT_CONFIG.memoryBudgetGb, `${DEFAULT_CONFIG.memoryBudgetGb} GB`),
+  idleEvictionPercent: numberField(
+    idleEvictionPercent,
+    DEFAULT_CONFIG.idleEvictionPercent,
+    `${DEFAULT_CONFIG.idleEvictionPercent}%`,
+  ),
+  sizeEvictionPercent: numberField(
+    sizeEvictionPercent,
+    DEFAULT_CONFIG.sizeEvictionPercent,
+    `${DEFAULT_CONFIG.sizeEvictionPercent}%`,
+  ),
+  discardAfterMinutes: numberField(
+    discardMinutes,
+    DEFAULT_CONFIG.discardAfterMinutes,
+    `${DEFAULT_CONFIG.discardAfterMinutes} min`,
+  ),
+  startupSweep: boolField(startupSweep, DEFAULT_CONFIG.startupSweep),
+  protectActive: boolField(protectActive, DEFAULT_CONFIG.protectActive),
+  protectAudible: boolField(protectAudible, DEFAULT_CONFIG.protectAudible),
+  protectPinned: boolField(protectPinned, DEFAULT_CONFIG.protectPinned),
+  protectUnsavedForms: boolField(protectForms, DEFAULT_CONFIG.protectUnsavedForms),
+  skipWhenOffline: boolField(skipOffline, DEFAULT_CONFIG.skipWhenOffline),
+  enableSessionSnapshots: boolField(enableSnapshots, DEFAULT_CONFIG.enableSessionSnapshots),
+  snapshotIntervalMinutes: numberField(
+    snapshotIntervalMinutes,
+    DEFAULT_CONFIG.snapshotIntervalMinutes,
+    `${DEFAULT_CONFIG.snapshotIntervalMinutes} min`,
+  ),
+  allowlist: linesField(allowlist, DEFAULT_CONFIG.allowlist),
 };
+
+const FIELD_KEYS = Object.keys(fieldSpecs) as ConfigKey[];
+const SNAPSHOT_FIELD_KEYS = new Set<ConfigKey>(["enableSessionSnapshots", "snapshotIntervalMinutes"]);
+const MAIN_FORM_KEYS = FIELD_KEYS.filter((key) => !SNAPSHOT_FIELD_KEYS.has(key));
+
+function isConfigKey(key: string | undefined): key is ConfigKey {
+  return key !== undefined && key in fieldSpecs;
+}
+
+function writeFieldFrom<K extends ConfigKey>(key: K, config: TabReaperConfig): void {
+  fieldSpecs[key].write(config[key]);
+}
+
+let displayedConfig = DEFAULT_CONFIG;
+
+function readMainFormConfig(): Partial<TabReaperConfig> {
+  const payload: Partial<TabReaperConfig> = {};
+  const assign = <K extends ConfigKey>(key: K): void => {
+    const value = fieldSpecs[key].read();
+    if (JSON.stringify(value) !== JSON.stringify(displayedConfig[key])) payload[key] = value;
+  };
+  for (const key of MAIN_FORM_KEYS) {
+    assign(key);
+  }
+  return payload;
+}
+
+type SnapshotSetting = "enableSessionSnapshots" | "snapshotIntervalMinutes";
+const snapshotSaveSeq = { enableSessionSnapshots: 0, snapshotIntervalMinutes: 0 };
+
+async function saveSyncSnapshotSettings(key: SnapshotSetting): Promise<void> {
+  syncResetButtons();
+  const value = fieldSpecs[key].read();
+  const seq = ++snapshotSaveSeq[key];
+  const res = (await chrome.runtime.sendMessage({
+    type: "save_config",
+    config: { [key]: value },
+  })) as { ok: boolean; config: TabReaperConfig };
+  if (seq !== snapshotSaveSeq[key]) return;
+  if (res?.ok) {
+    if (fieldSpecs[key].read() === value) writeFieldFrom(key, res.config);
+    syncResetButtons();
+    syncSnapshotsStatusEl.textContent = "Saved.";
+    syncSnapshotsStatusEl.className = "status-text ok";
+  } else {
+    syncSnapshotsStatusEl.textContent = "Failed to save snapshot settings.";
+    syncSnapshotsStatusEl.className = "status-text err";
+  }
+}
 
 const resetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-reset]"));
 
 for (const btn of resetButtons) {
-  const key = btn.dataset.reset as ConfigKey | undefined;
-  if (!key || !(key in fieldBindings)) continue;
-  const binding = fieldBindings[key];
+  const key = btn.dataset.reset;
+  if (!isConfigKey(key)) continue;
+  const spec = fieldSpecs[key];
   btn.innerHTML = UNDO_ICON_SVG;
-  const hint = `Reset to default (${binding.defaultLabel})`;
+  const hint = `Reset to default (${spec.defaultLabel})`;
   btn.title = hint;
   btn.setAttribute("aria-label", hint);
   btn.addEventListener("click", () => {
-    binding.reset();
+    writeFieldFrom(key, DEFAULT_CONFIG);
     syncResetButtons();
+    if (key === "enableSessionSnapshots" || key === "snapshotIntervalMinutes") {
+      void saveSyncSnapshotSettings(key);
+    }
   });
 }
 
 function syncResetButtons(): void {
   for (const btn of resetButtons) {
-    const key = btn.dataset.reset as ConfigKey | undefined;
-    if (!key || !(key in fieldBindings)) continue;
-    btn.classList.toggle("hidden", fieldBindings[key].isDefault());
+    const key = btn.dataset.reset;
+    if (!isConfigKey(key)) continue;
+    btn.classList.toggle("hidden", fieldSpecs[key].isDefault());
   }
 }
 
 function populateForm(config: TabReaperConfig): void {
-  memoryMode.value = config.memoryBudgetMode;
-  memoryFraction.value = String(config.memoryBudgetFraction);
-  memoryGb.value = String(config.memoryBudgetGb);
-  maxActiveTabs.value = String(config.maxActiveTabs);
-  discardMinutes.value = String(config.discardAfterMinutes);
-  archiveHours.value = String(config.archiveAfterHours);
-  startupSweep.checked = config.startupSweep;
-  protectActive.checked = config.protectActive;
-  protectAudible.checked = config.protectAudible;
-  protectPinned.checked = config.protectPinned;
-  protectForms.checked = config.protectUnsavedForms;
-  skipOffline.checked = config.skipWhenOffline;
-  enableSnapshots.checked = config.enableSessionSnapshots;
-  bookmarkFolder.value = config.bookmarkFolderName;
-  allowlist.value = config.allowlist.join("\n");
+  displayedConfig = config;
+  for (const key of FIELD_KEYS) {
+    writeFieldFrom(key, config);
+  }
   syncBudgetVisibility();
   syncResetButtons();
 }
@@ -284,12 +319,21 @@ async function applySyncFolder(path: string | null): Promise<void> {
 }
 
 let currentDeviceId: string | null = null;
+let syncEnabledState = false;
+let hasStoredSnapshots = false;
+
+function updateSnapshotsCardVisibility(): void {
+  snapshotsCardEl.classList.toggle("hidden", !syncEnabledState && !hasStoredSnapshots);
+}
 
 async function refreshSyncUI(): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "get_sync_status" })) as SyncStatus;
   currentDeviceId = status?.deviceId ?? null;
   if (!status?.hostConnected) {
+    syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
+    syncSnapshotsConfigEl.classList.add("hidden");
+    updateSnapshotsCardVisibility();
     btnSyncNow.classList.add("hidden");
     btnSyncDisable.classList.add("hidden");
     syncStatusEl.textContent = "Enable and connect Local Companion above to use Folder Sync.";
@@ -298,7 +342,10 @@ async function refreshSyncUI(): Promise<void> {
   }
 
   if (status.hostOutdated) {
+    syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
+    syncSnapshotsConfigEl.classList.add("hidden");
+    updateSnapshotsCardVisibility();
     btnSyncNow.classList.add("hidden");
     btnSyncDisable.classList.add("hidden");
     syncStatusEl.textContent =
@@ -308,9 +355,12 @@ async function refreshSyncUI(): Promise<void> {
     return;
   }
 
+  syncEnabledState = Boolean(status.enabled);
   syncControlsEl.classList.remove("hidden");
-  btnSyncNow.classList.toggle("hidden", !status.enabled);
-  btnSyncDisable.classList.toggle("hidden", !status.enabled);
+  syncSnapshotsConfigEl.classList.toggle("hidden", !syncEnabledState);
+  updateSnapshotsCardVisibility();
+  btnSyncNow.classList.toggle("hidden", !syncEnabledState);
+  btnSyncDisable.classList.toggle("hidden", !syncEnabledState);
   syncFolderInput.value = status.syncDir ?? "";
   deviceNameInput.value = status.deviceName ?? "";
 
@@ -377,8 +427,10 @@ async function runRestore(snap: SnapshotListItem, mode: RestoreMode): Promise<vo
 
 async function refreshSnapshotsUI(): Promise<void> {
   const snapshots = (await chrome.runtime.sendMessage({ type: "get_snapshots" })) as SnapshotListItem[];
+  hasStoredSnapshots = Array.isArray(snapshots) && snapshots.length > 0;
+  updateSnapshotsCardVisibility();
   snapshotList.replaceChildren();
-  if (!Array.isArray(snapshots) || snapshots.length === 0) {
+  if (!hasStoredSnapshots) {
     const empty = document.createElement("div");
     empty.className = "snapshot-meta";
     empty.textContent = "No snapshots captured yet.";
@@ -501,36 +553,30 @@ async function init(): Promise<void> {
 memoryMode.addEventListener("change", syncBudgetVisibility);
 form.addEventListener("input", syncResetButtons);
 form.addEventListener("change", syncResetButtons);
+enableSnapshots.addEventListener("change", () => {
+  void saveSyncSnapshotSettings("enableSessionSnapshots");
+});
+snapshotIntervalMinutes.addEventListener("input", syncResetButtons);
+snapshotIntervalMinutes.addEventListener("change", () => {
+  void saveSyncSnapshotSettings("snapshotIntervalMinutes");
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload: Partial<TabReaperConfig> = {
-    memoryBudgetMode: memoryMode.value as MemoryBudgetMode,
-    memoryBudgetFraction: Number(memoryFraction.value),
-    memoryBudgetGb: Number(memoryGb.value),
-    maxActiveTabs: Number(maxActiveTabs.value),
-    discardAfterMinutes: Number(discardMinutes.value),
-    archiveAfterHours: Number(archiveHours.value),
-    startupSweep: startupSweep.checked,
-    protectActive: protectActive.checked,
-    protectAudible: protectAudible.checked,
-    protectPinned: protectPinned.checked,
-    protectUnsavedForms: protectForms.checked,
-    skipWhenOffline: skipOffline.checked,
-    enableSessionSnapshots: enableSnapshots.checked,
-    bookmarkFolderName: bookmarkFolder.value.trim(),
-    allowlist: allowlist.value
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean),
-  };
+  const before = Object.fromEntries(MAIN_FORM_KEYS.map(key => [key, JSON.stringify(fieldSpecs[key].read())]));
+  const payload = readMainFormConfig();
 
   const res = (await chrome.runtime.sendMessage({ type: "save_config", config: payload })) as {
     ok: boolean;
     config: TabReaperConfig;
   };
   if (res?.ok) {
-    populateForm(res.config);
+    displayedConfig = res.config;
+    for (const key of MAIN_FORM_KEYS) {
+      if (JSON.stringify(fieldSpecs[key].read()) === before[key]) writeFieldFrom(key, res.config);
+    }
+    syncBudgetVisibility();
+    syncResetButtons();
     saveStatus.textContent = "Saved.";
     saveStatus.className = "status-text ok";
   } else {
@@ -552,8 +598,6 @@ btnCopyInstall.addEventListener("click", async () => {
     btnCopyInstall.textContent = "Copy failed";
   }
 });
-
-const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 
 async function reloadToActivatePermission(): Promise<void> {
   await chrome.storage.local.set({ [REOPEN_OPTIONS_KEY]: true });
@@ -647,7 +691,6 @@ btnSyncNow.addEventListener("click", async () => {
   const res = (await chrome.runtime.sendMessage({ type: "sync_now" })) as {
     ok?: boolean;
     configUpdated?: boolean;
-    archiveChanged?: boolean;
   };
   await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
   if (!res?.ok) {

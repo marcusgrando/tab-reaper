@@ -18,7 +18,6 @@
       <div class="stats">
         <span>Loaded: <strong id="stat-loaded">-</strong></span>
         <span>Discarded: <strong id="stat-discarded">-</strong></span>
-        <span>Archived: <strong id="stat-archived">-</strong></span>
       </div>
     </header>
 
@@ -26,15 +25,6 @@
       <span id="recovery-text"></span>
       <button id="btn-restore-session" type="button" class="item-action">Restore</button>
     </div>
-
-    <nav class="tabs" role="tablist">
-      <button id="tab-open" class="tab-btn active" type="button" role="tab" aria-selected="true">
-        Open
-      </button>
-      <button id="tab-archived" class="tab-btn" type="button" role="tab" aria-selected="false">
-        Archived
-      </button>
-    </nav>
 
     <section class="search-wrap">
       <input
@@ -46,7 +36,7 @@
       />
     </section>
 
-    <main id="archive-list" class="archive-list" role="listbox"></main>
+    <main id="tab-list" class="tab-list" role="listbox"></main>
 
     <div id="action-status" class="action-status hidden"></div>
 

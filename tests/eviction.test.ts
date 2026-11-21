@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { computeBadge } from "../src/background/badge.ts";
-import { MAX_MEMORY_EVICTIONS_PER_PASS, computeOpenTabActions, getTabProtectedReason, isTabProtected, planEvictions } from "../src/background/eviction.ts";
+import {
+  IDLE_EVICTION_MEMORY_THRESHOLD,
+  MAX_MEMORY_EVICTIONS_PER_PASS,
+  SIZE_EVICTION_MEMORY_THRESHOLD,
+  computeOpenTabActions,
+  getTabProtectedReason,
+  isTabProtected,
+  planEvictions,
+} from "../src/background/eviction.ts";
 import { computeWeightMultiplier } from "../src/background/sampler.ts";
 import { createEmptyActivityState, recordTabVisit } from "../src/background/tracker.ts";
 import {
@@ -23,6 +31,23 @@ function makeTab(id: number, overrides: Partial<TabSummary> = {}): TabSummary {
     pinned: false,
     discarded: false,
     windowId: 1,
+    ...overrides,
+  };
+}
+
+function makeMemory(
+  usageRatio: number,
+  overrides: Partial<MemorySnapshot> = {},
+): MemorySnapshot {
+  const budgetBytes = 16 * 1024 ** 3;
+  return {
+    source: "native_host",
+    usedBytes: Math.ceil(usageRatio * budgetBytes),
+    budgetBytes,
+    systemTotalBytes: 32 * 1024 ** 3,
+    systemAvailableBytes: 8 * 1024 ** 3,
+    overBudget: usageRatio >= 1.0,
+    checkedAt: 1_700_000_000_000,
     ...overrides,
   };
 }
@@ -62,6 +87,29 @@ describe("config helpers", () => {
     expect(matchGlob(evilPath, "/*/*/*/*/*/*/*/*/*z")).toBe(false);
     expect(performance.now() - start).toBeLessThan(50);
   });
+
+  test("sanitizeConfig defaults and clamps snapshotIntervalMinutes (1..1440) and eviction percentages (10..100)", () => {
+    const defaults = sanitizeConfig(undefined);
+    expect(defaults.snapshotIntervalMinutes).toBe(5);
+    expect(defaults.idleEvictionPercent).toBe(80);
+    expect(defaults.sizeEvictionPercent).toBe(100);
+
+    expect(sanitizeConfig({ snapshotIntervalMinutes: 0 }).snapshotIntervalMinutes).toBe(1);
+    expect(sanitizeConfig({ snapshotIntervalMinutes: 5000 }).snapshotIntervalMinutes).toBe(1440);
+    expect(sanitizeConfig({ snapshotIntervalMinutes: 30 }).snapshotIntervalMinutes).toBe(30);
+
+    expect(sanitizeConfig({ idleEvictionPercent: 5 }).idleEvictionPercent).toBe(10);
+    expect(sanitizeConfig({ idleEvictionPercent: 120 }).idleEvictionPercent).toBe(100);
+    expect(sanitizeConfig({ idleEvictionPercent: 70, sizeEvictionPercent: 90 })).toMatchObject({
+      idleEvictionPercent: 70,
+      sizeEvictionPercent: 90,
+    });
+    // sizeEvictionPercent is clamped to at least idleEvictionPercent.
+    expect(sanitizeConfig({ idleEvictionPercent: 85, sizeEvictionPercent: 60 })).toMatchObject({
+      idleEvictionPercent: 85,
+      sizeEvictionPercent: 85,
+    });
+  });
 });
 
 describe("eviction engine", () => {
@@ -79,14 +127,48 @@ describe("eviction engine", () => {
     expect(isTabProtected(makeTab(6), cfg)).toBe(false);
   });
 
-  test("enforces maxActiveTabs and evicts heaviest-weighted tab first", () => {
-    const cfg = sanitizeConfig({ maxActiveTabs: 2, discardAfterMinutes: 60 });
+  test("never discards below idleEvictionPercent memory budget even when tabs are idle", () => {
+    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100, discardAfterMinutes: 10 });
     const tabs = [makeTab(1), makeTab(2), makeTab(3)];
     let activity = createEmptyActivityState();
-    // Tab 1 idle 8 min (lightweight), Tab 2 idle 5 min (very heavy), Tab 3 idle 1 min (lightweight)
-    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 8 * 60_000);
-    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 5 * 60_000);
-    activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 1 * 60_000);
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 90 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 60 * 60_000);
+    activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 30 * 60_000);
+
+    expect(
+      planEvictions({
+        tabs,
+        activity,
+        weights: new Map(),
+        config: cfg,
+        memory: makeMemory(IDLE_EVICTION_MEMORY_THRESHOLD - 0.01),
+        now,
+        mode: "sweep",
+      }),
+    ).toEqual([]);
+
+    expect(
+      planEvictions({
+        tabs,
+        activity,
+        weights: new Map(),
+        config: cfg,
+        memory: null,
+        now,
+        mode: "sweep",
+      }),
+    ).toEqual([]);
+  });
+
+  test("between idleEvictionPercent and sizeEvictionPercent, discards idle tabs oldest-first ignoring heavier younger tabs, capped at 2 per pass", () => {
+    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100, discardAfterMinutes: 15 });
+    const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4)];
+    let activity = createEmptyActivityState();
+    // Tab 1 idle 45m (light), Tab 2 idle 20m (very heavy), Tab 3 idle 30m (light), Tab 4 idle 5m (not idle)
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 45 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 20 * 60_000);
+    activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 30 * 60_000);
+    activity = recordTabVisit(activity, 4, tabs[3]!.url, now - 5 * 60_000);
 
     const weights = new Map<number, TabWeightSample>([
       [
@@ -102,10 +184,10 @@ describe("eviction engine", () => {
       [
         2,
         {
-          jsHeapBytes: 250 * 1024 ** 2,
+          jsHeapBytes: 300 * 1024 ** 2,
           domNodes: 8000,
           mediaNodes: 4,
-          weightMultiplier: computeWeightMultiplier({ jsHeapBytes: 250 * 1024 ** 2, domNodes: 8000, mediaNodes: 4 }),
+          weightMultiplier: computeWeightMultiplier({ jsHeapBytes: 300 * 1024 ** 2, domNodes: 8000, mediaNodes: 4 }),
           sampledAt: now,
         },
       ],
@@ -116,40 +198,107 @@ describe("eviction engine", () => {
       activity,
       weights,
       config: cfg,
-      memory: null,
+      memory: makeMemory(0.85),
       now,
       mode: "sweep",
     });
 
-    expect(planned).toHaveLength(1);
-    expect(planned[0]!.tab.id).toBe(2);
-    expect(planned[0]!.reason).toBe("over_tab_cap");
+    expect(planned).toHaveLength(MAX_MEMORY_EVICTIONS_PER_PASS);
+    expect(planned.map((p) => p.tab.id)).toEqual([1, 3]);
+    expect(planned.every((p) => p.reason === "idle_timeout")).toBe(true);
   });
 
-  test("caps memory-pressure evictions per pass to avoid over-discarding", () => {
-    const cfg = sanitizeConfig({ maxActiveTabs: 10, discardAfterMinutes: 60 });
+  test("honors custom idleEvictionPercent and sizeEvictionPercent thresholds", () => {
+    const cfg = sanitizeConfig({ idleEvictionPercent: 60, sizeEvictionPercent: 85, discardAfterMinutes: 15 });
+    const tabs = [makeTab(1), makeTab(2)];
+    let activity = createEmptyActivityState();
+    // Tab 1 oldest idle (30m) and light; Tab 2 recent (2m) and heavy
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 30 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 2 * 60_000);
+
+    const weights = new Map<number, TabWeightSample>([
+      [1, { jsHeapBytes: 10 * 1024 ** 2, domNodes: 200, mediaNodes: 0, weightMultiplier: 1.0, sampledAt: now }],
+      [2, { jsHeapBytes: 300 * 1024 ** 2, domNodes: 6000, mediaNodes: 2, weightMultiplier: 3.0, sampledAt: now }],
+    ]);
+
+    expect(
+      planEvictions({ tabs, activity, weights, config: cfg, memory: makeMemory(0.59), now, mode: "sweep" }),
+    ).toEqual([]);
+
+    const idleBand = planEvictions({ tabs, activity, weights, config: cfg, memory: makeMemory(0.65), now, mode: "sweep" });
+    expect(idleBand.map((p) => ({ id: p.tab.id, reason: p.reason }))).toEqual([{ id: 1, reason: "idle_timeout" }]);
+
+    const sizeBand = planEvictions({ tabs, activity, weights, config: cfg, memory: makeMemory(0.85), now, mode: "sweep" });
+    expect(sizeBand.map((p) => ({ id: p.tab.id, reason: p.reason }))).toEqual([
+      { id: 2, reason: "over_memory_budget" },
+      { id: 1, reason: "over_memory_budget" },
+    ]);
+  });
+
+  test("at >= sizeEvictionPercent with weight samples, discards heaviest tabs first capped at 2 per pass", () => {
+    const cfg = sanitizeConfig({ discardAfterMinutes: 60 });
+    const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4)];
+    let activity = createEmptyActivityState();
+    // Tab 1 oldest idle (40m) but tiny; Tab 2 recent (2m) but heaviest heap;
+    // Tab 3 recent (3m) with medium heap; Tab 4 medium idle (20m) with zero heap but high weightMultiplier.
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 40 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 2 * 60_000);
+    activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 3 * 60_000);
+    activity = recordTabVisit(activity, 4, tabs[3]!.url, now - 20 * 60_000);
+
+    const weights = new Map<number, TabWeightSample>([
+      [1, { jsHeapBytes: 10 * 1024 ** 2, domNodes: 200, mediaNodes: 0, weightMultiplier: 1.0, sampledAt: now }],
+      [2, { jsHeapBytes: 400 * 1024 ** 2, domNodes: 2000, mediaNodes: 0, weightMultiplier: 2.5, sampledAt: now }],
+      [3, { jsHeapBytes: 200 * 1024 ** 2, domNodes: 1500, mediaNodes: 0, weightMultiplier: 1.8, sampledAt: now }],
+      [4, { jsHeapBytes: 0, domNodes: 9000, mediaNodes: 4, weightMultiplier: 3.5, sampledAt: now }],
+    ]);
+
+    const planned = planEvictions({
+      tabs,
+      activity,
+      weights,
+      config: cfg,
+      memory: makeMemory(SIZE_EVICTION_MEMORY_THRESHOLD),
+      now,
+      mode: "sweep",
+    });
+
+    expect(planned).toHaveLength(MAX_MEMORY_EVICTIONS_PER_PASS);
+    expect(planned.map((p) => p.tab.id)).toEqual([2, 3]);
+    expect(planned.every((p) => p.reason === "over_memory_budget")).toBe(true);
+
+    // When jsHeapBytes are equal (e.g. 0), fall back to weightMultiplier descending, then idleMinutes descending.
+    const zeroHeapWeights = new Map<number, TabWeightSample>([
+      [1, { jsHeapBytes: 0, domNodes: 200, mediaNodes: 0, weightMultiplier: 1.2, sampledAt: now }],
+      [2, { jsHeapBytes: 0, domNodes: 5000, mediaNodes: 2, weightMultiplier: 2.5, sampledAt: now }],
+      [3, { jsHeapBytes: 0, domNodes: 5000, mediaNodes: 2, weightMultiplier: 2.5, sampledAt: now }],
+    ]);
+    const plannedByWeight = planEvictions({
+      tabs: tabs.slice(0, 3),
+      activity,
+      weights: zeroHeapWeights,
+      config: cfg,
+      memory: makeMemory(1.05),
+      now,
+      mode: "sweep",
+    });
+    expect(plannedByWeight.map((p) => p.tab.id)).toEqual([3, 2]);
+  });
+
+  test("at >= 100% RAM without weight samples, falls back to oldest-idle first capped at 2 per pass", () => {
+    const cfg = sanitizeConfig({ discardAfterMinutes: 60 });
     const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4), makeTab(5)];
     let activity = createEmptyActivityState();
     for (let i = 0; i < tabs.length; i++) {
       activity = recordTabVisit(activity, tabs[i]!.id, tabs[i]!.url, now - (i + 1) * 60_000);
     }
 
-    const overBudgetMemory: MemorySnapshot = {
-      source: "native_host",
-      usedBytes: 18 * 1024 ** 3,
-      budgetBytes: 16 * 1024 ** 3,
-      systemTotalBytes: 32 * 1024 ** 3,
-      systemAvailableBytes: 8 * 1024 ** 3,
-      overBudget: true,
-      checkedAt: now,
-    };
-
     const planned = planEvictions({
       tabs,
       activity,
       weights: new Map(),
       config: cfg,
-      memory: overBudgetMemory,
+      memory: makeMemory(1.125),
       now,
       mode: "sweep",
     });
@@ -201,8 +350,8 @@ describe("eviction engine", () => {
       tabs: [makeTab(1, { status: "loading" }), makeTab(2), makeTab(3)],
       activity: createEmptyActivityState(),
       weights: new Map([[2, formSample]]),
-      config: sanitizeConfig({ maxActiveTabs: 1, discardAfterMinutes: 0 }),
-      memory: null,
+      config: sanitizeConfig({ discardAfterMinutes: 0 }),
+      memory: makeMemory(0.85),
       now,
       mode: "sweep",
     });
@@ -210,7 +359,7 @@ describe("eviction engine", () => {
   });
 
   test("skips all evictions when offline and skipWhenOffline is enabled", () => {
-    const cfg = sanitizeConfig({ maxActiveTabs: 1, discardAfterMinutes: 1, skipWhenOffline: true });
+    const cfg = sanitizeConfig({ discardAfterMinutes: 1, skipWhenOffline: true });
     const tabs = [makeTab(1), makeTab(2), makeTab(3)];
     let activity = createEmptyActivityState();
     for (const tab of tabs) {
@@ -222,7 +371,7 @@ describe("eviction engine", () => {
       activity,
       weights: new Map(),
       config: cfg,
-      memory: null,
+      memory: makeMemory(1.1),
       now,
       mode: "sweep",
       isOnline: false,
@@ -232,23 +381,29 @@ describe("eviction engine", () => {
 });
 
 describe("action badge", () => {
-  test("formats Chrome RAM badge and color thresholds", () => {
+  test("formats Chrome RAM badge and color thresholds aligned with eviction bands", () => {
     const okMem: MemorySnapshot = {
       source: "native_host",
-      usedBytes: 2.6 * 1024 ** 3,
+      usedBytes: Math.round(0.79 * 4 * 1024 ** 3),
       budgetBytes: 4 * 1024 ** 3,
       systemTotalBytes: 8 * 1024 ** 3,
       systemAvailableBytes: 2 * 1024 ** 3,
       overBudget: false,
       checkedAt: 0,
     };
-    expect(computeBadge(okMem, 8, true)).toEqual({ text: "2.6G", color: "#16a34a" });
+    expect(computeBadge(okMem, 8, true)).toEqual({ text: "3.2G", color: "#16a34a" });
 
-    const warnMem = { ...okMem, usedBytes: 3.2 * 1024 ** 3 };
-    expect(computeBadge(warnMem, 8, true)).toEqual({ text: "3.2G", color: "#d97706" });
+    const warn80Mem = { ...okMem, usedBytes: Math.round(0.8 * 4 * 1024 ** 3) };
+    expect(computeBadge(warn80Mem, 8, true)).toEqual({ text: "3.2G", color: "#d97706" });
 
-    const overMem = { ...okMem, usedBytes: 4.5 * 1024 ** 3, overBudget: true };
-    expect(computeBadge(overMem, 8, true)).toEqual({ text: "4.5G", color: "#dc2626" });
+    const warn99Mem = { ...okMem, usedBytes: Math.round(0.99 * 4 * 1024 ** 3) };
+    expect(computeBadge(warn99Mem, 8, true)).toEqual({ text: "4.0G", color: "#d97706" });
+
+    const over100Mem = { ...okMem, usedBytes: 4 * 1024 ** 3, overBudget: false };
+    expect(computeBadge(over100Mem, 8, true)).toEqual({ text: "4.0G", color: "#dc2626" });
+
+    const overFlagMem = { ...okMem, usedBytes: 4.5 * 1024 ** 3, overBudget: true };
+    expect(computeBadge(overFlagMem, 8, true)).toEqual({ text: "4.5G", color: "#dc2626" });
 
     expect(computeBadge(okMem, 8, false)).toEqual({ text: "OFF", color: "#64748b" });
 
@@ -258,56 +413,50 @@ describe("action badge", () => {
 });
 
 describe("open tab action coherence", () => {
-  test("hides Keep, Sleep, and Archive when tab is protected by config or loading", () => {
+  test("hides Keep and Sleep when tab is protected by config or loading", () => {
     const cfg = sanitizeConfig({ protectPinned: true, protectActive: true, protectAudible: true });
     expect(computeOpenTabActions(makeTab(1, { pinned: true }), cfg)).toEqual({
       protectedReason: "Pinned",
       canKeep: false,
       canSleep: false,
-      canArchive: false,
       canClose: false,
     });
     expect(computeOpenTabActions(makeTab(2, { active: true }), cfg)).toEqual({
       protectedReason: "Active",
       canKeep: false,
       canSleep: false,
-      canArchive: false,
       canClose: true,
     });
     expect(computeOpenTabActions(makeTab(3, { status: "loading" }), cfg)).toEqual({
       protectedReason: "Loading",
       canKeep: false,
       canSleep: false,
-      canArchive: false,
       canClose: true,
     });
   });
 
-  test("exposes Keep, Sleep, and Archive on pinned tab when protectPinned is disabled, but still hides Close", () => {
+  test("exposes Keep and Sleep on pinned tab when protectPinned is disabled, but still hides Close", () => {
     const cfg = sanitizeConfig({ protectPinned: false });
     expect(computeOpenTabActions(makeTab(1, { pinned: true }), cfg)).toEqual({
       protectedReason: null,
       canKeep: true,
       canSleep: true,
-      canArchive: true,
       canClose: false,
     });
   });
 
-  test("shows only Kept toggle when user locked a tab (no Close), and Keep + Archive + Close when sleeping", () => {
+  test("shows only Kept toggle when user locked a tab (no Close), and Keep + Close when sleeping", () => {
     const cfg = sanitizeConfig({});
     expect(computeOpenTabActions(makeTab(1, { kept: true }), cfg)).toEqual({
       protectedReason: "Kept",
       canKeep: true,
       canSleep: false,
-      canArchive: false,
       canClose: false,
     });
     expect(computeOpenTabActions(makeTab(2, { discarded: true }), cfg)).toEqual({
       protectedReason: null,
       canKeep: true,
       canSleep: false,
-      canArchive: true,
       canClose: true,
     });
   });

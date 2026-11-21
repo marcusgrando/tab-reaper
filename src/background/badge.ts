@@ -1,4 +1,5 @@
 import type { MemorySnapshot } from "../shared/types.ts";
+import { IDLE_EVICTION_MEMORY_THRESHOLD, SIZE_EVICTION_MEMORY_THRESHOLD } from "./eviction.ts";
 
 export interface BadgeDisplay {
   text: string;
@@ -22,16 +23,19 @@ export function computeBadge(
   memory: MemorySnapshot | null,
   loadedCount: number,
   isOnline: boolean,
+  thresholds?: { idleRatio?: number; sizeRatio?: number },
 ): BadgeDisplay {
   if (!isOnline) {
     return { text: "OFF", color: COLOR_OFFLINE };
   }
 
+  const idleRatio = thresholds?.idleRatio ?? IDLE_EVICTION_MEMORY_THRESHOLD;
+  const sizeRatio = Math.max(idleRatio, thresholds?.sizeRatio ?? SIZE_EVICTION_MEMORY_THRESHOLD);
   const ratio = memory && memory.budgetBytes > 0 ? memory.usedBytes / memory.budgetBytes : 0;
   let color = COLOR_OK;
-  if (memory?.overBudget || ratio >= 0.95) {
+  if (memory?.overBudget || ratio >= sizeRatio) {
     color = COLOR_OVER;
-  } else if (ratio >= 0.75) {
+  } else if (ratio >= idleRatio) {
     color = COLOR_WARN;
   }
 
@@ -46,9 +50,10 @@ export async function updateActionBadge(
   memory: MemorySnapshot | null,
   loadedCount: number,
   isOnline: boolean,
+  thresholds?: { idleRatio?: number; sizeRatio?: number },
 ): Promise<void> {
   if (!chrome.action?.setBadgeText) return;
-  const badge = computeBadge(memory, loadedCount, isOnline);
+  const badge = computeBadge(memory, loadedCount, isOnline, thresholds);
   try {
     await Promise.all([
       chrome.action.setBadgeText({ text: badge.text }),

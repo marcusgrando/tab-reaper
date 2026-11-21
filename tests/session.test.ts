@@ -34,7 +34,7 @@ describe("session snapshots and recovery", () => {
   let nextTabId: number;
 
   beforeEach(() => {
-    storageData = {};
+    storageData = { "tabReaper.folderSyncOptedIn": true };
     openChromeTabs = [];
     createdTabs = [];
     groupedCalls = [];
@@ -193,7 +193,7 @@ describe("session snapshots and recovery", () => {
     const hugeUrl = `https://mermaid.live/edit#${"a".repeat(MAX_SNAPSHOT_URL_LEN + 100)}`;
     const snap = await captureSessionSnapshot(
       [makeTab(1), makeTab(2, { url: hugeUrl })],
-      { force: true, now: t0 },
+      { force: true, trigger: "auto", now: t0 },
     );
     expect(snap?.tabCount).toBe(1);
     expect(snap?.tabs[0]!.url).toBe("https://example1.com/page");
@@ -246,6 +246,17 @@ describe("session snapshots and recovery", () => {
     expect(new TextEncoder().encode(JSON.stringify(await loadSnapshots())).length).toBeLessThanOrEqual(1_000_000);
   });
 
+  test("a quota-limited capture keeps the last complete local session", async () => {
+    const now = Date.now();
+    const tabs = Array.from({ length: 400 }, (_, i) => makeTab(i, { url: `https://docs.test/${i}/${"x".repeat(2990)}` }));
+    const whole = await captureSessionSnapshot(tabs.slice(0, 5), { now });
+    const partial = await captureSessionSnapshot(tabs, { now: now + 400_000 });
+    expect(partial?.complete).toBe(false);
+    const stored = await loadSnapshots();
+    expect(stored.find(s => s.id === whole!.id)?.tabs).toEqual(whole!.tabs);
+    expect(new TextEncoder().encode(JSON.stringify(stored)).length).toBeLessThanOrEqual(1_000_000);
+  });
+
   test("a closed window cannot evict the only recoverable session from a full local cache", async () => {
     const tabs = Array.from({ length: 400 }, (_, id) => makeTab(id, { url: `https://docs.test/${id}/${"x".repeat(2990)}` }));
     const latest = await captureSessionSnapshot(tabs);
@@ -265,19 +276,12 @@ describe("session snapshots and recovery", () => {
     expect(pre?.tabs.filter(t => t.kept).map(t => t.url)).toEqual([makeTab(3).url]);
   });
 
-  test("restores distinct unnamed groups with identical colors and legacy groups without IDs", async () => {
+  test("restores distinct unnamed groups with identical colors", async () => {
     Object.assign(chrome.tabGroups, { get: async (id: number) => ({ title: "", color: "blue", collapsed: id === 7 }) });
     const tabs = [makeTab(1, { groupId: 7 }), makeTab(2, { groupId: 8 }), makeTab(3, { groupId: 7 })];
     const snap = (await captureSessionSnapshot(tabs, { force: true }))!;
     await restoreSessionSnapshot(snap.id);
     expect(groupedCalls.map(g => [g.tabIds, g.collapsed])).toEqual([[[100, 102], true], [[101], false]]);
-    const old = { ...snap, tabs: snap.tabs.map(t => ({ ...t, groupId: undefined })) };
-    storageData["tabReaper.sessionSnapshots"] = [old];
-    groupedCalls.length = 0;
-    openChromeTabs.length = 0;
-    await restoreSessionSnapshot(old.id);
-    expect(groupedCalls).toHaveLength(1);
-    expect(groupedCalls[0]?.tabIds.length).toBe(3);
   });
 
   test.each(["maximized", "fullscreen"] as const)("restores separate windows and saved focus with a %s background window", async state => {
@@ -329,5 +333,88 @@ describe("session snapshots and recovery", () => {
     expect(createdWindows).toHaveLength(2);
     expect(createdWindows[1]!.state).toBe(state);
     expect(focused).toBe(createdWindows[0]!.id);
+  });
+
+  test("findRecoverableSnapshot returns null when folder sync is not opted in", async () => {
+    const t0 = 1_700_000_000_000;
+    const tabs = [1, 2, 3, 4, 5].map((id) => makeTab(id));
+    const snap = await captureSessionSnapshot(tabs, { now: t0 });
+    expect(snap).not.toBeNull();
+    const stored = await loadSnapshots();
+    expect(await findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS)).not.toBeNull();
+
+    storageData["tabReaper.folderSyncOptedIn"] = false;
+    expect(await findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS)).toBeNull();
+  });
+
+  test("honors configurable intervalMinutes when throttling automatic captures", async () => {
+    const t0 = 1_700_000_000_000;
+    const snap1 = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3)], {
+      now: t0,
+      intervalMinutes: 60,
+    });
+    expect(snap1).not.toBeNull();
+
+    // 30 minutes later -> still within 60-minute interval, must be skipped
+    const skipped = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(4)], {
+      now: t0 + 30 * 60_000,
+      intervalMinutes: 60,
+    });
+    expect(skipped).toBeNull();
+
+    // 61 minutes later -> interval elapsed, must capture
+    const snap2 = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(4)], {
+      now: t0 + 61 * 60_000,
+      intervalMinutes: 60,
+    });
+    expect(snap2).not.toBeNull();
+    expect(await loadSnapshots()).toHaveLength(2);
+  });
+
+  test("partial window_closed captures do not postpone whole-session backups", async () => {
+    const t0 = 1_700_000_000_000;
+    const hour = 60 * 60_000;
+    const snap1 = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3), makeTab(4)], {
+      now: t0,
+      intervalMinutes: 24 * 60,
+    });
+    expect(snap1).not.toBeNull();
+
+    // Closing a small 2-tab window 12 hours later creates a window_closed snapshot
+    const partial = await captureSessionSnapshot([makeTab(10), makeTab(11)], {
+      now: t0 + 12 * hour,
+      force: true,
+      trigger: "window_closed",
+      label: "Closed window",
+    });
+    expect(partial).not.toBeNull();
+
+    // At 25 hours from snap1 (only 13h from partial), whole-session backup MUST still run
+    const snap2 = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3), makeTab(5)], {
+      now: t0 + 25 * hour,
+      intervalMinutes: 24 * 60,
+    });
+    expect(snap2).not.toBeNull();
+    expect(snap2!.trigger).toBe("auto");
+  });
+
+  test("captureSessionSnapshot refuses to persist when folder sync opt-in is disabled or auto snapshots disabled", async () => {
+    storageData["tabReaper.folderSyncOptedIn"] = false;
+    const snap = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3)], {
+      now: 1_700_000_000_000,
+    });
+    expect(snap).toBeNull();
+    expect(await loadSnapshots()).toEqual([]);
+
+    // Forced window_closed capture must also be skipped when enableSessionSnapshots is false
+    storageData["tabReaper.folderSyncOptedIn"] = true;
+    storageData["tabReaper.config"] = { enableSessionSnapshots: false };
+    const closedSnap = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3)], {
+      now: 1_700_000_000_000,
+      force: true,
+      trigger: "window_closed",
+    });
+    expect(closedSnap).toBeNull();
+    expect(await loadSnapshots()).toEqual([]);
   });
 });
