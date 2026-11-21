@@ -19,6 +19,7 @@ export interface TabReaperConfig {
   protectPinned: boolean;
   protectUnsavedForms: boolean;
   skipWhenOffline: boolean;
+  enableSessionSnapshots: boolean;
   bookmarkFolderName: string;
   /** Domain or glob patterns excluded from discard and archive. */
   allowlist: string[];
@@ -158,6 +159,7 @@ export type BackgroundMessage =
   | { type: "archive_old_now" }
   | { type: "get_snapshots" }
   | { type: "capture_snapshot_now" }
+  | { type: "clear_snapshots" }
   | { type: "restore_snapshot"; id: string }
   | { type: "save_config"; config: Partial<TabReaperConfig> }
   | { type: "test_native_host" };

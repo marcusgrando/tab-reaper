@@ -18,7 +18,9 @@ import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from 
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
   captureSessionSnapshot,
+  clearSnapshots,
   findRecoverableSnapshot,
+  isRestoreInFlight,
   loadSnapshots,
   restoreSessionSnapshot,
 } from "./session.ts";
@@ -38,6 +40,13 @@ import {
 const SWEEP_ALARM = "tabReaper.sweep";
 const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 let sweepInFlight = false;
+let activityQueue: Promise<void> = Promise.resolve();
+
+function enqueueActivityUpdate(fn: () => Promise<void>): Promise<void> {
+  const next = activityQueue.then(fn, fn);
+  activityQueue = next.catch(() => {});
+  return next;
+}
 
 async function maybeReopenOptions(): Promise<void> {
   try {
@@ -91,7 +100,7 @@ async function ensureAlarm(): Promise<void> {
 }
 
 async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarded: number; archived: number }> {
-  if (sweepInFlight) return { discarded: 0, archived: 0 };
+  if (sweepInFlight || isRestoreInFlight()) return { discarded: 0, archived: 0 };
   sweepInFlight = true;
 
   try {
@@ -173,8 +182,12 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
     const loadedCount = Math.max(0, tabs.filter((t) => !t.discarded).length - discarded);
     await updateActionBadge(memory, loadedCount, online);
 
-    if (mode === "sweep") {
-      await captureSessionSnapshot(tabs, { now });
+    if (mode === "sweep" && config.enableSessionSnapshots) {
+      try {
+        await captureSessionSnapshot(tabs, { now });
+      } catch {
+        // Snapshot persistence is best-effort and must never fail a sweep.
+      }
     }
 
     return { discarded, archived };
@@ -303,8 +316,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     const tab = await chrome.tabs.get(tabId);
     if (tab.incognito) return;
     const url = tab.url ?? tab.pendingUrl;
-    const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
-    await saveActivityState(state);
+    await enqueueActivityUpdate(async () => {
+      const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
+      await saveActivityState(state);
+    });
     await runSweep("sweep");
   } catch {
     // Tab closed before lookup.
@@ -312,10 +327,13 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
-  if (typeof tab.id !== "number" || tab.incognito) return;
+  if (typeof tab.id !== "number" || tab.incognito || isRestoreInFlight()) return;
+  const tabId = tab.id;
   const url = tab.url ?? tab.pendingUrl;
-  const state = recordTabVisit(await loadActivityState(), tab.id, url, Date.now());
-  await saveActivityState(state);
+  await enqueueActivityUpdate(async () => {
+    const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
+    await saveActivityState(state);
+  });
   await runSweep("sweep");
 });
 
@@ -323,15 +341,23 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (tab.incognito) return;
   if (changeInfo.url && !isInternalUrl(changeInfo.url)) {
     if (tab.active) {
-      const state = recordTabVisit(await loadActivityState(), tabId, changeInfo.url, Date.now());
-      await saveActivityState(state);
+      const nextUrl = changeInfo.url;
+      await enqueueActivityUpdate(async () => {
+        const state = recordTabVisit(await loadActivityState(), tabId, nextUrl, Date.now());
+        await saveActivityState(state);
+      });
     }
   }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const state = removeTrackedTab(await loadActivityState(), tabId);
-  await Promise.all([saveActivityState(state), removeKeptTabId(tabId)]);
+  await Promise.all([
+    enqueueActivityUpdate(async () => {
+      const state = removeTrackedTab(await loadActivityState(), tabId);
+      await saveActivityState(state);
+    }),
+    removeKeptTabId(tabId),
+  ]);
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -475,6 +501,10 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       const tabs = await queryAllTabs();
       const snapshot = await captureSessionSnapshot(tabs, { force: true });
       return { ok: Boolean(snapshot), snapshot };
+    }
+    case "clear_snapshots": {
+      await clearSnapshots();
+      return { ok: true };
     }
     case "restore_snapshot": {
       const res = await restoreSessionSnapshot(message.id);

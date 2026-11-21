@@ -4,6 +4,7 @@ set -euo pipefail
 REPO="${TAB_REAPER_REPO:-marcusgrando/tab-reaper}"
 VERSION="${TAB_REAPER_VERSION:-latest}"
 FROM_SOURCE=0
+RUN_TEST=0
 EXT_ID=""
 
 while [ $# -gt 0 ]; do
@@ -12,9 +13,13 @@ while [ $# -gt 0 ]; do
       FROM_SOURCE=1
       shift
       ;;
+    --test)
+      RUN_TEST=1
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--from-source] <chrome-extension-id>"
-      echo "Downloads the prebuilt tab-reaper-host binary from GitHub Releases (or builds locally with --from-source)."
+      echo "Usage: $0 [--from-source] [--test] <chrome-extension-id>"
+      echo "Downloads and verifies the prebuilt tab-reaper-host binary from GitHub Releases (or builds locally with --from-source)."
       exit 0
       ;;
     *)
@@ -25,7 +30,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$EXT_ID" ]; then
-  echo "Usage: $0 [--from-source] <chrome-extension-id>" >&2
+  echo "Usage: $0 [--from-source] [--test] <chrome-extension-id>" >&2
   echo "Copy the full 32-character Extension ID from chrome://extensions or the Tab Reaper Settings page." >&2
   exit 1
 fi
@@ -66,6 +71,45 @@ case "$ARCH" in
     ;;
 esac
 
+release_url() {
+  local asset="$1"
+  if [ "$VERSION" = "latest" ]; then
+    echo "https://github.com/${REPO}/releases/latest/download/${asset}"
+  else
+    echo "https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
+  fi
+}
+
+sha256_file() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    echo "Error: neither shasum nor sha256sum found." >&2
+    exit 1
+  fi
+}
+
+verify_checksum() {
+  local sums_file="$1"
+  local asset="$2"
+  local file="$3"
+  local expected
+  expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name {print $1; exit}' "$sums_file")"
+  if [ -z "$expected" ]; then
+    echo "Error: checksum for ${asset} not found in SHA256SUMS.txt." >&2
+    return 1
+  fi
+  local actual
+  actual="$(sha256_file "$file")"
+  if [ "$actual" != "$expected" ]; then
+    echo "Error: SHA-256 mismatch for ${asset} (expected ${expected}, got ${actual})." >&2
+    return 1
+  fi
+}
+
 build_from_source() {
   if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/Cargo.toml" ]; then
     echo "Error: local Cargo.toml not found for --from-source build." >&2
@@ -84,36 +128,24 @@ build_from_source() {
 
 download_prebuilt() {
   local asset="tab-reaper-host-${PLATFORM}-${ARCH_NAME}"
-  local url
-  if [ "$VERSION" = "latest" ]; then
-    url="https://github.com/${REPO}/releases/latest/download/${asset}"
-  else
-    url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
-  fi
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' RETURN
 
-  local tmp_file
-  tmp_file="$(mktemp)"
+  echo "Downloading release checksums..."
+  curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$tmp_dir/SHA256SUMS.txt"
+
   echo "Downloading ${asset} from GitHub Releases..."
-  if curl -fsSL "$url" -o "$tmp_file"; then
-    install -m 755 "$tmp_file" "$BIN_PATH"
-    rm -f "$tmp_file"
-    return 0
-  fi
-  rm -f "$tmp_file"
-  return 1
+  curl -fsSL "$(release_url "$asset")" -o "$tmp_dir/tab-reaper-host"
+
+  verify_checksum "$tmp_dir/SHA256SUMS.txt" "$asset" "$tmp_dir/tab-reaper-host"
+  install -m 755 "$tmp_dir/tab-reaper-host" "$BIN_PATH"
 }
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
   build_from_source
-elif ! download_prebuilt; then
-  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-    echo "Prebuilt binary not available yet; falling back to local Rust build..."
-    build_from_source
-  else
-    echo "Error: failed to download prebuilt binary for ${PLATFORM}-${ARCH_NAME}." >&2
-    echo "Check https://github.com/${REPO}/releases or build from source with --from-source." >&2
-    exit 1
-  fi
+else
+  download_prebuilt
 fi
 
 if [ "$PLATFORM" = "darwin" ]; then
@@ -130,7 +162,29 @@ else
   )
 fi
 
+REGISTERED=0
 for DIR in "${HOST_DIRS[@]}"; do
+  PARENT_DIR="$(dirname "$DIR")"
+  if [ -d "$PARENT_DIR" ]; then
+    mkdir -p "$DIR"
+    cat > "$DIR/com.tabreaper.host.json" <<EOF
+{
+  "name": "com.tabreaper.host",
+  "description": "Tab Reaper exact Chrome memory reporter",
+  "path": "$BIN_PATH",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://$EXT_ID/"
+  ]
+}
+EOF
+    echo "Registered native host manifest at $DIR/com.tabreaper.host.json"
+    REGISTERED=1
+  fi
+done
+
+if [ "$REGISTERED" -eq 0 ]; then
+  DIR="${HOST_DIRS[0]}"
   mkdir -p "$DIR"
   cat > "$DIR/com.tabreaper.host.json" <<EOF
 {
@@ -144,7 +198,9 @@ for DIR in "${HOST_DIRS[@]}"; do
 }
 EOF
   echo "Registered native host manifest at $DIR/com.tabreaper.host.json"
-done
+fi
 
-echo "Self-test (--once):"
-"$BIN_PATH" --once
+if [ "$RUN_TEST" -eq 1 ]; then
+  echo "Self-test (--once):"
+  "$BIN_PATH" --once
+fi

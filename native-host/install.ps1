@@ -2,6 +2,7 @@ param(
     [Parameter(Position = 0)]
     [string]$ExtensionId,
     [switch]$FromSource,
+    [switch]$Test,
     [string]$Version = "latest",
     [string]$Repo = "marcusgrando/tab-reaper"
 )
@@ -9,7 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $ExtensionId) {
-    Write-Error "Usage: install.ps1 [-FromSource] <chrome-extension-id>`nCopy the full 32-character Extension ID from chrome://extensions or Tab Reaper Settings."
+    Write-Error "Usage: install.ps1 [-FromSource] [-Test] <chrome-extension-id>`nCopy the full 32-character Extension ID from chrome://extensions or Tab Reaper Settings."
     exit 1
 }
 
@@ -25,6 +26,32 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
 $CargoToml = if ($ScriptDir) { Join-Path $ScriptDir "Cargo.toml" } else { "" }
+
+function Get-ReleaseUrl([string]$Asset) {
+    if ($Version -eq "latest") {
+        return "https://github.com/$Repo/releases/latest/download/$Asset"
+    }
+    return "https://github.com/$Repo/releases/download/$Version/$Asset"
+}
+
+function Test-AssetChecksum([string]$SumsPath, [string]$AssetName, [string]$FilePath) {
+    $Expected = $null
+    foreach ($Line in Get-Content -Path $SumsPath) {
+        if ($Line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
+            if ($Matches[2] -eq $AssetName) {
+                $Expected = $Matches[1].ToLowerInvariant()
+                break
+            }
+        }
+    }
+    if (-not $Expected) {
+        throw "Checksum for $AssetName not found in SHA256SUMS.txt."
+    }
+    $Actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Actual -ne $Expected) {
+        throw "SHA-256 mismatch for $AssetName (expected $Expected, got $Actual)."
+    }
+}
 
 function Build-FromSource {
     if (-not $CargoToml -or -not (Test-Path $CargoToml)) {
@@ -44,29 +71,29 @@ function Build-FromSource {
 
 function Download-Prebuilt {
     $Asset = "tab-reaper-host-windows-x86_64.exe"
-    $Url = if ($Version -eq "latest") {
-        "https://github.com/$Repo/releases/latest/download/$Asset"
-    } else {
-        "https://github.com/$Repo/releases/download/$Version/$Asset"
-    }
-    Write-Host "Downloading $Asset from GitHub Releases..."
+    $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-host-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $BinPath -UseBasicParsing
-        return $true
-    } catch {
-        return $false
+        $SumsPath = Join-Path $TmpDir "SHA256SUMS.txt"
+        $TmpBin = Join-Path $TmpDir $Asset
+
+        Write-Host "Downloading release checksums..."
+        Invoke-WebRequest -Uri (Get-ReleaseUrl "SHA256SUMS.txt") -OutFile $SumsPath -UseBasicParsing
+
+        Write-Host "Downloading $Asset from GitHub Releases..."
+        Invoke-WebRequest -Uri (Get-ReleaseUrl $Asset) -OutFile $TmpBin -UseBasicParsing
+
+        Test-AssetChecksum $SumsPath $Asset $TmpBin
+        Move-Item -Path $TmpBin -Destination $BinPath -Force
+    } finally {
+        Remove-Item -Path $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 if ($FromSource) {
     Build-FromSource
-} elseif (-not (Download-Prebuilt)) {
-    if ($CargoToml -and (Test-Path $CargoToml) -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Write-Host "Prebuilt binary not available yet; falling back to local Rust build..."
-        Build-FromSource
-    } else {
-        throw "Failed to download prebuilt binary from https://github.com/$Repo/releases."
-    }
+} else {
+    Download-Prebuilt
 }
 
 $Manifest = @{
@@ -91,5 +118,7 @@ foreach ($Key in $RegistryKeys) {
     Write-Host "Registered native host at $Key"
 }
 
-Write-Host "Self-test (--once):"
-& $BinPath --once
+if ($Test) {
+    Write-Host "Self-test (--once):"
+    & $BinPath --once
+}

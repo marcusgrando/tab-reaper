@@ -16,6 +16,7 @@ const protectAudible = document.getElementById("protect-audible") as HTMLInputEl
 const protectPinned = document.getElementById("protect-pinned") as HTMLInputElement;
 const protectForms = document.getElementById("protect-forms") as HTMLInputElement;
 const skipOffline = document.getElementById("skip-offline") as HTMLInputElement;
+const enableSnapshots = document.getElementById("enable-snapshots") as HTMLInputElement;
 const bookmarkFolder = document.getElementById("bookmark-folder") as HTMLInputElement;
 const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
 const saveStatus = document.getElementById("save-status") as HTMLElement;
@@ -28,6 +29,7 @@ const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonEl
 const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonElement;
 const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
 const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
+const btnClearSnapshots = document.getElementById("btn-clear-snapshots") as HTMLButtonElement;
 const snapshotStatus = document.getElementById("snapshot-status") as HTMLElement;
 const snapshotList = document.getElementById("snapshot-list") as HTMLElement;
 
@@ -134,6 +136,13 @@ const fieldBindings: Record<ConfigKey, FieldBinding> = {
     },
     defaultLabel: DEFAULT_CONFIG.skipWhenOffline ? "enabled" : "disabled",
   },
+  enableSessionSnapshots: {
+    isDefault: () => enableSnapshots.checked === DEFAULT_CONFIG.enableSessionSnapshots,
+    reset: () => {
+      enableSnapshots.checked = DEFAULT_CONFIG.enableSessionSnapshots;
+    },
+    defaultLabel: DEFAULT_CONFIG.enableSessionSnapshots ? "enabled" : "disabled",
+  },
   bookmarkFolderName: {
     isDefault: () => bookmarkFolder.value.trim() === DEFAULT_CONFIG.bookmarkFolderName,
     reset: () => {
@@ -191,6 +200,7 @@ function populateForm(config: TabReaperConfig): void {
   protectPinned.checked = config.protectPinned;
   protectForms.checked = config.protectUnsavedForms;
   skipOffline.checked = config.skipWhenOffline;
+  enableSnapshots.checked = config.enableSessionSnapshots;
   bookmarkFolder.value = config.bookmarkFolderName;
   allowlist.value = config.allowlist.join("\n");
   syncBudgetVisibility();
@@ -203,11 +213,12 @@ const WEIGHTED_EVICTION_PERMS: chrome.permissions.Permissions = {
 };
 
 function buildInstallCommand(extensionId: string): string {
+  const versionTag = `v${chrome.runtime.getManifest().version}`;
   const isWindows = /Windows/i.test(navigator.userAgent);
   if (isWindows) {
-    return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.ps1))) ${extensionId}`;
+    return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/${versionTag}/native-host/install.ps1))) -Version ${versionTag} ${extensionId}`;
   }
-  return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.sh | bash -s -- ${extensionId}`;
+  return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/${versionTag}/native-host/install.sh | TAB_REAPER_VERSION=${versionTag} bash -s -- ${extensionId}`;
 }
 
 async function refreshPermissionsUI(): Promise<void> {
@@ -304,6 +315,7 @@ form.addEventListener("submit", async (event) => {
     protectPinned: protectPinned.checked,
     protectUnsavedForms: protectForms.checked,
     skipWhenOffline: skipOffline.checked,
+    enableSessionSnapshots: enableSnapshots.checked,
     bookmarkFolderName: bookmarkFolder.value.trim(),
     allowlist: allowlist.value
       .split("\n")
@@ -425,6 +437,15 @@ btnSaveSnapshot.addEventListener("click", async () => {
   }
   await refreshSnapshotsUI();
   btnSaveSnapshot.disabled = false;
+});
+
+btnClearSnapshots.addEventListener("click", async () => {
+  btnClearSnapshots.disabled = true;
+  await chrome.runtime.sendMessage({ type: "clear_snapshots" });
+  snapshotStatus.textContent = "Cleared saved snapshots.";
+  snapshotStatus.className = "status-text ok";
+  await refreshSnapshotsUI();
+  btnClearSnapshots.disabled = false;
 });
 
 void init();

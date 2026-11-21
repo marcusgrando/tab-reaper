@@ -15,6 +15,7 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   protectPinned: true,
   protectUnsavedForms: true,
   skipWhenOffline: true,
+  enableSessionSnapshots: true,
   bookmarkFolderName: "Auto-Archived Tabs",
   allowlist: [],
 };
@@ -61,6 +62,7 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     protectPinned: Boolean(merged.protectPinned),
     protectUnsavedForms: Boolean(merged.protectUnsavedForms),
     skipWhenOffline: Boolean(merged.skipWhenOffline),
+    enableSessionSnapshots: Boolean(merged.enableSessionSnapshots),
     bookmarkFolderName,
     allowlist: [...new Set(allowlist)],
   };
@@ -100,15 +102,42 @@ export function normalizeUrl(rawUrl: string): string {
   }
 }
 
-function globToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`);
+/**
+ * Linear-time wildcard matcher supporting `*` without regex backtracking (ReDoS-safe).
+ */
+export function matchGlob(text: string, pattern: string): boolean {
+  let ti = 0;
+  let pi = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+
+  while (ti < text.length) {
+    if (pi < pattern.length && pattern[pi] === text[ti]) {
+      ti++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === "*") {
+      starIdx = pi;
+      matchIdx = ti;
+      pi++;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx++;
+      ti = matchIdx;
+    } else {
+      return false;
+    }
+  }
+
+  while (pi < pattern.length && pattern[pi] === "*") {
+    pi++;
+  }
+  return pi === pattern.length;
 }
 
 function matchesHostPattern(host: string, hostPattern: string): boolean {
   if (!host || !hostPattern) return false;
   if (hostPattern.includes("*")) {
-    return globToRegExp(hostPattern).test(host);
+    return matchGlob(host, hostPattern);
   }
   return host === hostPattern || host.endsWith(`.${hostPattern}`);
 }
@@ -146,7 +175,7 @@ export function matchesAllowlist(url: string | undefined, allowlist: string[]): 
       continue;
     }
     if (pathPattern.includes("*")) {
-      if (globToRegExp(pathPattern).test(pathAndSearch)) {
+      if (matchGlob(pathAndSearch, pathPattern)) {
         return true;
       }
     } else if (pathAndSearch.startsWith(pathPattern)) {

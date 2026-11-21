@@ -6,6 +6,7 @@ import { createEmptyActivityState, recordTabVisit } from "../src/background/trac
 import {
   DEFAULT_CONFIG,
   computeMemoryBudgetBytes,
+  matchGlob,
   matchesAllowlist,
   normalizeUrl,
   sanitizeConfig,
@@ -53,6 +54,13 @@ describe("config helpers", () => {
     expect(matchesAllowlist("https://evil.com/?x=.slack.com", list)).toBe(false);
     expect(matchesAllowlist("https://evil.com/app.slack.com", list)).toBe(false);
     expect(matchesAllowlist("https://evil.com/?r=github.com/aziontech/cells", list)).toBe(false);
+  });
+
+  test("matchGlob runs in linear time without catastrophic ReDoS backtracking", () => {
+    const start = performance.now();
+    const evilPath = "/" + "a/".repeat(400) + "x";
+    expect(matchGlob(evilPath, "/*/*/*/*/*/*/*/*/*z")).toBe(false);
+    expect(performance.now() - start).toBeLessThan(50);
   });
 });
 

@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   MAX_SNAPSHOTS,
+  MAX_SNAPSHOT_URL_LEN,
   SNAPSHOT_INTERVAL_MS,
   captureSessionSnapshot,
+  clearSnapshots,
   findRecoverableSnapshot,
   loadSnapshots,
   restoreSessionSnapshot,
@@ -157,5 +159,34 @@ describe("session snapshots and recovery", () => {
     expect(groupedCalls[0]!.title).toBe("Work");
     expect(groupedCalls[0]!.color).toBe("blue");
     expect(groupedCalls[0]!.tabIds).toEqual([createdTabs[0]!.id, createdTabs[1]!.id]);
+  });
+
+  test("skips mega-URLs, prunes on QuotaExceededError, and clears snapshots cleanly", async () => {
+    const t0 = 1_700_000_000_000;
+    const hugeUrl = `https://mermaid.live/edit#${"a".repeat(MAX_SNAPSHOT_URL_LEN + 100)}`;
+    const snap = await captureSessionSnapshot(
+      [makeTab(1), makeTab(2, { url: hugeUrl })],
+      { force: true, now: t0 },
+    );
+    expect(snap?.tabCount).toBe(1);
+    expect(snap?.tabs[0]!.url).toBe("https://example1.com/page");
+
+    // Simulate QuotaExceededError when storing more than 1 snapshot
+    const origSet = chrome.storage.local.set;
+    chrome.storage.local.set = (async (obj: Record<string, unknown>) => {
+      const snaps = obj["tabReaper.sessionSnapshots"];
+      if (Array.isArray(snaps) && snaps.length > 1) {
+        throw new Error("QuotaExceededError");
+      }
+      return origSet(obj);
+    }) as typeof chrome.storage.local.set;
+
+    await captureSessionSnapshot([makeTab(3), makeTab(4)], { force: true, now: t0 + 1000 });
+    const afterQuota = await loadSnapshots();
+    expect(afterQuota).toHaveLength(1);
+    expect(afterQuota[0]!.tabs[0]!.url).toBe("https://example3.com/page");
+
+    await clearSnapshots();
+    expect(await loadSnapshots()).toEqual([]);
   });
 });

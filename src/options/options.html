@@ -117,6 +117,14 @@
             <button type="button" class="reset-btn hidden" data-reset="skipWhenOffline"></button>
           </div>
 
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="enable-snapshots" type="checkbox" />
+              <span>Save automatic local session snapshots (every 5 min)</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="enableSessionSnapshots"></button>
+          </div>
+
           <div class="field">
             <div class="field-header">
               <label for="bookmark-folder">Bookmark folder name (under Other Bookmarks)</label>
@@ -178,7 +186,10 @@
       <section class="card">
         <div class="section-head">
           <h2>Session Recovery (Local Snapshots)</h2>
-          <button id="btn-save-snapshot" type="button" class="secondary small">Save Snapshot Now</button>
+          <div class="cap-buttons">
+            <button id="btn-save-snapshot" type="button" class="secondary small">Save Snapshot Now</button>
+            <button id="btn-clear-snapshots" type="button" class="secondary small">Clear</button>
+          </div>
         </div>
         <p class="hint">
           Automatically saves up to 5 local session snapshots (every 5 min when tabs change) including pinned, kept, and tab groups. Stored locally without touching Chrome Sync.
