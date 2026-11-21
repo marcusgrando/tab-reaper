@@ -68,8 +68,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$DIR/com.tabreaper.host.json"
   done
   rm -rf "$APP_DIR"
-  echo "Tab Reaper removed from $APP_DIR and native host manifests cleaned up."
-  echo "If still listed in chrome://extensions, click Remove there."
+  rm -f "$HOME/.local/bin/tab-reaper-host"
+  echo "Tab Reaper removed from $APP_DIR, ~/.local/bin/tab-reaper-host, and native host manifests cleaned up."
+  echo "If still listed in chrome://extensions, click Remove there (Chrome does not allow scripts to remove extensions)."
   exit 0
 fi
 
@@ -124,7 +125,28 @@ echo "Downloading native memory host (${HOST_ASSET})..."
 curl -fsSL "$(release_url "$HOST_ASSET")" -o "$TMP_DIR/tab-reaper-host"
 install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
 
+REGISTERED=0
 for DIR in "${HOST_DIRS[@]}"; do
+  PARENT_DIR="$(dirname "$DIR")"
+  if [ -d "$PARENT_DIR" ]; then
+    mkdir -p "$DIR"
+    cat > "$DIR/com.tabreaper.host.json" <<EOF
+{
+  "name": "com.tabreaper.host",
+  "description": "Tab Reaper exact Chrome memory reporter",
+  "path": "$BIN_PATH",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://$EXT_ID/"
+  ]
+}
+EOF
+    REGISTERED=1
+  fi
+done
+
+if [ "$REGISTERED" -eq 0 ]; then
+  DIR="${HOST_DIRS[0]}"
   mkdir -p "$DIR"
   cat > "$DIR/com.tabreaper.host.json" <<EOF
 {
@@ -137,7 +159,7 @@ for DIR in "${HOST_DIRS[@]}"; do
   ]
 }
 EOF
-done
+fi
 
 echo "Self-test (--once):"
 "$BIN_PATH" --once
