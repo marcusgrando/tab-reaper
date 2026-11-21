@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tab Reaper — Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Tab Reaper Settings</h1>
+
+      <form id="settings-form">
+        <section class="card">
+          <h2>Memory &amp; Tab Limits</h2>
+
+          <div class="field">
+            <label for="memory-mode">Memory budget mode</label>
+            <select id="memory-mode">
+              <option value="fraction">Fraction of system RAM (default: memory / 2)</option>
+              <option value="fixed_gb">Fixed gigabytes (GB)</option>
+            </select>
+          </div>
+
+          <div class="field" id="fraction-wrap">
+            <label for="memory-fraction">System RAM fraction (0.1 – 0.9)</label>
+            <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
+          </div>
+
+          <div class="field hidden" id="fixed-gb-wrap">
+            <label for="memory-gb">Maximum Chrome RAM (GB)</label>
+            <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
+          </div>
+
+          <div class="field">
+            <label for="max-active-tabs">Max loaded tabs kept in RAM</label>
+            <input id="max-active-tabs" type="number" min="1" max="200" step="1" />
+          </div>
+
+          <div class="field">
+            <label for="discard-minutes">Discard idle tabs after (minutes, 0 = disabled)</label>
+            <input id="discard-minutes" type="number" min="0" max="10080" step="1" />
+          </div>
+
+          <div class="field">
+            <label for="archive-hours">Auto-archive inactive tabs after (hours, 0 = disabled)</label>
+            <input id="archive-hours" type="number" min="0" max="8760" step="1" />
+          </div>
+
+          <label class="checkbox">
+            <input id="startup-sweep" type="checkbox" />
+            <span>Discard background tabs immediately on Chrome startup</span>
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>Protections &amp; Auto-Bookmark</h2>
+
+          <label class="checkbox">
+            <input id="protect-active" type="checkbox" />
+            <span>Protect active tabs</span>
+          </label>
+
+          <label class="checkbox">
+            <input id="protect-audible" type="checkbox" />
+            <span>Protect tabs playing audio</span>
+          </label>
+
+          <label class="checkbox">
+            <input id="protect-pinned" type="checkbox" />
+            <span>Protect pinned tabs</span>
+          </label>
+
+          <div class="field">
+            <label for="bookmark-folder">Bookmark folder name (under Other Bookmarks)</label>
+            <input id="bookmark-folder" type="text" />
+          </div>
+
+          <div class="field">
+            <label for="allowlist">Protected domains or glob patterns (one per line)</label>
+            <textarea id="allowlist" rows="4" placeholder="meet.google.com&#10;*.slack.com"></textarea>
+          </div>
+        </section>
+
+        <div class="actions">
+          <button type="submit">Save Settings</button>
+          <span id="save-status" class="status-text"></span>
+        </div>
+      </form>
+
+      <section class="card">
+        <h2>Optional Capabilities</h2>
+
+        <div class="cap-row">
+          <div>
+            <strong>Exact Chrome RAM (Rust Native Host)</strong>
+            <p class="hint">
+              Reads real Chrome process PSS/RSS via the local Rust host instead of OS-wide memory.
+              Install with: <code id="install-cmd"></code>
+            </p>
+            <div id="native-status" class="status-text"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-native-perm" type="button">Enable</button>
+            <button id="btn-native-test" type="button" class="secondary">Test</button>
+          </div>
+        </div>
+
+        <div class="cap-row">
+          <div>
+            <strong>Weighted Eviction (JS Heap + DOM Sampling)</strong>
+            <p class="hint">
+              Samples candidate tabs on demand to discard heavier pages first. Zero content scripts at startup.
+            </p>
+            <div id="host-status" class="status-text"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-host-perm" type="button">Enable</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

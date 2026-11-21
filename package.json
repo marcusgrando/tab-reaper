@@ -1,0 +1,18 @@
+{
+  "name": "tab-reaper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo test --manifest-path native-host/Cargo.toml",
+    "build:host": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo build --release --manifest-path native-host/Cargo.toml"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/chrome": "^0.0.287",
+    "typescript": "^5.7.0"
+  }
+}

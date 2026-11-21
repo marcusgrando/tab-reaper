@@ -1,0 +1,11 @@
+[package]
+name = "tab-reaper-host"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight Chrome Native Messaging host that reports exact Chrome process memory (PSS/RSS)."
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

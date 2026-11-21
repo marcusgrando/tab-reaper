@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Reaper",
+  "version": "0.1.0",
+  "description": "Strict Chrome memory budget, weighted tab discarding, fast startup, and automatic searchable tab archiving.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms",
+    "bookmarks",
+    "system.memory",
+    "tabGroups",
+    "scripting"
+  ],
+  "optional_permissions": [
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Tab Reaper",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "omnibox": {
+    "keyword": "ar"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+K",
+        "mac": "Alt+Shift+K"
+      },
+      "description": "Open Tab Reaper search palette"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tab Reaper</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="title-row">
+        <h1>Tab Reaper</h1>
+        <span id="memory-badge" class="badge">Loading...</span>
+      </div>
+      <div class="bar-track">
+        <div id="memory-bar" class="bar-fill"></div>
+      </div>
+      <div class="stats">
+        <span>Loaded: <strong id="stat-loaded">-</strong></span>
+        <span>Discarded: <strong id="stat-discarded">-</strong></span>
+        <span>Archived: <strong id="stat-archived">-</strong></span>
+      </div>
+    </header>
+
+    <section class="search-wrap">
+      <input
+        id="search-input"
+        type="text"
+        placeholder="Search archived tabs... (Enter to open, Esc to close)"
+        autocomplete="off"
+        autofocus
+      />
+    </section>
+
+    <main id="archive-list" class="archive-list" role="listbox"></main>
+
+    <footer class="footer">
+      <button id="btn-discard" type="button">Discard Idle</button>
+      <button id="btn-archive" type="button">Archive Discarded</button>
+      <button id="btn-options" type="button" class="secondary">Settings</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
