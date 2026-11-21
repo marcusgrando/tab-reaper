@@ -174,4 +174,28 @@ describe("auto-bookmark dual archive", () => {
     expect(await loadArchive()).toHaveLength(0);
     expect(bookmarks.has(beta.bookmarkId!)).toBe(false);
   });
+
+  test("continues archiving and persists succeeded tabs when a single bookmark create fails", async () => {
+    const now = 1_700_000_000_000;
+    const cfg = sanitizeConfig({});
+    const origCreate = chrome.bookmarks.create;
+    chrome.bookmarks.create = (async (details: { parentId?: string; title?: string; url?: string }) => {
+      if (details.url?.includes("bad.example")) {
+        throw new Error("Invalid URL");
+      }
+      return origCreate(details);
+    }) as typeof chrome.bookmarks.create;
+
+    const tabs: TabSummary[] = [
+      { id: 10, url: "https://ok1.example/a", title: "OK 1", active: false, audible: false, pinned: false, discarded: true, windowId: 1 },
+      { id: 11, url: "https://bad.example/b", title: "Bad", active: false, audible: false, pinned: false, discarded: true, windowId: 1 },
+      { id: 12, url: "https://ok2.example/c", title: "OK 2", active: false, audible: false, pinned: false, discarded: true, windowId: 1 },
+    ];
+
+    const archived = await archiveTabs(tabs, createEmptyActivityState(), cfg, now);
+    expect(archived).toBe(2);
+    expect(removedTabIds).toEqual([10, 12]);
+    const saved = await loadArchive();
+    expect(saved.map((i) => i.title).sort()).toEqual(["OK 1", "OK 2"]);
+  });
 });

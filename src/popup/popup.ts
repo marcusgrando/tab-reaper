@@ -14,6 +14,7 @@ const tabArchivedBtn = document.getElementById("tab-archived") as HTMLButtonElem
 const btnDiscard = document.getElementById("btn-discard") as HTMLButtonElement;
 const btnArchive = document.getElementById("btn-archive") as HTMLButtonElement;
 const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
+const actionStatus = document.getElementById("action-status") as HTMLElement;
 
 let activeView: ActiveView = "loaded";
 let loadedTabs: LoadedTabInfo[] = [];
@@ -188,7 +189,7 @@ function renderLoadedTabs(): void {
       right.appendChild(pill);
     }
 
-    if (tab.canDiscardManually && (!tab.protectedReason || tab.isPwa)) {
+    if (tab.canDiscardManually && (!tab.protectedReason || tab.isPwa || tab.protectedReason === "Form")) {
       const discardBtn = document.createElement("button");
       discardBtn.className = "item-action";
       discardBtn.type = "button";
@@ -311,17 +312,39 @@ searchInput.addEventListener("keydown", async (event) => {
   }
 });
 
+function showActionStatus(text: string): void {
+  actionStatus.textContent = text;
+  actionStatus.classList.remove("hidden");
+}
+
 btnDiscard.addEventListener("click", async () => {
   btnDiscard.disabled = true;
-  await chrome.runtime.sendMessage({ type: "discard_idle_now" });
+  const res = (await chrome.runtime.sendMessage({ type: "discard_idle_now" })) as {
+    discarded?: number;
+    archived?: number;
+  };
   await refreshStatus();
+  showActionStatus(`Discarded ${res?.discarded ?? 0} tab(s).`);
   btnDiscard.disabled = false;
 });
 
 btnArchive.addEventListener("click", async () => {
   btnArchive.disabled = true;
-  await chrome.runtime.sendMessage({ type: "archive_old_now" });
+  const res = (await chrome.runtime.sendMessage({ type: "archive_old_now" })) as {
+    archived?: number;
+    skippedProtected?: number;
+    skippedNotDiscarded?: number;
+    skippedNonHttp?: number;
+    failed?: number;
+  };
   await Promise.all([refreshStatus(), refreshArchive()]);
+  const skippedParts: string[] = [];
+  if (res?.skippedNotDiscarded) skippedParts.push(`${res.skippedNotDiscarded} still loaded`);
+  if (res?.skippedProtected) skippedParts.push(`${res.skippedProtected} protected`);
+  if (res?.skippedNonHttp) skippedParts.push(`${res.skippedNonHttp} internal/non-http`);
+  if (res?.failed) skippedParts.push(`${res.failed} failed`);
+  const detail = skippedParts.length > 0 ? ` (${skippedParts.join(", ")})` : "";
+  showActionStatus(`Archived ${res?.archived ?? 0} discarded tab(s)${detail}.`);
   btnArchive.disabled = false;
 });
 

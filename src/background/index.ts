@@ -6,6 +6,7 @@ import {
   handleBookmarkRemoved,
   loadArchive,
   planArchives,
+  planArchivesWithBreakdown,
   removeArchivedByUrl,
   restoreArchivedTab,
   searchArchive,
@@ -354,9 +355,16 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       const config = await loadConfig();
       const tabs = await queryAllTabs();
       const activity = await loadActivityState();
-      const toArchive = planArchives({ tabs, activity, config, now: Date.now(), forceDiscarded: true });
-      const archived = await archiveTabs(toArchive, activity, config, Date.now());
-      return { archived };
+      const now = Date.now();
+      const breakdown = planArchivesWithBreakdown({ tabs, activity, config, now, forceDiscarded: true });
+      const archived = await archiveTabs(breakdown.toArchive, activity, config, now);
+      return {
+        archived,
+        skippedProtected: breakdown.skippedProtected,
+        skippedNotDiscarded: breakdown.skippedNotDiscarded,
+        skippedNonHttp: breakdown.skippedNonHttp,
+        failed: Math.max(0, breakdown.toArchive.length - archived),
+      };
     }
     case "save_config": {
       const saved = await saveConfig(message.config);

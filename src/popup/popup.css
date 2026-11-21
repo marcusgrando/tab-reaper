@@ -252,6 +252,18 @@ h1 {
   background: var(--surface);
 }
 
+.action-status {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.action-status.hidden {
+  display: none;
+}
+
 .footer {
   display: flex;
   gap: 8px;

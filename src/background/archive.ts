@@ -13,19 +13,56 @@ export interface PlanArchivesInput {
   forceDiscarded?: boolean;
 }
 
-export function planArchives(input: PlanArchivesInput): TabSummary[] {
+export function isArchivableUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  return /^https?:\/\//i.test(url);
+}
+
+export interface ArchivePlanBreakdown {
+  toArchive: TabSummary[];
+  skippedProtected: number;
+  skippedNotDiscarded: number;
+  skippedNonHttp: number;
+}
+
+export function planArchivesWithBreakdown(input: PlanArchivesInput): ArchivePlanBreakdown {
   const { tabs, activity, config, now, forceDiscarded = false } = input;
-  if (!forceDiscarded && config.archiveAfterHours <= 0) return [];
+  const result: ArchivePlanBreakdown = {
+    toArchive: [],
+    skippedProtected: 0,
+    skippedNotDiscarded: 0,
+    skippedNonHttp: 0,
+  };
+  if (!forceDiscarded && config.archiveAfterHours <= 0) return result;
 
   const thresholdMs = config.archiveAfterHours * 60 * 60 * 1000;
-  return tabs.filter((tab) => {
-    if (isTabProtected(tab, config)) return false;
+  for (const tab of tabs) {
+    if (!isArchivableUrl(tab.url)) {
+      result.skippedNonHttp++;
+      continue;
+    }
+    if (isTabProtected(tab, config)) {
+      result.skippedProtected++;
+      continue;
+    }
     if (forceDiscarded) {
-      return tab.discarded;
+      if (tab.discarded) {
+        result.toArchive.push(tab);
+      } else {
+        result.skippedNotDiscarded++;
+      }
+      continue;
     }
     const lastActiveAt = getTabLastActiveAt(activity, tab, now);
-    return now - lastActiveAt >= thresholdMs;
-  });
+    if (now - lastActiveAt >= thresholdMs) {
+      result.toArchive.push(tab);
+    }
+  }
+  return result;
+}
+
+export function planArchives(input: PlanArchivesInput): TabSummary[] {
+  return planArchivesWithBreakdown(input).toArchive;
 }
 
 export function searchArchive(items: ArchivedTab[], query: string | undefined): ArchivedTab[] {
@@ -92,83 +129,95 @@ export async function archiveTabs(
   const archive = await loadArchive();
   let archivedCount = 0;
 
-  for (const tab of tabs) {
-    const normalizedUrl = normalizeUrl(tab.url);
-    const lastActiveAt = getTabLastActiveAt(activity, tab, now);
+  try {
+    for (const tab of tabs) {
+      if (!isArchivableUrl(tab.url)) continue;
 
-    let groupMeta: { title?: string; color?: string } = {};
-    if (typeof tab.groupId === "number" && tab.groupId >= 0) {
-      if (!groupCache.has(tab.groupId)) {
-        try {
-          const group = await chrome.tabGroups.get(tab.groupId);
-          groupCache.set(tab.groupId, { title: group.title || undefined, color: group.color });
-        } catch {
-          groupCache.set(tab.groupId, {});
+      const normalizedUrl = normalizeUrl(tab.url);
+      const lastActiveAt = getTabLastActiveAt(activity, tab, now);
+
+      let groupMeta: { title?: string; color?: string } = {};
+      if (typeof tab.groupId === "number" && tab.groupId >= 0) {
+        if (!groupCache.has(tab.groupId)) {
+          try {
+            const group = await chrome.tabGroups.get(tab.groupId);
+            groupCache.set(tab.groupId, { title: group.title || undefined, color: group.color });
+          } catch {
+            groupCache.set(tab.groupId, {});
+          }
         }
+        groupMeta = groupCache.get(tab.groupId) ?? {};
       }
-      groupMeta = groupCache.get(tab.groupId) ?? {};
-    }
 
-    const existingIdx = archive.findIndex((item) => item.normalizedUrl === normalizedUrl);
-    let bookmarkId: string | undefined;
+      const existingIdx = archive.findIndex((item) => item.normalizedUrl === normalizedUrl);
+      let bookmarkId: string | undefined;
 
-    if (existingIdx >= 0) {
-      const existing = archive[existingIdx]!;
-      bookmarkId = existing.bookmarkId;
-      if (bookmarkId) {
-        try {
-          await chrome.bookmarks.update(bookmarkId, { title: tab.title || tab.url, url: tab.url });
-        } catch {
-          const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
+      try {
+        if (existingIdx >= 0) {
+          const existing = archive[existingIdx]!;
+          bookmarkId = existing.bookmarkId;
+          if (bookmarkId) {
+            try {
+              await chrome.bookmarks.update(bookmarkId, { title: tab.title || tab.url, url: tab.url });
+            } catch {
+              const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
+              bookmarkId = bm.id;
+            }
+          } else {
+            const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
+            bookmarkId = bm.id;
+          }
+
+          archive[existingIdx] = {
+            ...existing,
+            url: tab.url,
+            title: tab.title || tab.url,
+            favIconUrl: tab.favIconUrl ?? existing.favIconUrl,
+            groupTitle: groupMeta.title ?? existing.groupTitle,
+            groupColor: groupMeta.color ?? existing.groupColor,
+            lastActiveAt,
+            archivedAt: now,
+            bookmarkId,
+          };
+        } else {
+          const bm = await chrome.bookmarks.create({
+            parentId: folderId,
+            title: tab.title || tab.url,
+            url: tab.url,
+          });
           bookmarkId = bm.id;
+
+          archive.unshift({
+            id: crypto.randomUUID(),
+            url: tab.url,
+            normalizedUrl,
+            title: tab.title || tab.url,
+            favIconUrl: tab.favIconUrl,
+            groupTitle: groupMeta.title,
+            groupColor: groupMeta.color,
+            lastActiveAt,
+            archivedAt: now,
+            bookmarkId,
+          });
         }
-      } else {
-        const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
-        bookmarkId = bm.id;
+      } catch {
+        // Never close a tab if creating/updating its bookmark failed; continue with the rest.
+        continue;
       }
 
-      archive[existingIdx] = {
-        ...existing,
-        url: tab.url,
-        title: tab.title || tab.url,
-        favIconUrl: tab.favIconUrl ?? existing.favIconUrl,
-        groupTitle: groupMeta.title ?? existing.groupTitle,
-        groupColor: groupMeta.color ?? existing.groupColor,
-        lastActiveAt,
-        archivedAt: now,
-        bookmarkId,
-      };
-    } else {
-      const bm = await chrome.bookmarks.create({
-        parentId: folderId,
-        title: tab.title || tab.url,
-        url: tab.url,
-      });
-      bookmarkId = bm.id;
-
-      archive.unshift({
-        id: crypto.randomUUID(),
-        url: tab.url,
-        normalizedUrl,
-        title: tab.title || tab.url,
-        favIconUrl: tab.favIconUrl,
-        groupTitle: groupMeta.title,
-        groupColor: groupMeta.color,
-        lastActiveAt,
-        archivedAt: now,
-        bookmarkId,
-      });
+      try {
+        await chrome.tabs.remove(tab.id);
+        archivedCount++;
+      } catch {
+        // Tab may have been closed concurrently.
+      }
     }
-
-    try {
-      await chrome.tabs.remove(tab.id);
-      archivedCount++;
-    } catch {
-      // Tab may have been closed concurrently.
+  } finally {
+    if (archivedCount > 0) {
+      await saveArchive(archive);
     }
   }
 
-  await saveArchive(archive);
   return archivedCount;
 }
 
