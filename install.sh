@@ -4,6 +4,7 @@ set -euo pipefail
 REPO="${TAB_REAPER_REPO:-marcusgrando/tab-reaper}"
 VERSION="${TAB_REAPER_VERSION:-latest}"
 UNINSTALL=0
+RUN_TEST=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -11,8 +12,12 @@ while [ $# -gt 0 ]; do
       UNINSTALL=1
       shift
       ;;
+    --test)
+      RUN_TEST=1
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--uninstall]"
+      echo "Usage: $0 [--uninstall] [--test]"
       echo "Installs Tab Reaper (extension + optional native memory host) into a permanent app directory."
       exit 0
       ;;
@@ -104,11 +109,45 @@ compute_extension_id() {
   printf '%s' "${hex:0:32}" | tr '0-9a-f' 'a-p'
 }
 
+sha256_file() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    echo "Error: neither shasum nor sha256sum found." >&2
+    exit 1
+  fi
+}
+
+verify_checksum() {
+  local sums_file="$1"
+  local asset="$2"
+  local file="$3"
+  local expected
+  expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name {print $1; exit}' "$sums_file")"
+  if [ -z "$expected" ]; then
+    echo "Error: checksum for ${asset} not found in SHA256SUMS.txt." >&2
+    exit 1
+  fi
+  local actual
+  actual="$(sha256_file "$file")"
+  if [ "$actual" != "$expected" ]; then
+    echo "Error: SHA-256 mismatch for ${asset} (expected ${expected}, got ${actual})." >&2
+    exit 1
+  fi
+}
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+echo "Downloading release checksums..."
+curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$TMP_DIR/SHA256SUMS.txt"
+
 echo "Downloading Tab Reaper extension..."
 curl -fsSL "$(release_url tab-reaper-extension.zip)" -o "$TMP_DIR/extension.zip"
+verify_checksum "$TMP_DIR/SHA256SUMS.txt" "tab-reaper-extension.zip" "$TMP_DIR/extension.zip"
 
 mkdir -p "$TMP_DIR/extracted"
 unzip -qo "$TMP_DIR/extension.zip" -d "$TMP_DIR/extracted"
@@ -123,6 +162,7 @@ EXT_ID="$(compute_extension_id "$CANON_EXT_DIR")"
 HOST_ASSET="tab-reaper-host-${PLATFORM}-${ARCH_NAME}"
 echo "Downloading native memory host (${HOST_ASSET})..."
 curl -fsSL "$(release_url "$HOST_ASSET")" -o "$TMP_DIR/tab-reaper-host"
+verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$HOST_ASSET" "$TMP_DIR/tab-reaper-host"
 install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
 
 REGISTERED=0
@@ -161,8 +201,10 @@ if [ "$REGISTERED" -eq 0 ]; then
 EOF
 fi
 
-echo "Self-test (--once):"
-"$BIN_PATH" --once
+if [ "$RUN_TEST" -eq 1 ]; then
+  echo "Self-test (--once):"
+  "$BIN_PATH" --once
+fi
 
 COPIED_NOTE=""
 if [ "$PLATFORM" = "darwin" ] && command -v pbcopy >/dev/null 2>&1; then

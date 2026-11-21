@@ -1,5 +1,6 @@
 param(
     [switch]$Uninstall,
+    [switch]$Test,
     [string]$Version = "latest",
     [string]$Repo = "marcusgrando/tab-reaper"
 )
@@ -62,12 +63,37 @@ function Get-ChromeExtensionId([string]$FolderPath) {
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
+function Test-AssetChecksum([string]$SumsPath, [string]$AssetName, [string]$FilePath) {
+    $Expected = $null
+    foreach ($Line in Get-Content -Path $SumsPath) {
+        if ($Line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
+            if ($Matches[2] -eq $AssetName) {
+                $Expected = $Matches[1].ToLowerInvariant()
+                break
+            }
+        }
+    }
+    if (-not $Expected) {
+        throw "Checksum for $AssetName not found in SHA256SUMS.txt."
+    }
+    $Actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Actual -ne $Expected) {
+        throw "SHA-256 mismatch for $AssetName (expected $Expected, got $Actual)."
+    }
+}
+
 try {
+    $SumsPath = Join-Path $TmpDir "SHA256SUMS.txt"
     $ZipPath = Join-Path $TmpDir "tab-reaper-extension.zip"
+    $HostTmpPath = Join-Path $TmpDir "tab-reaper-host.exe"
     $ExtractDir = Join-Path $TmpDir "extracted"
+
+    Write-Host "Downloading release checksums..."
+    Invoke-WebRequest -Uri (Get-ReleaseUrl "SHA256SUMS.txt") -OutFile $SumsPath -UseBasicParsing
 
     Write-Host "Downloading Tab Reaper extension..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-extension.zip") -OutFile $ZipPath -UseBasicParsing
+    Test-AssetChecksum $SumsPath "tab-reaper-extension.zip" $ZipPath
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
@@ -79,7 +105,9 @@ try {
     $ExtId = Get-ChromeExtensionId $ExtDir
 
     Write-Host "Downloading native memory host (tab-reaper-host-windows-x86_64.exe)..."
-    Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-host-windows-x86_64.exe") -OutFile $BinPath -UseBasicParsing
+    Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-host-windows-x86_64.exe") -OutFile $HostTmpPath -UseBasicParsing
+    Test-AssetChecksum $SumsPath "tab-reaper-host-windows-x86_64.exe" $HostTmpPath
+    Move-Item -Path $HostTmpPath -Destination $BinPath -Force
 
     $Manifest = @{
         name            = "com.tabreaper.host"
@@ -96,8 +124,10 @@ try {
         Set-ItemProperty -Path $Key -Name "(default)" -Value $ManifestPath
     }
 
-    Write-Host "Self-test (--once):"
-    & $BinPath --once
+    if ($Test) {
+        Write-Host "Self-test (--once):"
+        & $BinPath --once
+    }
 
     $CopiedNote = ""
     try {

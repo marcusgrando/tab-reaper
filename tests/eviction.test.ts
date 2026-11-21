@@ -37,17 +37,22 @@ describe("config helpers", () => {
     expect(computeMemoryBudgetBytes(cfg, 32 * 1024 ** 3)).toBe(6 * 1024 ** 3);
   });
 
-  test("normalizeUrl strips hash and root trailing slash", () => {
-    expect(normalizeUrl("https://docs.example.com/#section")).toBe("https://docs.example.com");
-    expect(normalizeUrl("https://docs.example.com/guide#top")).toBe("https://docs.example.com/guide");
+  test("normalizeUrl preserves hash fragments and strips bare root trailing slash", () => {
+    expect(normalizeUrl("https://docs.example.com/")).toBe("https://docs.example.com");
+    expect(normalizeUrl("https://docs.example.com/#section")).toBe("https://docs.example.com/#section");
+    expect(normalizeUrl("https://docs.example.com/guide#top")).toBe("https://docs.example.com/guide#top");
   });
 
-  test("matchesAllowlist supports exact host, subdomains, and globs", () => {
+  test("matchesAllowlist matches hostnames strictly and rejects cross-origin query/path spoofing", () => {
     const list = ["meet.google.com", "*.slack.com", "github.com/aziontech/*"];
     expect(matchesAllowlist("https://meet.google.com/abc", list)).toBe(true);
     expect(matchesAllowlist("https://app.slack.com/client", list)).toBe(true);
     expect(matchesAllowlist("https://github.com/aziontech/cells", list)).toBe(true);
     expect(matchesAllowlist("https://github.com/other/repo", list)).toBe(false);
+    // Spoofing attempts via query string or path on an untrusted origin must never match.
+    expect(matchesAllowlist("https://evil.com/?x=.slack.com", list)).toBe(false);
+    expect(matchesAllowlist("https://evil.com/app.slack.com", list)).toBe(false);
+    expect(matchesAllowlist("https://evil.com/?r=github.com/aziontech/cells", list)).toBe(false);
   });
 });
 

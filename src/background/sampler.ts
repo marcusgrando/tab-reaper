@@ -122,6 +122,7 @@ function detectUnsavedFormInPage(): boolean {
 
   const skipTypes = new Set([
     "hidden",
+    "password",
     "submit",
     "button",
     "reset",

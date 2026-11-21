@@ -94,7 +94,7 @@ describe("auto-bookmark dual archive", () => {
 
     const tab: TabSummary = {
       id: 42,
-      url: "https://example.com/rfc#top",
+      url: "https://example.com/rfc",
       title: "RFC Design Doc",
       active: false,
       audible: false,
@@ -168,9 +168,12 @@ describe("auto-bookmark dual archive", () => {
     await handleBookmarkRemoved(alpha.bookmarkId!);
     expect((await loadArchive()).map((i) => i.title)).toEqual(["Beta"]);
 
-    // Visiting Beta's URL removes it from both storage and bookmarks.
+    // Explicit removal by exact URL removes from both storage and bookmarks;
+    // distinct #fragment URLs are treated as distinct entries.
     const beta = (await loadArchive())[0]!;
-    await removeArchivedByUrl("https://beta.dev/b#hash");
+    await removeArchivedByUrl("https://beta.dev/b#other");
+    expect(await loadArchive()).toHaveLength(1);
+    await removeArchivedByUrl("https://beta.dev/b");
     expect(await loadArchive()).toHaveLength(0);
     expect(bookmarks.has(beta.bookmarkId!)).toBe(false);
   });
@@ -218,5 +221,11 @@ describe("auto-bookmark dual archive", () => {
     const activity = recordTabVisit(createEmptyActivityState(), 50, tab.url, now - 200 * 60 * 60 * 1000);
     expect(planArchives({ tabs: [tab], activity, config: defaultCfg, now })).toHaveLength(1);
     expect(planArchives({ tabs: [tab], activity, config: disabledCfg, now })).toEqual([]);
+
+    // Tabs with unsaved form input are excluded from auto-archiving too.
+    const weights = new Map([
+      [50, { jsHeapBytes: 10_000_000, domNodes: 100, mediaNodes: 0, weightMultiplier: 1.2, hasUnsavedForm: true, sampledAt: now }],
+    ]);
+    expect(planArchives({ tabs: [tab], activity, weights, config: defaultCfg, now })).toEqual([]);
   });
 });

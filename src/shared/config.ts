@@ -89,9 +89,9 @@ export function isInternalUrl(url: string | undefined): boolean {
 export function normalizeUrl(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
-    parsed.hash = "";
-    // Normalize trailing slash for root paths only so distinct subpaths stay intact.
-    if (parsed.pathname === "/" && !parsed.search) {
+    // Preserve #fragment because SPAs use it to identify distinct documents/views.
+    // Normalize trailing slash on bare root URLs only.
+    if (parsed.pathname === "/" && !parsed.search && !parsed.hash) {
       return `${parsed.protocol}//${parsed.host}`;
     }
     return parsed.toString();
@@ -100,36 +100,56 @@ export function normalizeUrl(rawUrl: string): string {
   }
 }
 
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesHostPattern(host: string, hostPattern: string): boolean {
+  if (!host || !hostPattern) return false;
+  if (hostPattern.includes("*")) {
+    return globToRegExp(hostPattern).test(host);
+  }
+  return host === hostPattern || host.endsWith(`.${hostPattern}`);
+}
+
 export function matchesAllowlist(url: string | undefined, allowlist: string[]): boolean {
   if (!url || allowlist.length === 0) return false;
-  let host = "";
-  let hostAndPath = "";
-  const full = url.toLowerCase();
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    host = parsed.hostname.toLowerCase();
-    hostAndPath = `${host}${parsed.pathname}${parsed.search}`.toLowerCase();
+    parsed = new URL(url);
   } catch {
-    host = "";
+    return false;
   }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const pathAndSearch = `${parsed.pathname}${parsed.search}`.toLowerCase();
 
   for (const rawPattern of allowlist) {
-    const pattern = rawPattern.trim().toLowerCase();
+    let pattern = rawPattern.trim().toLowerCase();
     if (!pattern) continue;
+    pattern = pattern.replace(/^https?:\/\//, "");
 
-    if (pattern.includes("*")) {
-      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-      const regex = new RegExp(`^${escaped}$`);
-      if (regex.test(host) || regex.test(hostAndPath) || regex.test(full)) {
+    const slashIdx = pattern.indexOf("/");
+    if (slashIdx === -1) {
+      if (matchesHostPattern(host, pattern)) {
         return true;
       }
       continue;
     }
 
-    if (host === pattern || host.endsWith(`.${pattern}`)) {
-      return true;
+    const hostPattern = pattern.slice(0, slashIdx);
+    const pathPattern = pattern.slice(slashIdx);
+    if (!matchesHostPattern(host, hostPattern)) {
+      continue;
     }
-    if (pattern.includes("/") && (hostAndPath.startsWith(pattern) || full.includes(pattern))) {
+    if (pathPattern.includes("*")) {
+      if (globToRegExp(pathPattern).test(pathAndSearch)) {
+        return true;
+      }
+    } else if (pathAndSearch.startsWith(pathPattern)) {
       return true;
     }
   }

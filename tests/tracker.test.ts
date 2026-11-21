@@ -20,7 +20,7 @@ describe("activity tracker across restarts", () => {
     const reopenedTabs: TabSummary[] = [
       {
         id: 99,
-        url: "https://news.ycombinator.com/item?id=123",
+        url: "https://news.ycombinator.com/item?id=123#comments",
         title: "HN",
         active: false,
         audible: false,

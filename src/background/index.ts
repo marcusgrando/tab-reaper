@@ -50,7 +50,7 @@ function isBrowserOnline(): boolean {
 }
 
 function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>): TabSummary | null {
-  if (typeof tab.id !== "number") return null;
+  if (typeof tab.id !== "number" || tab.incognito) return null;
   return {
     id: tab.id,
     url: tab.url ?? tab.pendingUrl ?? "",
@@ -138,9 +138,29 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
 
     let archived = 0;
     if (mode === "sweep") {
-      const toArchive = planArchives({ tabs, activity, config, now });
+      const toArchive = planArchives({ tabs, activity, weights, config, now });
       if (toArchive.length > 0) {
-        archived = await archiveTabs(toArchive, activity, config, now);
+        const keptIds = await loadKeptTabIds();
+        const verifiedToArchive: TabSummary[] = [];
+        for (const candidate of toArchive) {
+          try {
+            const raw = await chrome.tabs.get(candidate.id);
+            const live = toTabSummary(raw, keptIds);
+            if (!live || live.url !== candidate.url || isTabProtected(live, config, weights.get(live.id))) {
+              continue;
+            }
+            if (!live.discarded && config.protectUnsavedForms) {
+              const hasForm = await checkTabHasUnsavedForm(live.id);
+              if (hasForm) continue;
+            }
+            verifiedToArchive.push(live);
+          } catch {
+            // Tab closed concurrently.
+          }
+        }
+        if (verifiedToArchive.length > 0) {
+          archived = await archiveTabs(verifiedToArchive, activity, config, now);
+        }
       }
     }
 
@@ -269,12 +289,10 @@ chrome.runtime.onStartup.addListener(async () => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
+    if (tab.incognito) return;
     const url = tab.url ?? tab.pendingUrl;
     const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now());
     await saveActivityState(state);
-    if (url && !isInternalUrl(url)) {
-      await removeArchivedByUrl(url);
-    }
     await runSweep("sweep");
   } catch {
     // Tab closed before lookup.
@@ -282,7 +300,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
-  if (typeof tab.id !== "number") return;
+  if (typeof tab.id !== "number" || tab.incognito) return;
   const url = tab.url ?? tab.pendingUrl;
   const state = recordTabVisit(await loadActivityState(), tab.id, url, Date.now());
   await saveActivityState(state);
@@ -290,12 +308,12 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (tab.incognito) return;
   if (changeInfo.url && !isInternalUrl(changeInfo.url)) {
     if (tab.active) {
       const state = recordTabVisit(await loadActivityState(), tabId, changeInfo.url, Date.now());
       await saveActivityState(state);
     }
-    await removeArchivedByUrl(changeInfo.url);
   }
 });
 
@@ -331,13 +349,12 @@ chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
     if (!first) return;
     targetUrl = first.url;
   }
-  await removeArchivedByUrl(targetUrl);
-
   if (disposition === "currentTab") {
     await chrome.tabs.update({ url: targetUrl });
   } else {
     await chrome.tabs.create({ url: targetUrl, active: disposition === "newForegroundTab" });
   }
+  await removeArchivedByUrl(targetUrl);
 });
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendResponse) => {

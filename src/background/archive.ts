@@ -1,5 +1,5 @@
 import { normalizeUrl } from "../shared/config.ts";
-import type { ActivityState, ArchivedTab, TabReaperConfig, TabSummary } from "../shared/types.ts";
+import type { ActivityState, ArchivedTab, TabReaperConfig, TabSummary, TabWeightSample } from "../shared/types.ts";
 import { isTabProtected } from "./eviction.ts";
 import { getTabLastActiveAt } from "./tracker.ts";
 
@@ -8,6 +8,7 @@ export const ARCHIVE_STORAGE_KEY = "tabReaper.archive";
 export interface PlanArchivesInput {
   tabs: TabSummary[];
   activity: ActivityState;
+  weights?: Map<number, TabWeightSample>;
   config: TabReaperConfig;
   now: number;
   forceDiscarded?: boolean;
@@ -26,7 +27,7 @@ export interface ArchivePlanBreakdown {
 }
 
 export function planArchivesWithBreakdown(input: PlanArchivesInput): ArchivePlanBreakdown {
-  const { tabs, activity, config, now, forceDiscarded = false } = input;
+  const { tabs, activity, weights, config, now, forceDiscarded = false } = input;
   const result: ArchivePlanBreakdown = {
     toArchive: [],
     skippedProtected: 0,
@@ -41,7 +42,7 @@ export function planArchivesWithBreakdown(input: PlanArchivesInput): ArchivePlan
       result.skippedNonHttp++;
       continue;
     }
-    if (isTabProtected(tab, config)) {
+    if (isTabProtected(tab, config, weights?.get(tab.id))) {
       result.skippedProtected++;
       continue;
     }
@@ -227,6 +228,9 @@ export async function restoreArchivedTab(id: string): Promise<boolean> {
   if (idx < 0) return false;
 
   const entry = archive[idx]!;
+  // Create the tab first so a failure never deletes the archived entry or bookmark.
+  await chrome.tabs.create({ url: entry.url, active: true });
+
   archive.splice(idx, 1);
   await saveArchive(archive);
 
@@ -238,7 +242,6 @@ export async function restoreArchivedTab(id: string): Promise<boolean> {
     }
   }
 
-  await chrome.tabs.create({ url: entry.url, active: true });
   return true;
 }
 

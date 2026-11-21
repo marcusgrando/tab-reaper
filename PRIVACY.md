@@ -27,7 +27,11 @@ All data used by Tab Reaper stays inside your browser profile:
 ### Optional Permissions (Off by Default)
 
 - `nativeMessaging`: connects only to the local `com.tabreaper.host` binary if you choose to install it, returning only numeric Chrome memory totals and OS RAM counters.
-- `scripting` and `<all_urls>`: used only when you opt into Weighted Eviction to read numeric `performance.memory.usedJSHeapSize`, DOM element count, and `iframe`/`canvas`/`video` counts on candidate tabs. Tab Reaper never reads page text, form inputs, cookies, or credentials.
+- `scripting` and `<all_urls>`: used only when you opt into Weighted Eviction to read numeric `performance.memory.usedJSHeapSize`, DOM element count, `iframe`/`canvas`/`video` counts, and a local boolean indicating whether visible non-password form inputs have unsaved edits. Password inputs (`type="password"`), cookies, and page text are never read, and no field values are ever stored or transmitted.
+
+## Incognito Mode
+
+Tab Reaper declares `"incognito": "not_allowed"` and does not run in or persist data from Incognito windows.
 
 ## Third Parties
 
