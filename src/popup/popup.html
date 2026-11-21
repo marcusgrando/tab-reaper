@@ -22,11 +22,20 @@
       </div>
     </header>
 
+    <nav class="tabs" role="tablist">
+      <button id="tab-loaded" class="tab-btn active" type="button" role="tab" aria-selected="true">
+        Loaded
+      </button>
+      <button id="tab-archived" class="tab-btn" type="button" role="tab" aria-selected="false">
+        Archived
+      </button>
+    </nav>
+
     <section class="search-wrap">
       <input
         id="search-input"
         type="text"
-        placeholder="Search archived tabs... (Enter to open, Esc to close)"
+        placeholder="Filter tabs... (Enter to open, Esc to close)"
         autocomplete="off"
         autofocus
       />

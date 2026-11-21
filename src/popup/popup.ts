@@ -1,21 +1,31 @@
-import type { ArchivedTab, StatusPayload } from "../shared/types.ts";
+import type { ArchivedTab, LoadedTabInfo, StatusPayload } from "../shared/types.ts";
+
+type ActiveView = "loaded" | "archived";
 
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
-const archiveList = document.getElementById("archive-list") as HTMLElement;
+const listEl = document.getElementById("archive-list") as HTMLElement;
 const memoryBadge = document.getElementById("memory-badge") as HTMLElement;
 const memoryBar = document.getElementById("memory-bar") as HTMLElement;
 const statLoaded = document.getElementById("stat-loaded") as HTMLElement;
 const statDiscarded = document.getElementById("stat-discarded") as HTMLElement;
 const statArchived = document.getElementById("stat-archived") as HTMLElement;
+const tabLoadedBtn = document.getElementById("tab-loaded") as HTMLButtonElement;
+const tabArchivedBtn = document.getElementById("tab-archived") as HTMLButtonElement;
 const btnDiscard = document.getElementById("btn-discard") as HTMLButtonElement;
 const btnArchive = document.getElementById("btn-archive") as HTMLButtonElement;
 const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
 
-let currentItems: ArchivedTab[] = [];
+let activeView: ActiveView = "loaded";
+let loadedTabs: LoadedTabInfo[] = [];
+let archivedItems: ArchivedTab[] = [];
 let selectedIndex = 0;
 
 function formatGb(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatMb(bytes: number): string {
+  return `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
 }
 
 function formatAge(timestamp: number): string {
@@ -26,43 +36,169 @@ function formatAge(timestamp: number): string {
   return `${Math.round(diffH / 24)}d ago`;
 }
 
-async function refreshStatus(): Promise<void> {
+function formatIdle(idleMinutes: number): string {
+  if (idleMinutes < 1) return "now";
+  if (idleMinutes < 60) return `${idleMinutes}m idle`;
+  const hours = Math.round(idleMinutes / 60);
+  return `${hours}h idle`;
+}
+
+function extractHost(url: string): string {
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
+}
+
+function filteredLoadedTabs(): LoadedTabInfo[] {
+  const q = searchInput.value.trim().toLowerCase();
+  if (!q) return loadedTabs;
+  return loadedTabs.filter(
+    (tab) => tab.title.toLowerCase().includes(q) || tab.url.toLowerCase().includes(q),
+  );
+}
+
+function setActiveView(view: ActiveView): void {
+  activeView = view;
+  selectedIndex = 0;
+  tabLoadedBtn.classList.toggle("active", view === "loaded");
+  tabLoadedBtn.setAttribute("aria-selected", String(view === "loaded"));
+  tabArchivedBtn.classList.toggle("active", view === "archived");
+  tabArchivedBtn.setAttribute("aria-selected", String(view === "archived"));
+  searchInput.placeholder =
+    view === "loaded"
+      ? "Filter loaded tabs... (Enter to switch, Esc to close)"
+      : "Search archived tabs... (Enter to open, Esc to close)";
+  renderList();
+}
+
+async function refreshStatus(): Promise<StatusPayload> {
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+  loadedTabs = status.loadedTabs ?? [];
   statLoaded.textContent = `${status.loadedCount} (cap ${status.config.maxActiveTabs})`;
   statDiscarded.textContent = String(status.discardedCount);
   statArchived.textContent = String(status.archivedCount);
+  tabLoadedBtn.textContent = `Loaded (${status.loadedCount})`;
+  tabArchivedBtn.textContent = `Archived (${status.archivedCount})`;
 
   if (status.memory) {
-    const modeLabel = status.memory.source === "native_host" ? "Chrome PSS" : "System RAM";
-    memoryBadge.textContent = `${formatGb(status.memory.usedBytes)} / ${formatGb(status.memory.budgetBytes)} (${modeLabel})`;
+    const modeLabel =
+      status.memory.source === "native_host"
+        ? status.memory.metric === "pss"
+          ? "Chrome PSS"
+          : "Chrome RAM"
+        : "System RAM";
+    const offlinePrefix = status.online ? "" : "Offline · ";
+    memoryBadge.textContent = `${offlinePrefix}${formatGb(status.memory.usedBytes)} / ${formatGb(status.memory.budgetBytes)} (${modeLabel})`;
     memoryBadge.classList.toggle("over", status.memory.overBudget);
 
     const pct = Math.min(100, Math.round((status.memory.usedBytes / Math.max(1, status.memory.budgetBytes)) * 100));
     memoryBar.style.width = `${pct}%`;
     memoryBar.classList.toggle("over", status.memory.overBudget);
   }
+
+  if (activeView === "loaded") {
+    renderList();
+  }
+  return status;
 }
 
 async function refreshArchive(query = searchInput.value): Promise<void> {
-  currentItems = (await chrome.runtime.sendMessage({ type: "get_archive", query })) as ArchivedTab[];
-  selectedIndex = Math.min(selectedIndex, Math.max(0, currentItems.length - 1));
-  renderArchive();
+  archivedItems = (await chrome.runtime.sendMessage({ type: "get_archive", query })) as ArchivedTab[];
+  if (activeView === "archived") {
+    selectedIndex = Math.min(selectedIndex, Math.max(0, archivedItems.length - 1));
+    renderList();
+  }
 }
 
-function renderArchive(): void {
-  archiveList.replaceChildren();
+function renderList(): void {
+  if (activeView === "loaded") {
+    renderLoadedTabs();
+  } else {
+    renderArchivedTabs();
+  }
+}
 
-  if (currentItems.length === 0) {
+function renderLoadedTabs(): void {
+  listEl.replaceChildren();
+  const items = filteredLoadedTabs();
+  selectedIndex = Math.min(selectedIndex, Math.max(0, items.length - 1));
+
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = searchInput.value.trim() ? "No loaded tabs match your filter." : "No loaded tabs.";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  items.forEach((tab, index) => {
+    const row = document.createElement("div");
+    row.className = `archive-item${index === selectedIndex ? " selected" : ""}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(index === selectedIndex));
+
+    const main = document.createElement("div");
+    main.className = "item-main";
+
+    const title = document.createElement("div");
+    title.className = "item-title";
+    title.textContent = tab.title || tab.url;
+
+    const metaParts = [extractHost(tab.url), formatIdle(tab.idleMinutes)];
+    if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
+      metaParts.push(`JS ${formatMb(tab.jsHeapBytes)}`);
+    }
+    const meta = document.createElement("div");
+    meta.className = "item-meta";
+    meta.textContent = metaParts.join(" · ");
+
+    main.append(title, meta);
+
+    row.addEventListener("click", async () => {
+      await chrome.tabs.update(tab.id, { active: true });
+      window.close();
+    });
+
+    if (tab.protectedReason) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = tab.protectedReason;
+      row.append(main, pill);
+    } else {
+      const discardBtn = document.createElement("button");
+      discardBtn.className = "item-action";
+      discardBtn.type = "button";
+      discardBtn.title = "Discard this tab to free RAM";
+      discardBtn.textContent = "Discard";
+      discardBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        discardBtn.disabled = true;
+        await chrome.runtime.sendMessage({ type: "discard_tab", tabId: tab.id });
+        await refreshStatus();
+      });
+      row.append(main, discardBtn);
+    }
+
+    listEl.appendChild(row);
+  });
+}
+
+function renderArchivedTabs(): void {
+  listEl.replaceChildren();
+
+  if (archivedItems.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = searchInput.value.trim()
       ? "No archived tabs match your query."
       : "No archived tabs yet. Tabs idle beyond your archive threshold will appear here.";
-    archiveList.appendChild(empty);
+    listEl.appendChild(empty);
     return;
   }
 
-  currentItems.forEach((item, index) => {
+  archivedItems.forEach((item, index) => {
     const row = document.createElement("div");
     row.className = `archive-item${index === selectedIndex ? " selected" : ""}`;
     row.setAttribute("role", "option");
@@ -99,34 +235,53 @@ function renderArchive(): void {
     });
 
     row.append(main, delBtn);
-    archiveList.appendChild(row);
+    listEl.appendChild(row);
   });
 }
 
-searchInput.addEventListener("input", () => {
-  selectedIndex = 0;
+tabLoadedBtn.addEventListener("click", () => setActiveView("loaded"));
+tabArchivedBtn.addEventListener("click", () => {
+  setActiveView("archived");
   void refreshArchive(searchInput.value);
 });
 
+searchInput.addEventListener("input", () => {
+  selectedIndex = 0;
+  if (activeView === "archived") {
+    void refreshArchive(searchInput.value);
+  } else {
+    renderLoadedTabs();
+  }
+});
+
 searchInput.addEventListener("keydown", async (event) => {
+  const count = activeView === "loaded" ? filteredLoadedTabs().length : archivedItems.length;
   if (event.key === "ArrowDown") {
     event.preventDefault();
-    if (currentItems.length > 0) {
-      selectedIndex = (selectedIndex + 1) % currentItems.length;
-      renderArchive();
+    if (count > 0) {
+      selectedIndex = (selectedIndex + 1) % count;
+      renderList();
     }
   } else if (event.key === "ArrowUp") {
     event.preventDefault();
-    if (currentItems.length > 0) {
-      selectedIndex = (selectedIndex - 1 + currentItems.length) % currentItems.length;
-      renderArchive();
+    if (count > 0) {
+      selectedIndex = (selectedIndex - 1 + count) % count;
+      renderList();
     }
   } else if (event.key === "Enter") {
     event.preventDefault();
-    const target = currentItems[selectedIndex];
-    if (target) {
-      await chrome.runtime.sendMessage({ type: "restore_archived", id: target.id });
-      window.close();
+    if (activeView === "loaded") {
+      const target = filteredLoadedTabs()[selectedIndex];
+      if (target) {
+        await chrome.tabs.update(target.id, { active: true });
+        window.close();
+      }
+    } else {
+      const target = archivedItems[selectedIndex];
+      if (target) {
+        await chrome.runtime.sendMessage({ type: "restore_archived", id: target.id });
+        window.close();
+      }
     }
   } else if (event.key === "Escape") {
     window.close();
@@ -151,5 +306,10 @@ btnOptions.addEventListener("click", () => {
   void chrome.runtime.openOptionsPage();
 });
 
-void Promise.all([refreshStatus(), refreshArchive()]);
-searchInput.focus();
+async function init(): Promise<void> {
+  const [status] = await Promise.all([refreshStatus(), refreshArchive("")]);
+  setActiveView(status.archivedCount > 0 ? "archived" : "loaded");
+  searchInput.focus();
+}
+
+void init();

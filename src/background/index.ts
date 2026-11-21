@@ -1,5 +1,5 @@
 import { isInternalUrl, loadConfig, saveConfig } from "../shared/config.ts";
-import type { BackgroundMessage, StatusPayload, TabSummary } from "../shared/types.ts";
+import type { BackgroundMessage, LoadedTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
 import {
   archiveTabs,
   deleteArchivedTab,
@@ -10,10 +10,12 @@ import {
   restoreArchivedTab,
   searchArchive,
 } from "./archive.ts";
-import { isTabProtected, planEvictions } from "./eviction.ts";
+import { updateActionBadge } from "./badge.ts";
+import { getTabProtectedReason, isTabProtected, planEvictions } from "./eviction.ts";
 import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
-import { hasHostAccessPermission, sampleTabWeights } from "./sampler.ts";
+import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
+  getTabLastActiveAt,
   loadActivityState,
   reconcileActivityOnStartup,
   recordTabVisit,
@@ -37,6 +39,10 @@ async function maybeReopenOptions(): Promise<void> {
   }
 }
 
+function isBrowserOnline(): boolean {
+  return typeof navigator === "undefined" ? true : navigator.onLine !== false;
+}
+
 function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
   if (typeof tab.id !== "number") return null;
   return {
@@ -47,6 +53,7 @@ function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
     audible: Boolean(tab.audible),
     pinned: Boolean(tab.pinned),
     discarded: Boolean(tab.discarded),
+    status: tab.status,
     windowId: tab.windowId,
     groupId: tab.groupId,
     favIconUrl: tab.favIconUrl,
@@ -86,11 +93,13 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
     }
 
     const memory = mode === "startup" ? null : await getMemorySnapshot(config, now);
+    const online = isBrowserOnline();
 
     // Sample only eligible loaded tabs when we might need to choose among them.
     const eligibleLoaded = tabs.filter((t) => !t.discarded && !isTabProtected(t, config));
     const shouldSample =
       mode === "sweep" &&
+      online &&
       eligibleLoaded.length > 1 &&
       (eligibleLoaded.length > config.maxActiveTabs || Boolean(memory?.overBudget));
     const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now) : new Map();
@@ -103,11 +112,16 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
       memory,
       now,
       mode,
+      isOnline: online,
     });
 
     let discarded = 0;
     for (const candidate of evictions) {
       try {
+        if (mode === "sweep" && config.protectUnsavedForms && !weights.has(candidate.tab.id)) {
+          const hasForm = await checkTabHasUnsavedForm(candidate.tab.id);
+          if (hasForm) continue;
+        }
         await chrome.tabs.discard(candidate.tab.id);
         discarded++;
       } catch {
@@ -123,6 +137,9 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
       }
     }
 
+    const loadedCount = Math.max(0, tabs.filter((t) => !t.discarded).length - discarded);
+    await updateActionBadge(memory, loadedCount, online);
+
     return { discarded, archived };
   } finally {
     sweepInFlight = false;
@@ -130,11 +147,15 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
 }
 
 async function buildStatus(): Promise<StatusPayload> {
+  const now = Date.now();
+  const online = isBrowserOnline();
   const config = await loadConfig();
-  const [tabs, memory, archive, nativeMessaging, hostAccess] = await Promise.all([
+  const [tabs, memory, archive, activity, weights, nativeMessaging, hostAccess] = await Promise.all([
     queryAllTabs(),
-    getMemorySnapshot(config),
+    getMemorySnapshot(config, now),
     loadArchive(),
+    loadActivityState(),
+    loadCachedWeights(now),
     hasNativeMessagingPermission(),
     hasHostAccessPermission(),
   ]);
@@ -142,25 +163,53 @@ async function buildStatus(): Promise<StatusPayload> {
   let loadedCount = 0;
   let discardedCount = 0;
   let protectedCount = 0;
+  const loadedTabs: LoadedTabInfo[] = [];
 
   for (const tab of tabs) {
-    if (isTabProtected(tab, config)) {
+    const sample = weights.get(tab.id);
+    const protectedReason = getTabProtectedReason(tab, config, sample);
+    if (protectedReason !== null) {
       protectedCount++;
     }
     if (tab.discarded) {
       discardedCount++;
     } else {
       loadedCount++;
+      const lastActiveAt = getTabLastActiveAt(activity, tab, now);
+      const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
+      loadedTabs.push({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        idleMinutes,
+        protectedReason,
+        weightMultiplier: sample?.weightMultiplier ?? 1.0,
+        jsHeapBytes: sample ? sample.jsHeapBytes : null,
+        hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
+      });
     }
   }
+
+  loadedTabs.sort((a, b) => {
+    const aProt = a.protectedReason ? 1 : 0;
+    const bProt = b.protectedReason ? 1 : 0;
+    if (aProt !== bProt) return aProt - bProt;
+    const aScore = Math.max(1, a.idleMinutes) * a.weightMultiplier;
+    const bScore = Math.max(1, b.idleMinutes) * b.weightMultiplier;
+    return bScore - aScore;
+  });
+
+  await updateActionBadge(memory, loadedCount, online);
 
   return {
     config,
     memory,
+    online,
     loadedCount,
     discardedCount,
     protectedCount,
     archivedCount: archive.length,
+    loadedTabs,
     permissions: { nativeMessaging, hostAccess },
   };
 }
@@ -275,6 +324,13 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: await restoreArchivedTab(message.id) };
     case "delete_archived":
       return { ok: await deleteArchivedTab(message.id) };
+    case "discard_tab":
+      try {
+        await chrome.tabs.discard(message.tabId);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
     case "discard_idle_now":
       return runSweep("sweep");
     case "archive_old_now": {

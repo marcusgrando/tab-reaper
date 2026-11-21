@@ -15,13 +15,23 @@ import { getTabLastActiveAt } from "./tracker.ts";
  */
 export const MAX_MEMORY_EVICTIONS_PER_PASS = 2;
 
-export function isTabProtected(tab: TabSummary, config: TabReaperConfig): boolean {
-  if (isInternalUrl(tab.url)) return true;
-  if (config.protectActive && tab.active) return true;
-  if (config.protectAudible && tab.audible) return true;
-  if (config.protectPinned && tab.pinned) return true;
-  if (matchesAllowlist(tab.url, config.allowlist)) return true;
-  return false;
+export function getTabProtectedReason(
+  tab: TabSummary,
+  config: TabReaperConfig,
+  sample?: TabWeightSample,
+): string | null {
+  if (isInternalUrl(tab.url)) return "Internal";
+  if (tab.status === "loading") return "Loading";
+  if (config.protectActive && tab.active) return "Active";
+  if (config.protectAudible && tab.audible) return "Audio";
+  if (config.protectPinned && tab.pinned) return "Pinned";
+  if (matchesAllowlist(tab.url, config.allowlist)) return "Allowlist";
+  if (config.protectUnsavedForms && sample?.hasUnsavedForm) return "Form";
+  return null;
+}
+
+export function isTabProtected(tab: TabSummary, config: TabReaperConfig, sample?: TabWeightSample): boolean {
+  return getTabProtectedReason(tab, config, sample) !== null;
 }
 
 export interface PlanEvictionsInput {
@@ -32,12 +42,17 @@ export interface PlanEvictionsInput {
   memory: MemorySnapshot | null;
   now: number;
   mode: "sweep" | "startup";
+  isOnline?: boolean;
 }
 
 export function planEvictions(input: PlanEvictionsInput): EvictionCandidate[] {
-  const { tabs, activity, weights, config, memory, now, mode } = input;
+  const { tabs, activity, weights, config, memory, now, mode, isOnline = true } = input;
 
-  const eligibleLoaded = tabs.filter((tab) => !tab.discarded && !isTabProtected(tab, config));
+  if (config.skipWhenOffline && !isOnline) {
+    return [];
+  }
+
+  const eligibleLoaded = tabs.filter((tab) => !tab.discarded && !isTabProtected(tab, config, weights.get(tab.id)));
   if (eligibleLoaded.length === 0) return [];
 
   if (mode === "startup") {

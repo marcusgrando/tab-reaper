@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_MEMORY_EVICTIONS_PER_PASS, isTabProtected, planEvictions } from "../src/background/eviction.ts";
+import { computeBadge } from "../src/background/badge.ts";
+import { MAX_MEMORY_EVICTIONS_PER_PASS, getTabProtectedReason, isTabProtected, planEvictions } from "../src/background/eviction.ts";
 import { computeWeightMultiplier } from "../src/background/sampler.ts";
 import { createEmptyActivityState, recordTabVisit } from "../src/background/tracker.ts";
 import {
@@ -164,5 +165,79 @@ describe("eviction engine", () => {
     });
 
     expect(planned.map((p) => p.tab.id)).toEqual([3, 5]);
+  });
+
+  test("protects loading tabs and tabs with unsaved form input", () => {
+    const cfg = sanitizeConfig({ protectUnsavedForms: true });
+    expect(getTabProtectedReason(makeTab(1, { status: "loading" }), cfg)).toBe("Loading");
+    expect(isTabProtected(makeTab(1, { status: "loading" }), cfg)).toBe(true);
+
+    const formSample: TabWeightSample = {
+      jsHeapBytes: 20 * 1024 ** 2,
+      domNodes: 500,
+      mediaNodes: 0,
+      weightMultiplier: 1.4,
+      hasUnsavedForm: true,
+      sampledAt: now,
+    };
+    expect(getTabProtectedReason(makeTab(2), cfg, formSample)).toBe("Form");
+
+    const planned = planEvictions({
+      tabs: [makeTab(1, { status: "loading" }), makeTab(2), makeTab(3)],
+      activity: createEmptyActivityState(),
+      weights: new Map([[2, formSample]]),
+      config: sanitizeConfig({ maxActiveTabs: 1, discardAfterMinutes: 0 }),
+      memory: null,
+      now,
+      mode: "sweep",
+    });
+    expect(planned).toEqual([]);
+  });
+
+  test("skips all evictions when offline and skipWhenOffline is enabled", () => {
+    const cfg = sanitizeConfig({ maxActiveTabs: 1, discardAfterMinutes: 1, skipWhenOffline: true });
+    const tabs = [makeTab(1), makeTab(2), makeTab(3)];
+    let activity = createEmptyActivityState();
+    for (const tab of tabs) {
+      activity = recordTabVisit(activity, tab.id, tab.url, now - 30 * 60_000);
+    }
+
+    const offlinePlanned = planEvictions({
+      tabs,
+      activity,
+      weights: new Map(),
+      config: cfg,
+      memory: null,
+      now,
+      mode: "sweep",
+      isOnline: false,
+    });
+    expect(offlinePlanned).toEqual([]);
+  });
+});
+
+describe("action badge", () => {
+  test("formats Chrome RAM badge and color thresholds", () => {
+    const okMem: MemorySnapshot = {
+      source: "native_host",
+      usedBytes: 2.6 * 1024 ** 3,
+      budgetBytes: 4 * 1024 ** 3,
+      systemTotalBytes: 8 * 1024 ** 3,
+      systemAvailableBytes: 2 * 1024 ** 3,
+      overBudget: false,
+      checkedAt: 0,
+    };
+    expect(computeBadge(okMem, 8, true)).toEqual({ text: "2.6G", color: "#16a34a" });
+
+    const warnMem = { ...okMem, usedBytes: 3.2 * 1024 ** 3 };
+    expect(computeBadge(warnMem, 8, true)).toEqual({ text: "3.2G", color: "#d97706" });
+
+    const overMem = { ...okMem, usedBytes: 4.5 * 1024 ** 3, overBudget: true };
+    expect(computeBadge(overMem, 8, true)).toEqual({ text: "4.5G", color: "#dc2626" });
+
+    expect(computeBadge(okMem, 8, false)).toEqual({ text: "OFF", color: "#64748b" });
+
+    const sysMem: MemorySnapshot = { ...okMem, source: "system_memory" };
+    expect(computeBadge(sysMem, 7, true)).toEqual({ text: "7", color: "#16a34a" });
   });
 });

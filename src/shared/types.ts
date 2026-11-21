@@ -17,6 +17,8 @@ export interface TabReaperConfig {
   protectActive: boolean;
   protectAudible: boolean;
   protectPinned: boolean;
+  protectUnsavedForms: boolean;
+  skipWhenOffline: boolean;
   bookmarkFolderName: string;
   /** Domain or glob patterns excluded from discard and archive. */
   allowlist: string[];
@@ -37,6 +39,7 @@ export interface TabWeightSample {
   domNodes: number;
   mediaNodes: number;
   weightMultiplier: number;
+  hasUnsavedForm?: boolean;
   sampledAt: number;
 }
 
@@ -76,9 +79,21 @@ export interface TabSummary {
   audible: boolean;
   pinned: boolean;
   discarded: boolean;
+  status?: string;
   windowId: number;
   groupId?: number;
   favIconUrl?: string;
+}
+
+export interface LoadedTabInfo {
+  id: number;
+  url: string;
+  title: string;
+  idleMinutes: number;
+  protectedReason: string | null;
+  weightMultiplier: number;
+  jsHeapBytes: number | null;
+  hasUnsavedForm: boolean;
 }
 
 export interface EvictionCandidate {
@@ -92,10 +107,12 @@ export interface EvictionCandidate {
 export interface StatusPayload {
   config: TabReaperConfig;
   memory: MemorySnapshot | null;
+  online: boolean;
   loadedCount: number;
   discardedCount: number;
   protectedCount: number;
   archivedCount: number;
+  loadedTabs: LoadedTabInfo[];
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
@@ -107,6 +124,7 @@ export type BackgroundMessage =
   | { type: "get_archive"; query?: string }
   | { type: "restore_archived"; id: string }
   | { type: "delete_archived"; id: string }
+  | { type: "discard_tab"; tabId: number }
   | { type: "discard_idle_now" }
   | { type: "archive_old_now" }
   | { type: "save_config"; config: Partial<TabReaperConfig> }

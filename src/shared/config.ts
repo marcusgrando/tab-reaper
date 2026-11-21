@@ -13,6 +13,8 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   protectActive: true,
   protectAudible: true,
   protectPinned: true,
+  protectUnsavedForms: true,
+  skipWhenOffline: true,
   bookmarkFolderName: "Auto-Archived Tabs",
   allowlist: [],
 };
@@ -57,6 +59,8 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     protectActive: Boolean(merged.protectActive),
     protectAudible: Boolean(merged.protectAudible),
     protectPinned: Boolean(merged.protectPinned),
+    protectUnsavedForms: Boolean(merged.protectUnsavedForms),
+    skipWhenOffline: Boolean(merged.skipWhenOffline),
     bookmarkFolderName,
     allowlist: [...new Set(allowlist)],
   };

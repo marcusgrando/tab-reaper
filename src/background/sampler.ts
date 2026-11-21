@@ -8,6 +8,7 @@ interface RawPageMetrics {
   jsHeapBytes: number;
   domNodes: number;
   mediaNodes: number;
+  hasUnsavedForm?: boolean;
 }
 
 export function computeWeightMultiplier(metrics: RawPageMetrics): number {
@@ -73,6 +74,50 @@ export async function sampleTabWeights(
   return weights;
 }
 
+export async function loadCachedWeights(now = Date.now()): Promise<Map<number, TabWeightSample>> {
+  const weights = new Map<number, TabWeightSample>();
+  const cache = await loadSampleCache();
+  for (const [idStr, sample] of Object.entries(cache)) {
+    const id = Number(idStr);
+    if (Number.isFinite(id) && sample && now - sample.sampledAt < SAMPLE_TTL_MS) {
+      weights.set(id, sample);
+    }
+  }
+  return weights;
+}
+
+export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
+  if (!chrome.scripting?.executeScript) return false;
+  const hostAccess = await hasHostAccessPermission();
+  if (!hostAccess) return false;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const textareas = document.querySelectorAll("textarea");
+        for (const ta of textareas) {
+          if (ta.value !== ta.defaultValue && ta.value.trim().length > 0) return true;
+        }
+        const inputs = document.querySelectorAll("input");
+        const skipTypes = new Set(["hidden", "submit", "button", "reset", "image", "checkbox", "radio", "file"]);
+        for (const input of inputs) {
+          const type = (input.type || "text").toLowerCase();
+          if (skipTypes.has(type)) continue;
+          if (input.value !== input.defaultValue && input.value.trim().length > 0) return true;
+        }
+        const active = document.activeElement as HTMLElement | null;
+        if (active?.isContentEditable && (active.textContent?.trim().length ?? 0) > 0) {
+          return true;
+        }
+        return false;
+      },
+    });
+    return Boolean(results[0]?.result);
+  } catch {
+    return false;
+  }
+}
+
 async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSample | null> {
   if (!chrome.scripting?.executeScript) return null;
   try {
@@ -85,7 +130,35 @@ async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSam
         const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
         const domNodes = document.getElementsByTagName("*").length;
         const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
-        return { jsHeapBytes, domNodes, mediaNodes };
+
+        let hasUnsavedForm = false;
+        const textareas = document.querySelectorAll("textarea");
+        for (const ta of textareas) {
+          if (ta.value !== ta.defaultValue && ta.value.trim().length > 0) {
+            hasUnsavedForm = true;
+            break;
+          }
+        }
+        if (!hasUnsavedForm) {
+          const inputs = document.querySelectorAll("input");
+          const skipTypes = new Set(["hidden", "submit", "button", "reset", "image", "checkbox", "radio", "file"]);
+          for (const input of inputs) {
+            const type = (input.type || "text").toLowerCase();
+            if (skipTypes.has(type)) continue;
+            if (input.value !== input.defaultValue && input.value.trim().length > 0) {
+              hasUnsavedForm = true;
+              break;
+            }
+          }
+        }
+        if (!hasUnsavedForm) {
+          const active = document.activeElement as HTMLElement | null;
+          if (active?.isContentEditable && (active.textContent?.trim().length ?? 0) > 0) {
+            hasUnsavedForm = true;
+          }
+        }
+
+        return { jsHeapBytes, domNodes, mediaNodes, hasUnsavedForm };
       },
     });
     const metrics = results[0]?.result as RawPageMetrics | undefined;
@@ -96,6 +169,7 @@ async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSam
       domNodes: metrics.domNodes,
       mediaNodes: metrics.mediaNodes,
       weightMultiplier: computeWeightMultiplier(metrics),
+      hasUnsavedForm: Boolean(metrics.hasUnsavedForm),
       sampledAt: now,
     };
   } catch {

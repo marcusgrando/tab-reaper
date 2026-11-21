@@ -13,6 +13,8 @@ const startupSweep = document.getElementById("startup-sweep") as HTMLInputElemen
 const protectActive = document.getElementById("protect-active") as HTMLInputElement;
 const protectAudible = document.getElementById("protect-audible") as HTMLInputElement;
 const protectPinned = document.getElementById("protect-pinned") as HTMLInputElement;
+const protectForms = document.getElementById("protect-forms") as HTMLInputElement;
+const skipOffline = document.getElementById("skip-offline") as HTMLInputElement;
 const bookmarkFolder = document.getElementById("bookmark-folder") as HTMLInputElement;
 const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
 const saveStatus = document.getElementById("save-status") as HTMLElement;
@@ -42,6 +44,8 @@ function populateForm(config: TabReaperConfig): void {
   protectActive.checked = config.protectActive;
   protectAudible.checked = config.protectAudible;
   protectPinned.checked = config.protectPinned;
+  protectForms.checked = config.protectUnsavedForms;
+  skipOffline.checked = config.skipWhenOffline;
   bookmarkFolder.value = config.bookmarkFolderName;
   allowlist.value = config.allowlist.join("\n");
   syncBudgetVisibility();
@@ -99,6 +103,8 @@ form.addEventListener("submit", async (event) => {
     protectActive: protectActive.checked,
     protectAudible: protectAudible.checked,
     protectPinned: protectPinned.checked,
+    protectUnsavedForms: protectForms.checked,
+    skipWhenOffline: skipOffline.checked,
     bookmarkFolderName: bookmarkFolder.value.trim(),
     allowlist: allowlist.value
       .split("\n")
