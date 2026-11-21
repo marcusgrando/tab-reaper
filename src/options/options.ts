@@ -1,5 +1,5 @@
 import { DEFAULT_CONFIG } from "../shared/config.ts";
-import type { MemoryBudgetMode, StatusPayload, TabReaperConfig } from "../shared/types.ts";
+import type { MemoryBudgetMode, SessionSnapshot, StatusPayload, TabReaperConfig } from "../shared/types.ts";
 
 const form = document.getElementById("settings-form") as HTMLFormElement;
 const memoryMode = document.getElementById("memory-mode") as HTMLSelectElement;
@@ -27,6 +27,9 @@ const hostStatus = document.getElementById("host-status") as HTMLElement;
 const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonElement;
 const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonElement;
 const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
+const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
+const snapshotStatus = document.getElementById("snapshot-status") as HTMLElement;
+const snapshotList = document.getElementById("snapshot-list") as HTMLElement;
 
 function syncBudgetVisibility(): void {
   const isFixed = memoryMode.value === "fixed_gb";
@@ -224,11 +227,62 @@ async function refreshPermissionsUI(): Promise<void> {
   hostStatus.className = `status-text ${hasHost ? "ok" : ""}`;
 }
 
+function formatSnapshotTime(ts: number): string {
+  return new Date(ts).toLocaleString();
+}
+
+async function refreshSnapshotsUI(): Promise<void> {
+  const snapshots = (await chrome.runtime.sendMessage({ type: "get_snapshots" })) as SessionSnapshot[];
+  snapshotList.replaceChildren();
+  if (!Array.isArray(snapshots) || snapshots.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "snapshot-meta";
+    empty.textContent = "No snapshots captured yet.";
+    snapshotList.appendChild(empty);
+    return;
+  }
+
+  for (const snap of snapshots) {
+    const row = document.createElement("div");
+    row.className = "snapshot-row";
+
+    const info = document.createElement("div");
+    const count = document.createElement("strong");
+    count.textContent = `${snap.tabCount} tabs`;
+    const meta = document.createElement("span");
+    meta.className = "snapshot-meta";
+    meta.textContent = ` · ${formatSnapshotTime(snap.capturedAt)}`;
+    info.append(count, meta);
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.type = "button";
+    restoreBtn.className = "secondary small";
+    restoreBtn.textContent = "Restore";
+    restoreBtn.addEventListener("click", async () => {
+      restoreBtn.disabled = true;
+      snapshotStatus.textContent = "Restoring session...";
+      snapshotStatus.className = "status-text";
+      const res = (await chrome.runtime.sendMessage({ type: "restore_snapshot", id: snap.id })) as {
+        ok?: boolean;
+        restored?: number;
+        skippedExisting?: number;
+      };
+      const skipped = res?.skippedExisting ? `, ${res.skippedExisting} already open` : "";
+      snapshotStatus.textContent = `Restored ${res?.restored ?? 0} tab(s)${skipped}.`;
+      snapshotStatus.className = "status-text ok";
+      restoreBtn.disabled = false;
+    });
+
+    row.append(info, restoreBtn);
+    snapshotList.appendChild(row);
+  }
+}
+
 async function init(): Promise<void> {
   installCmd.textContent = buildInstallCommand(chrome.runtime.id);
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
   populateForm(status.config);
-  await refreshPermissionsUI();
+  await Promise.all([refreshPermissionsUI(), refreshSnapshotsUI()]);
 }
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
@@ -354,6 +408,23 @@ btnHostPerm.addEventListener("click", async () => {
     return;
   }
   await refreshPermissionsUI();
+});
+
+btnSaveSnapshot.addEventListener("click", async () => {
+  btnSaveSnapshot.disabled = true;
+  const res = (await chrome.runtime.sendMessage({ type: "capture_snapshot_now" })) as {
+    ok?: boolean;
+    snapshot?: SessionSnapshot;
+  };
+  if (res?.ok && res.snapshot) {
+    snapshotStatus.textContent = `Saved snapshot (${res.snapshot.tabCount} tabs).`;
+    snapshotStatus.className = "status-text ok";
+  } else {
+    snapshotStatus.textContent = "No http(s) tabs open to snapshot.";
+    snapshotStatus.className = "status-text";
+  }
+  await refreshSnapshotsUI();
+  btnSaveSnapshot.disabled = false;
 });
 
 void init();

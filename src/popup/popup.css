@@ -96,6 +96,21 @@ h1 {
   color: var(--text);
 }
 
+.recovery-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.recovery-banner.hidden {
+  display: none;
+}
+
 .tabs {
   display: flex;
   gap: 6px;

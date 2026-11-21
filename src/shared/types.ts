@@ -112,6 +112,23 @@ export interface EvictionCandidate {
   reason: "over_tab_cap" | "over_memory_budget" | "idle_timeout";
 }
 
+export interface SnapshotTab {
+  url: string;
+  title: string;
+  pinned: boolean;
+  kept: boolean;
+  windowId: number;
+  groupTitle?: string;
+  groupColor?: string;
+}
+
+export interface SessionSnapshot {
+  id: string;
+  capturedAt: number;
+  tabCount: number;
+  tabs: SnapshotTab[];
+}
+
 export interface StatusPayload {
   config: TabReaperConfig;
   memory: MemorySnapshot | null;
@@ -121,6 +138,7 @@ export interface StatusPayload {
   protectedCount: number;
   archivedCount: number;
   openTabs: OpenTabInfo[];
+  recoverableSnapshot: { id: string; capturedAt: number; tabCount: number } | null;
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
@@ -138,5 +156,8 @@ export type BackgroundMessage =
   | { type: "close_tab"; tabId: number }
   | { type: "discard_idle_now" }
   | { type: "archive_old_now" }
+  | { type: "get_snapshots" }
+  | { type: "capture_snapshot_now" }
+  | { type: "restore_snapshot"; id: string }
   | { type: "save_config"; config: Partial<TabReaperConfig> }
   | { type: "test_native_host" };

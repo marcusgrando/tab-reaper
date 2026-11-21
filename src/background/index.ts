@@ -17,6 +17,12 @@ import { computeOpenTabActions, isTabProtected, planEvictions } from "./eviction
 import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
+  captureSessionSnapshot,
+  findRecoverableSnapshot,
+  loadSnapshots,
+  restoreSessionSnapshot,
+} from "./session.ts";
+import {
   clearKeptTabIds,
   getTabLastActiveAt,
   loadActivityState,
@@ -167,6 +173,10 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
     const loadedCount = Math.max(0, tabs.filter((t) => !t.discarded).length - discarded);
     await updateActionBadge(memory, loadedCount, online);
 
+    if (mode === "sweep") {
+      await captureSessionSnapshot(tabs, { now });
+    }
+
     return { discarded, archived };
   } finally {
     sweepInFlight = false;
@@ -177,12 +187,13 @@ async function buildStatus(): Promise<StatusPayload> {
   const now = Date.now();
   const online = isBrowserOnline();
   const config = await loadConfig();
-  const [tabs, windows, memory, archive, activity, nativeMessaging, hostAccess] = await Promise.all([
+  const [tabs, windows, memory, archive, activity, snapshots, nativeMessaging, hostAccess] = await Promise.all([
     queryAllTabs(),
     chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
     getMemorySnapshot(config, now),
     loadArchive(),
     loadActivityState(),
+    loadSnapshots(),
     hasNativeMessagingPermission(),
     hasHostAccessPermission(),
   ]);
@@ -262,6 +273,7 @@ async function buildStatus(): Promise<StatusPayload> {
     protectedCount,
     archivedCount: archive.length,
     openTabs,
+    recoverableSnapshot: findRecoverableSnapshot(tabs, snapshots, now),
     permissions: { nativeMessaging, hostAccess },
   };
 }
@@ -456,6 +468,17 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       const saved = await saveConfig(message.config);
       await runSweep("sweep");
       return { ok: true, config: saved };
+    }
+    case "get_snapshots":
+      return loadSnapshots();
+    case "capture_snapshot_now": {
+      const tabs = await queryAllTabs();
+      const snapshot = await captureSessionSnapshot(tabs, { force: true });
+      return { ok: Boolean(snapshot), snapshot };
+    }
+    case "restore_snapshot": {
+      const res = await restoreSessionSnapshot(message.id);
+      return { ok: true, ...res };
     }
     case "test_native_host":
       return pingNativeHost();

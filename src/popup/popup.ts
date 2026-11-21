@@ -14,6 +14,11 @@ const tabArchivedBtn = document.getElementById("tab-archived") as HTMLButtonElem
 const btnDiscard = document.getElementById("btn-discard") as HTMLButtonElement;
 const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
 const actionStatus = document.getElementById("action-status") as HTMLElement;
+const recoveryBanner = document.getElementById("recovery-banner") as HTMLElement;
+const recoveryText = document.getElementById("recovery-text") as HTMLElement;
+const btnRestoreSession = document.getElementById("btn-restore-session") as HTMLButtonElement;
+
+let recoverableSnapshotId: string | null = null;
 
 const CLOSE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
@@ -91,6 +96,15 @@ async function refreshStatus(): Promise<StatusPayload> {
   statArchived.textContent = String(status.archivedCount);
   tabOpenBtn.textContent = `Open (${openTabs.length})`;
   tabArchivedBtn.textContent = `Archived (${status.archivedCount})`;
+
+  if (status.recoverableSnapshot) {
+    recoverableSnapshotId = status.recoverableSnapshot.id;
+    recoveryText.textContent = `Previous session saved (${status.recoverableSnapshot.tabCount} tabs · ${formatAge(status.recoverableSnapshot.capturedAt)})`;
+    recoveryBanner.classList.remove("hidden");
+  } else {
+    recoverableSnapshotId = null;
+    recoveryBanner.classList.add("hidden");
+  }
 
   if (status.memory) {
     const modeLabel =
@@ -391,6 +405,18 @@ btnDiscard.addEventListener("click", async () => {
 
 btnOptions.addEventListener("click", () => {
   void chrome.runtime.openOptionsPage();
+});
+
+btnRestoreSession.addEventListener("click", async () => {
+  if (!recoverableSnapshotId) return;
+  btnRestoreSession.disabled = true;
+  const res = (await chrome.runtime.sendMessage({
+    type: "restore_snapshot",
+    id: recoverableSnapshotId,
+  })) as { restored?: number; skippedExisting?: number };
+  await refreshStatus();
+  showActionStatus(`Restored ${res?.restored ?? 0} tab(s) from previous session.`);
+  btnRestoreSession.disabled = false;
 });
 
 async function init(): Promise<void> {
