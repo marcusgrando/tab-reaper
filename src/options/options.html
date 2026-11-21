@@ -15,7 +15,10 @@
           <h2>Memory &amp; Tab Limits</h2>
 
           <div class="field">
-            <label for="memory-mode">Memory budget mode</label>
+            <div class="field-header">
+              <label for="memory-mode">Memory budget mode</label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
+            </div>
             <select id="memory-mode">
               <option value="fraction">Fraction of system RAM (default: memory / 2)</option>
               <option value="fixed_gb">Fixed gigabytes (GB)</option>
@@ -23,71 +26,110 @@
           </div>
 
           <div class="field" id="fraction-wrap">
-            <label for="memory-fraction">System RAM fraction (0.1 – 0.9)</label>
+            <div class="field-header">
+              <label for="memory-fraction">System RAM fraction (0.1 – 0.9)</label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
+            </div>
             <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
           </div>
 
           <div class="field hidden" id="fixed-gb-wrap">
-            <label for="memory-gb">Maximum Chrome RAM (GB)</label>
+            <div class="field-header">
+              <label for="memory-gb">Maximum Chrome RAM (GB)</label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
+            </div>
             <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
           </div>
 
           <div class="field">
-            <label for="max-active-tabs">Max loaded tabs kept in RAM</label>
+            <div class="field-header">
+              <label for="max-active-tabs">Max loaded tabs kept in RAM</label>
+              <button type="button" class="reset-btn hidden" data-reset="maxActiveTabs"></button>
+            </div>
             <input id="max-active-tabs" type="number" min="1" max="200" step="1" />
           </div>
 
           <div class="field">
-            <label for="discard-minutes">Discard idle tabs after (minutes, 0 = disabled)</label>
+            <div class="field-header">
+              <label for="discard-minutes">Discard idle tabs after (minutes, 0 = disabled)</label>
+              <button type="button" class="reset-btn hidden" data-reset="discardAfterMinutes"></button>
+            </div>
             <input id="discard-minutes" type="number" min="0" max="10080" step="1" />
           </div>
 
           <div class="field">
-            <label for="archive-hours">Auto-archive inactive tabs after (hours, 0 = disabled)</label>
+            <div class="field-header">
+              <label for="archive-hours">Auto-archive inactive tabs after (hours, default 168 = 7 days, 0 = disabled)</label>
+              <button type="button" class="reset-btn hidden" data-reset="archiveAfterHours"></button>
+            </div>
             <input id="archive-hours" type="number" min="0" max="8760" step="1" />
           </div>
 
-          <label class="checkbox">
-            <input id="startup-sweep" type="checkbox" />
-            <span>Discard background tabs immediately on Chrome startup</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="startup-sweep" type="checkbox" />
+              <span>Discard background tabs immediately on Chrome startup</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="startupSweep"></button>
+          </div>
         </section>
 
         <section class="card">
           <h2>Protections &amp; Auto-Bookmark</h2>
 
-          <label class="checkbox">
-            <input id="protect-active" type="checkbox" />
-            <span>Protect active tabs</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="protect-active" type="checkbox" />
+              <span>Protect active tabs</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="protectActive"></button>
+          </div>
 
-          <label class="checkbox">
-            <input id="protect-audible" type="checkbox" />
-            <span>Protect tabs playing audio</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="protect-audible" type="checkbox" />
+              <span>Protect tabs playing audio</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="protectAudible"></button>
+          </div>
 
-          <label class="checkbox">
-            <input id="protect-pinned" type="checkbox" />
-            <span>Protect pinned tabs</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="protect-pinned" type="checkbox" />
+              <span>Protect pinned tabs</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="protectPinned"></button>
+          </div>
 
-          <label class="checkbox">
-            <input id="protect-forms" type="checkbox" />
-            <span>Protect tabs with unsaved form input (uses optional Weighted Eviction page access)</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="protect-forms" type="checkbox" />
+              <span>Protect tabs with unsaved form input (uses optional Weighted Eviction page access)</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="protectUnsavedForms"></button>
+          </div>
 
-          <label class="checkbox">
-            <input id="skip-offline" type="checkbox" />
-            <span>Skip discarding tabs while offline</span>
-          </label>
+          <div class="checkbox-row">
+            <label class="checkbox">
+              <input id="skip-offline" type="checkbox" />
+              <span>Skip discarding tabs while offline</span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="skipWhenOffline"></button>
+          </div>
 
           <div class="field">
-            <label for="bookmark-folder">Bookmark folder name (under Other Bookmarks)</label>
+            <div class="field-header">
+              <label for="bookmark-folder">Bookmark folder name (under Other Bookmarks)</label>
+              <button type="button" class="reset-btn hidden" data-reset="bookmarkFolderName"></button>
+            </div>
             <input id="bookmark-folder" type="text" />
           </div>
 
           <div class="field">
-            <label for="allowlist">Protected domains or glob patterns (one per line)</label>
+            <div class="field-header">
+              <label for="allowlist">Protected domains or glob patterns (one per line)</label>
+              <button type="button" class="reset-btn hidden" data-reset="allowlist"></button>
+            </div>
             <textarea id="allowlist" rows="4" placeholder="meet.google.com&#10;*.slack.com"></textarea>
           </div>
         </section>

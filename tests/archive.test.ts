@@ -199,10 +199,12 @@ describe("auto-bookmark dual archive", () => {
     expect(saved.map((i) => i.title).sort()).toEqual(["OK 1", "OK 2"]);
   });
 
-  test("auto-archive is disabled by default (archiveAfterHours = 0)", () => {
+  test("auto-archive defaults to 7 days (168h) and can be disabled with 0", () => {
     const now = 1_700_000_000_000;
-    const cfg = sanitizeConfig({});
-    expect(cfg.archiveAfterHours).toBe(0);
+    const defaultCfg = sanitizeConfig({});
+    expect(defaultCfg.archiveAfterHours).toBe(168);
+
+    const disabledCfg = sanitizeConfig({ archiveAfterHours: 0 });
     const tab: TabSummary = {
       id: 50,
       url: "https://old.example/page",
@@ -214,6 +216,7 @@ describe("auto-bookmark dual archive", () => {
       windowId: 1,
     };
     const activity = recordTabVisit(createEmptyActivityState(), 50, tab.url, now - 200 * 60 * 60 * 1000);
-    expect(planArchives({ tabs: [tab], activity, config: cfg, now })).toEqual([]);
+    expect(planArchives({ tabs: [tab], activity, config: defaultCfg, now })).toHaveLength(1);
+    expect(planArchives({ tabs: [tab], activity, config: disabledCfg, now })).toEqual([]);
   });
 });

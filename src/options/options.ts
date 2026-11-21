@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG } from "../shared/config.ts";
 import type { MemoryBudgetMode, StatusPayload, TabReaperConfig } from "../shared/types.ts";
 
 const form = document.getElementById("settings-form") as HTMLFormElement;
@@ -33,6 +34,147 @@ function syncBudgetVisibility(): void {
   fixedGbWrap.classList.toggle("hidden", !isFixed);
 }
 
+const UNDO_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>';
+
+type ConfigKey = keyof TabReaperConfig;
+
+interface FieldBinding {
+  isDefault: () => boolean;
+  reset: () => void;
+  defaultLabel: string;
+}
+
+const fieldBindings: Record<ConfigKey, FieldBinding> = {
+  memoryBudgetMode: {
+    isDefault: () => memoryMode.value === DEFAULT_CONFIG.memoryBudgetMode,
+    reset: () => {
+      memoryMode.value = DEFAULT_CONFIG.memoryBudgetMode;
+      syncBudgetVisibility();
+    },
+    defaultLabel: "Fraction of system RAM",
+  },
+  memoryBudgetFraction: {
+    isDefault: () => Number(memoryFraction.value) === DEFAULT_CONFIG.memoryBudgetFraction,
+    reset: () => {
+      memoryFraction.value = String(DEFAULT_CONFIG.memoryBudgetFraction);
+    },
+    defaultLabel: String(DEFAULT_CONFIG.memoryBudgetFraction),
+  },
+  memoryBudgetGb: {
+    isDefault: () => Number(memoryGb.value) === DEFAULT_CONFIG.memoryBudgetGb,
+    reset: () => {
+      memoryGb.value = String(DEFAULT_CONFIG.memoryBudgetGb);
+    },
+    defaultLabel: `${DEFAULT_CONFIG.memoryBudgetGb} GB`,
+  },
+  maxActiveTabs: {
+    isDefault: () => Number(maxActiveTabs.value) === DEFAULT_CONFIG.maxActiveTabs,
+    reset: () => {
+      maxActiveTabs.value = String(DEFAULT_CONFIG.maxActiveTabs);
+    },
+    defaultLabel: String(DEFAULT_CONFIG.maxActiveTabs),
+  },
+  discardAfterMinutes: {
+    isDefault: () => Number(discardMinutes.value) === DEFAULT_CONFIG.discardAfterMinutes,
+    reset: () => {
+      discardMinutes.value = String(DEFAULT_CONFIG.discardAfterMinutes);
+    },
+    defaultLabel: `${DEFAULT_CONFIG.discardAfterMinutes} min`,
+  },
+  archiveAfterHours: {
+    isDefault: () => Number(archiveHours.value) === DEFAULT_CONFIG.archiveAfterHours,
+    reset: () => {
+      archiveHours.value = String(DEFAULT_CONFIG.archiveAfterHours);
+    },
+    defaultLabel: `${DEFAULT_CONFIG.archiveAfterHours}h (7 days)`,
+  },
+  startupSweep: {
+    isDefault: () => startupSweep.checked === DEFAULT_CONFIG.startupSweep,
+    reset: () => {
+      startupSweep.checked = DEFAULT_CONFIG.startupSweep;
+    },
+    defaultLabel: DEFAULT_CONFIG.startupSweep ? "enabled" : "disabled",
+  },
+  protectActive: {
+    isDefault: () => protectActive.checked === DEFAULT_CONFIG.protectActive,
+    reset: () => {
+      protectActive.checked = DEFAULT_CONFIG.protectActive;
+    },
+    defaultLabel: DEFAULT_CONFIG.protectActive ? "enabled" : "disabled",
+  },
+  protectAudible: {
+    isDefault: () => protectAudible.checked === DEFAULT_CONFIG.protectAudible,
+    reset: () => {
+      protectAudible.checked = DEFAULT_CONFIG.protectAudible;
+    },
+    defaultLabel: DEFAULT_CONFIG.protectAudible ? "enabled" : "disabled",
+  },
+  protectPinned: {
+    isDefault: () => protectPinned.checked === DEFAULT_CONFIG.protectPinned,
+    reset: () => {
+      protectPinned.checked = DEFAULT_CONFIG.protectPinned;
+    },
+    defaultLabel: DEFAULT_CONFIG.protectPinned ? "enabled" : "disabled",
+  },
+  protectUnsavedForms: {
+    isDefault: () => protectForms.checked === DEFAULT_CONFIG.protectUnsavedForms,
+    reset: () => {
+      protectForms.checked = DEFAULT_CONFIG.protectUnsavedForms;
+    },
+    defaultLabel: DEFAULT_CONFIG.protectUnsavedForms ? "enabled" : "disabled",
+  },
+  skipWhenOffline: {
+    isDefault: () => skipOffline.checked === DEFAULT_CONFIG.skipWhenOffline,
+    reset: () => {
+      skipOffline.checked = DEFAULT_CONFIG.skipWhenOffline;
+    },
+    defaultLabel: DEFAULT_CONFIG.skipWhenOffline ? "enabled" : "disabled",
+  },
+  bookmarkFolderName: {
+    isDefault: () => bookmarkFolder.value.trim() === DEFAULT_CONFIG.bookmarkFolderName,
+    reset: () => {
+      bookmarkFolder.value = DEFAULT_CONFIG.bookmarkFolderName;
+    },
+    defaultLabel: DEFAULT_CONFIG.bookmarkFolderName,
+  },
+  allowlist: {
+    isDefault: () =>
+      allowlist.value
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean).length === DEFAULT_CONFIG.allowlist.length,
+    reset: () => {
+      allowlist.value = DEFAULT_CONFIG.allowlist.join("\n");
+    },
+    defaultLabel: "empty",
+  },
+};
+
+const resetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-reset]"));
+
+for (const btn of resetButtons) {
+  const key = btn.dataset.reset as ConfigKey | undefined;
+  if (!key || !(key in fieldBindings)) continue;
+  const binding = fieldBindings[key];
+  btn.innerHTML = UNDO_ICON_SVG;
+  const hint = `Reset to default (${binding.defaultLabel})`;
+  btn.title = hint;
+  btn.setAttribute("aria-label", hint);
+  btn.addEventListener("click", () => {
+    binding.reset();
+    syncResetButtons();
+  });
+}
+
+function syncResetButtons(): void {
+  for (const btn of resetButtons) {
+    const key = btn.dataset.reset as ConfigKey | undefined;
+    if (!key || !(key in fieldBindings)) continue;
+    btn.classList.toggle("hidden", fieldBindings[key].isDefault());
+  }
+}
+
 function populateForm(config: TabReaperConfig): void {
   memoryMode.value = config.memoryBudgetMode;
   memoryFraction.value = String(config.memoryBudgetFraction);
@@ -49,6 +191,7 @@ function populateForm(config: TabReaperConfig): void {
   bookmarkFolder.value = config.bookmarkFolderName;
   allowlist.value = config.allowlist.join("\n");
   syncBudgetVisibility();
+  syncResetButtons();
 }
 
 const WEIGHTED_EVICTION_PERMS: chrome.permissions.Permissions = {
@@ -89,6 +232,8 @@ async function init(): Promise<void> {
 }
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
+form.addEventListener("input", syncResetButtons);
+form.addEventListener("change", syncResetButtons);
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
