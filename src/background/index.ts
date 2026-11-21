@@ -226,7 +226,8 @@ async function buildStatus(): Promise<StatusPayload> {
       const bHeap = b.jsHeapBytes ?? -1;
       if (aHeap !== bHeap) return bHeap - aHeap;
     }
-    return b.idleMinutes - a.idleMinutes;
+    // Shortest idle first so tabs that just left active appear at the top.
+    return a.idleMinutes - b.idleMinutes;
   });
 
   await updateActionBadge(memory, loadedCount, online);
