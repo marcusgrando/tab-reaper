@@ -1094,7 +1094,7 @@ mod tests {
             temp_nanos()
         ));
         let active = base.join("GoogleDrive-eu@marcusgrando.com");
-        let preserved_by_name = base.join("GoogleDrive-eu@marcusgrando.com (12-12-23 09:22)");
+        let preserved_by_name = base.join("GoogleDrive-eu@marcusgrando.com (2023-12-12)");
         let preserved_by_marker = base.join("GoogleDrive-marcus.grando@azion.com");
         fs::create_dir_all(&active).unwrap();
         fs::create_dir_all(&preserved_by_name).unwrap();
