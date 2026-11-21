@@ -446,7 +446,8 @@ fn parse_macos_ps_chrome(output: &str) -> Vec<(i32, u64)> {
         }
         let is_chrome = lower.contains("google chrome")
             || lower.contains("chromium")
-            || lower.contains("brave browser");
+            || lower.contains("brave browser")
+            || lower.contains("chrome apps.localized");
         if is_chrome {
             procs.push((pid, rss_kb.saturating_mul(1024)));
         }

@@ -150,15 +150,25 @@ async function buildStatus(): Promise<StatusPayload> {
   const now = Date.now();
   const online = isBrowserOnline();
   const config = await loadConfig();
-  const [tabs, memory, archive, activity, weights, nativeMessaging, hostAccess] = await Promise.all([
+  const [tabs, windows, memory, archive, activity, nativeMessaging, hostAccess] = await Promise.all([
     queryAllTabs(),
+    chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
     getMemorySnapshot(config, now),
     loadArchive(),
     loadActivityState(),
-    loadCachedWeights(now),
     hasNativeMessagingPermission(),
     hasHostAccessPermission(),
   ]);
+
+  const windowById = new Map<number, chrome.windows.Window>();
+  for (const win of windows) {
+    if (typeof win.id === "number") {
+      windowById.set(win.id, win);
+    }
+  }
+
+  const loadedSummaries = tabs.filter((t) => !t.discarded);
+  const weights = hostAccess ? await sampleTabWeights(loadedSummaries, now) : await loadCachedWeights(now);
 
   let loadedCount = 0;
   let discardedCount = 0;
@@ -175,6 +185,10 @@ async function buildStatus(): Promise<StatusPayload> {
       discardedCount++;
     } else {
       loadedCount++;
+      const win = windowById.get(tab.windowId);
+      const isPwa = win?.type === "app";
+      const isFocusedActive = tab.active && win?.focused === true;
+      const canDiscardManually = !isInternalUrl(tab.url) && !isFocusedActive && tab.status !== "loading";
       const lastActiveAt = getTabLastActiveAt(activity, tab, now);
       const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
       loadedTabs.push({
@@ -186,17 +200,20 @@ async function buildStatus(): Promise<StatusPayload> {
         weightMultiplier: sample?.weightMultiplier ?? 1.0,
         jsHeapBytes: sample ? sample.jsHeapBytes : null,
         hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
+        isPwa,
+        canDiscardManually,
       });
     }
   }
 
   loadedTabs.sort((a, b) => {
+    const aHeap = a.jsHeapBytes ?? -1;
+    const bHeap = b.jsHeapBytes ?? -1;
+    if (aHeap !== bHeap) return bHeap - aHeap;
     const aProt = a.protectedReason ? 1 : 0;
     const bProt = b.protectedReason ? 1 : 0;
     if (aProt !== bProt) return aProt - bProt;
-    const aScore = Math.max(1, a.idleMinutes) * a.weightMultiplier;
-    const bScore = Math.max(1, b.idleMinutes) * b.weightMultiplier;
-    return bScore - aScore;
+    return b.idleMinutes - a.idleMinutes;
   });
 
   await updateActionBadge(memory, loadedCount, online);

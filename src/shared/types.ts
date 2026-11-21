@@ -94,6 +94,8 @@ export interface LoadedTabInfo {
   weightMultiplier: number;
   jsHeapBytes: number | null;
   hasUnsavedForm: boolean;
+  isPwa: boolean;
+  canDiscardManually: boolean;
 }
 
 export interface EvictionCandidate {

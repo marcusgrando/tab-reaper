@@ -18,6 +18,7 @@ const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
 let activeView: ActiveView = "loaded";
 let loadedTabs: LoadedTabInfo[] = [];
 let archivedItems: ArchivedTab[] = [];
+let hasHostAccess = false;
 let selectedIndex = 0;
 
 function formatGb(bytes: number): string {
@@ -76,6 +77,7 @@ function setActiveView(view: ActiveView): void {
 async function refreshStatus(): Promise<StatusPayload> {
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
   loadedTabs = status.loadedTabs ?? [];
+  hasHostAccess = Boolean(status.permissions?.hostAccess);
   statLoaded.textContent = `${status.loadedCount} (cap ${status.config.maxActiveTabs})`;
   statDiscarded.textContent = String(status.discardedCount);
   statArchived.textContent = String(status.archivedCount);
@@ -133,6 +135,13 @@ function renderLoadedTabs(): void {
     return;
   }
 
+  if (!hasHostAccess) {
+    const tip = document.createElement("div");
+    tip.className = "tip-banner";
+    tip.textContent = "Enable Weighted Eviction in Settings to see and sort by per-tab JS memory.";
+    listEl.appendChild(tip);
+  }
+
   items.forEach((tab, index) => {
     const row = document.createElement("div");
     row.className = `archive-item${index === selectedIndex ? " selected" : ""}`;
@@ -146,10 +155,11 @@ function renderLoadedTabs(): void {
     title.className = "item-title";
     title.textContent = tab.title || tab.url;
 
-    const metaParts = [extractHost(tab.url), formatIdle(tab.idleMinutes)];
+    const metaParts: string[] = [];
     if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
       metaParts.push(`JS ${formatMb(tab.jsHeapBytes)}`);
     }
+    metaParts.push(extractHost(tab.url), formatIdle(tab.idleMinutes));
     const meta = document.createElement("div");
     meta.className = "item-meta";
     meta.textContent = metaParts.join(" · ");
@@ -161,12 +171,24 @@ function renderLoadedTabs(): void {
       window.close();
     });
 
+    const right = document.createElement("div");
+    right.className = "item-right";
+
+    if (tab.isPwa) {
+      const pwaPill = document.createElement("span");
+      pwaPill.className = "pill pwa";
+      pwaPill.textContent = "PWA";
+      right.appendChild(pwaPill);
+    }
+
     if (tab.protectedReason) {
       const pill = document.createElement("span");
       pill.className = "pill";
       pill.textContent = tab.protectedReason;
-      row.append(main, pill);
-    } else {
+      right.appendChild(pill);
+    }
+
+    if (tab.canDiscardManually && (!tab.protectedReason || tab.isPwa)) {
       const discardBtn = document.createElement("button");
       discardBtn.className = "item-action";
       discardBtn.type = "button";
@@ -178,9 +200,10 @@ function renderLoadedTabs(): void {
         await chrome.runtime.sendMessage({ type: "discard_tab", tabId: tab.id });
         await refreshStatus();
       });
-      row.append(main, discardBtn);
+      right.appendChild(discardBtn);
     }
 
+    row.append(main, right);
     listEl.appendChild(row);
   });
 }
