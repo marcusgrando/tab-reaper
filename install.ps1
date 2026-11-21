@@ -32,6 +32,23 @@ if ($Uninstall) {
     exit 0
 }
 
+function Get-WindowsArch {
+    $arch = $null
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    } catch {}
+    switch ($arch) {
+        "arm64" { return "arm64" }
+        "x64"   { return "x86_64" }
+        "x86"   { return "x86" }
+        default {
+            if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { return "arm64" }
+            if ([Environment]::Is64BitOperatingSystem) { return "x86_64" }
+            return "x86"
+        }
+    }
+}
+
 function Get-ReleaseUrl([string]$Asset) {
     if ($Version -eq "latest") {
         return "https://github.com/$Repo/releases/latest/download/$Asset"
@@ -104,9 +121,10 @@ try {
 
     $ExtId = Get-ChromeExtensionId $ExtDir
 
-    Write-Host "Downloading native memory host (tab-reaper-host-windows-x86_64.exe)..."
-    Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-host-windows-x86_64.exe") -OutFile $HostTmpPath -UseBasicParsing
-    Test-AssetChecksum $SumsPath "tab-reaper-host-windows-x86_64.exe" $HostTmpPath
+    $HostAsset = "tab-reaper-host-windows-$(Get-WindowsArch).exe"
+    Write-Host "Downloading native memory host ($HostAsset)..."
+    Invoke-WebRequest -Uri (Get-ReleaseUrl $HostAsset) -OutFile $HostTmpPath -UseBasicParsing
+    Test-AssetChecksum $SumsPath $HostAsset $HostTmpPath
     Move-Item -Path $HostTmpPath -Destination $BinPath -Force
 
     $Manifest = @{

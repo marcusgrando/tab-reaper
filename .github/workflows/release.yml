@@ -28,16 +28,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install musl and arm64 cross-linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
       - env:
           RUSTFLAGS: "-D warnings"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --release --manifest-path native-host/Cargo.toml
-          cp native-host/target/release/tab-reaper-host tab-reaper-host-linux-x86_64
+          cargo build --release --target x86_64-unknown-linux-musl --manifest-path native-host/Cargo.toml
+          cargo build --release --target aarch64-unknown-linux-musl --manifest-path native-host/Cargo.toml
+          cp native-host/target/x86_64-unknown-linux-musl/release/tab-reaper-host tab-reaper-host-linux-x86_64
+          cp native-host/target/aarch64-unknown-linux-musl/release/tab-reaper-host tab-reaper-host-linux-arm64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: host-linux-x86_64
-          path: tab-reaper-host-linux-x86_64
+          name: host-linux
+          path: |
+            tab-reaper-host-linux-x86_64
+            tab-reaper-host-linux-arm64
 
   build-host-macos:
     runs-on: macos-latest
@@ -65,16 +74,25 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,i686-pc-windows-msvc
       - shell: bash
         env:
           RUSTFLAGS: "-D warnings"
         run: |
-          cargo build --release --manifest-path native-host/Cargo.toml
-          cp native-host/target/release/tab-reaper-host.exe tab-reaper-host-windows-x86_64.exe
+          cargo build --release --target x86_64-pc-windows-msvc --manifest-path native-host/Cargo.toml
+          cargo build --release --target aarch64-pc-windows-msvc --manifest-path native-host/Cargo.toml
+          cargo build --release --target i686-pc-windows-msvc --manifest-path native-host/Cargo.toml
+          cp native-host/target/x86_64-pc-windows-msvc/release/tab-reaper-host.exe tab-reaper-host-windows-x86_64.exe
+          cp native-host/target/aarch64-pc-windows-msvc/release/tab-reaper-host.exe tab-reaper-host-windows-arm64.exe
+          cp native-host/target/i686-pc-windows-msvc/release/tab-reaper-host.exe tab-reaper-host-windows-x86.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: host-windows-x86_64
-          path: tab-reaper-host-windows-x86_64.exe
+          name: host-windows
+          path: |
+            tab-reaper-host-windows-x86_64.exe
+            tab-reaper-host-windows-arm64.exe
+            tab-reaper-host-windows-x86.exe
 
   publish-release:
     needs: [build-extension, build-host-linux, build-host-macos, build-host-windows]

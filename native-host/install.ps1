@@ -27,6 +27,23 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
 $CargoToml = if ($ScriptDir) { Join-Path $ScriptDir "Cargo.toml" } else { "" }
 
+function Get-WindowsArch {
+    $arch = $null
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    } catch {}
+    switch ($arch) {
+        "arm64" { return "arm64" }
+        "x64"   { return "x86_64" }
+        "x86"   { return "x86" }
+        default {
+            if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { return "arm64" }
+            if ([Environment]::Is64BitOperatingSystem) { return "x86_64" }
+            return "x86"
+        }
+    }
+}
+
 function Get-ReleaseUrl([string]$Asset) {
     if ($Version -eq "latest") {
         return "https://github.com/$Repo/releases/latest/download/$Asset"
@@ -70,7 +87,7 @@ function Build-FromSource {
 }
 
 function Download-Prebuilt {
-    $Asset = "tab-reaper-host-windows-x86_64.exe"
+    $Asset = "tab-reaper-host-windows-$(Get-WindowsArch).exe"
     $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-host-" + [System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
     try {
