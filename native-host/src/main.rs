@@ -1,3 +1,7 @@
+mod sync;
+
+use serde::Deserialize;
+use serde_json::json;
 use std::env;
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -5,8 +9,27 @@ use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
-const MAX_MESSAGE_LEN: usize = 1024 * 1024;
+const MAX_MESSAGE_LEN: usize = 2 * 1024 * 1024;
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Deserialize)]
+struct NativeRequest {
+    cmd: String,
+    #[serde(default, rename = "deviceId")]
+    device_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default, rename = "expectedDir")]
+    expected_dir: Option<String>,
+    #[serde(default, rename = "relPath")]
+    rel_path: Option<String>,
+    #[serde(default, rename = "relPrefix")]
+    rel_prefix: Option<String>,
+    #[serde(default, rename = "maxDepth")]
+    max_depth: Option<usize>,
+    #[serde(default)]
+    content: Option<String>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryReport {
@@ -50,34 +73,151 @@ fn main() {
 }
 
 fn handle_request(payload: &str) -> String {
-    if payload.contains("\"ping\"") {
-        return format!(
-            "{{\"ok\":true,\"version\":\"{}\",\"platform\":\"{}\"}}",
-            HOST_VERSION,
-            env::consts::OS
-        );
-    }
+    let req: NativeRequest = match serde_json::from_str(payload) {
+        Ok(r) => r,
+        Err(err) => return format_error_json(&format!("invalid request JSON: {err}")),
+    };
 
-    if payload.contains("\"chrome_memory\"") {
-        return match collect_memory_report() {
+    let _destination = match req.cmd.as_str() {
+        "sync_read" | "sync_write" | "sync_list" | "sync_delete" => {
+            match sync::lock_destination(req.device_id.as_deref().unwrap_or(""), req.expected_dir.as_deref()) {
+                Ok(lock) => Some(lock),
+                Err(err) => return format_error_json(&err),
+            }
+        }
+        _ => None,
+    };
+
+    match req.cmd.as_str() {
+        "ping" => {
+            let status = sync::get_sync_status(req.device_id.as_deref());
+            json!({
+                "ok": true,
+                "version": HOST_VERSION,
+                "platform": env::consts::OS,
+                "capabilities": ["chrome_memory", "folder_sync", "expected_dir"],
+                "syncEnabled": status.enabled,
+                "syncDir": status.sync_dir,
+                "hostname": status.hostname,
+            })
+            .to_string()
+        }
+        "chrome_memory" => match collect_memory_report() {
             Ok(report) => format_memory_json(&report),
             Err(err) => format_error_json(&err),
-        };
+        },
+        "sync_detect_folders" => {
+            let candidates = sync::detect_cloud_folders();
+            json!({
+                "ok": true,
+                "candidates": candidates,
+                "hostname": sync::get_hostname(),
+            })
+            .to_string()
+        }
+        "sync_pick_folder" => match sync::pick_folder_dialog() {
+            Ok(Some(path)) => json!({ "ok": true, "path": path, "cancelled": false }).to_string(),
+            Ok(None) => json!({ "ok": false, "cancelled": true }).to_string(),
+            Err(err) => format_error_json(&err),
+        },
+        "sync_set_folder" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return format_error_json("missing deviceId");
+            };
+            match sync::set_sync_folder(device_id, req.path.as_deref()) {
+                Ok(status) => json!({
+                    "ok": true,
+                    "enabled": status.enabled,
+                    "capabilities": ["folder_sync", "expected_dir"],
+                    "version": HOST_VERSION,
+                    "syncDir": status.sync_dir,
+                    "writable": status.writable,
+                    "hostname": status.hostname,
+                })
+                .to_string(),
+                Err(err) => format_error_json(&err),
+            }
+        }
+        "sync_get_status" => {
+            let status = sync::get_sync_status(req.device_id.as_deref());
+            json!({
+                "ok": true,
+                "enabled": status.enabled,
+                "capabilities": ["folder_sync", "expected_dir"],
+                "version": HOST_VERSION,
+                "syncDir": status.sync_dir,
+                "writable": status.writable,
+                "hostname": status.hostname,
+            })
+            .to_string()
+        }
+        "sync_write" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return format_error_json("missing deviceId");
+            };
+            let Some(rel_path) = req.rel_path.as_deref() else {
+                return format_error_json("missing relPath");
+            };
+            let Some(content) = req.content.as_deref() else {
+                return format_error_json("missing content");
+            };
+            match sync::sync_write(device_id, rel_path, content) {
+                Ok(bytes) => json!({ "ok": true, "bytesWritten": bytes }).to_string(),
+                Err(err) => format_error_json(&err),
+            }
+        }
+        "sync_read" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return format_error_json("missing deviceId");
+            };
+            let Some(rel_path) = req.rel_path.as_deref() else {
+                return format_error_json("missing relPath");
+            };
+            match sync::sync_read(device_id, rel_path) {
+                Ok(Some(content)) => json!({ "ok": true, "exists": true, "content": content }).to_string(),
+                Ok(None) => json!({ "ok": true, "exists": false }).to_string(),
+                Err(err) => format_error_json(&err),
+            }
+        }
+        "sync_delete" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return format_error_json("missing deviceId");
+            };
+            let Some(rel_path) = req.rel_path.as_deref() else {
+                return format_error_json("missing relPath");
+            };
+            match sync::sync_delete(device_id, rel_path) {
+                Ok(deleted) => json!({ "ok": true, "deleted": deleted }).to_string(),
+                Err(err) => format_error_json(&err),
+            }
+        }
+        "sync_list" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return format_error_json("missing deviceId");
+            };
+            match sync::sync_list(device_id, req.rel_prefix.as_deref(), req.max_depth) {
+                Ok(files) => json!({ "ok": true, "files": files }).to_string(),
+                Err(err) => format_error_json(&err),
+            }
+        }
+        _ => format_error_json("unknown command"),
     }
-
-    format_error_json("unknown command")
 }
 
 fn format_memory_json(r: &MemoryReport) -> String {
-    format!(
-        "{{\"ok\":true,\"chromeBytes\":{},\"processCount\":{},\"systemTotalBytes\":{},\"systemAvailableBytes\":{},\"metric\":\"{}\"}}",
-        r.chrome_bytes, r.process_count, r.system_total_bytes, r.system_available_bytes, r.metric
-    )
+    json!({
+        "ok": true,
+        "chromeBytes": r.chrome_bytes,
+        "processCount": r.process_count,
+        "systemTotalBytes": r.system_total_bytes,
+        "systemAvailableBytes": r.system_available_bytes,
+        "metric": r.metric,
+    })
+    .to_string()
 }
 
 fn format_error_json(err: &str) -> String {
-    let escaped = err.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("{{\"ok\":false,\"error\":\"{}\"}}", escaped)
+    json!({ "ok": false, "error": err }).to_string()
 }
 
 fn read_native_message<R: Read>(reader: &mut R) -> Result<Option<String>, String> {

@@ -24,6 +24,7 @@ describe("auto-bookmark dual archive", () => {
   let storageData: Record<string, unknown>;
   let bookmarks: Map<string, MockBookmark>;
   let nextBookmarkId: number;
+  let liveTabs: Map<number, TabSummary>;
   let removedTabIds: number[];
   let createdTabUrls: string[];
 
@@ -35,6 +36,7 @@ describe("auto-bookmark dual archive", () => {
       ["2", { id: "2", parentId: "0", title: "Other Bookmarks" }],
     ]);
     nextBookmarkId = 10;
+    liveTabs = new Map();
     removedTabIds = [];
     createdTabUrls = [];
 
@@ -76,6 +78,7 @@ describe("auto-bookmark dual archive", () => {
         get: async () => ({ title: "Research", color: "blue" }),
       },
       tabs: {
+        get: async (id: number) => liveTabs.get(id),
         remove: async (tabId: number) => {
           removedTabIds.push(tabId);
         },
@@ -108,6 +111,8 @@ describe("auto-bookmark dual archive", () => {
     const toArchive = planArchives({ tabs: [tab], activity, config: cfg, now });
     expect(toArchive).toHaveLength(1);
 
+    liveTabs.set(42, tab);
+    liveTabs.set(43, { ...tab, id: 43 });
     const count = await archiveTabs(toArchive, activity, cfg, now);
     expect(count).toBe(1);
     expect(removedTabIds).toEqual([42]);
@@ -159,6 +164,7 @@ describe("auto-bookmark dual archive", () => {
       windowId: 1,
     };
 
+    for (const tab of [t1, t2]) liveTabs.set(tab.id, tab);
     await archiveTabs([t1, t2], createEmptyActivityState(), cfg, now);
     const items = await loadArchive();
     expect(items).toHaveLength(2);
@@ -195,11 +201,38 @@ describe("auto-bookmark dual archive", () => {
       { id: 12, url: "https://ok2.example/c", title: "OK 2", active: false, audible: false, pinned: false, discarded: true, windowId: 1 },
     ];
 
+    for (const tab of tabs) liveTabs.set(tab.id, tab);
     const archived = await archiveTabs(tabs, createEmptyActivityState(), cfg, now);
     expect(archived).toBe(2);
     expect(removedTabIds).toEqual([10, 12]);
     const saved = await loadArchive();
     expect(saved.map((i) => i.title).sort()).toEqual(["OK 1", "OK 2"]);
+  });
+
+  test("keeps a tab that navigated while its archive operation was queued", async () => {
+    const tab = { id: 21, url: "https://example.org", title: "Old", windowId: 1,
+      pinned: false, active: false, audible: false, discarded: true };
+    liveTabs.set(tab.id, { ...tab, url: "https://new.example.org", active: true });
+    expect(await archiveTabs([tab], createEmptyActivityState(), sanitizeConfig({}))).toBe(0);
+    expect(removedTabIds).toEqual([]);
+    expect([...bookmarks.values()].filter(b => b.url)).toEqual([]);
+  });
+
+  test("rechecks the live page after the last unsaved-form query", async () => {
+    const tab = { id: 21, windowId: 1, url: "https://example.org/old", title: "Old",
+      active: false, pinned: false, audible: false, discarded: false };
+    liveTabs.set(tab.id, tab);
+    Object.assign(chrome, {
+      permissions: { contains: async () => true },
+      scripting: { executeScript: async () => {
+        if ([...bookmarks.values()].some(b => b.url === tab.url)) {
+          liveTabs.set(tab.id, { ...tab, url: "https://example.org/new", active: true });
+        }
+        return [{ result: false }];
+      } },
+    });
+    expect(await archiveTabs([tab], createEmptyActivityState(), sanitizeConfig({}))).toBe(0);
+    expect(removedTabIds).toEqual([]);
   });
 
   test("auto-archive defaults to 7 days (168h) and can be disabled with 0", () => {

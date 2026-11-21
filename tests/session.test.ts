@@ -30,7 +30,7 @@ describe("session snapshots and recovery", () => {
   let storageData: Record<string, unknown>;
   let openChromeTabs: Array<{ id: number; url: string; pinned?: boolean }>;
   let createdTabs: Array<{ id: number; url: string; pinned?: boolean }>;
-  let groupedCalls: Array<{ tabIds: number[]; title?: string; color?: string }>;
+  let groupedCalls: Array<{ tabIds: number[]; title?: string; color?: string; collapsed?: boolean }>;
   let nextTabId: number;
 
   beforeEach(() => {
@@ -52,16 +52,18 @@ describe("session snapshots and recovery", () => {
           },
         },
       },
+      windows: { getLastFocused: async () => ({ id: 31 }) },
       tabGroups: {
         get: async (groupId: number) => ({
           title: groupId === 7 ? "Work" : "Other",
           color: groupId === 7 ? "blue" : "grey",
         }),
-        update: async (groupId: number, props: { title?: string; color?: string }) => {
+        update: async (groupId: number, props: { title?: string; color?: string; collapsed?: boolean }) => {
           const entry = groupedCalls[groupId - 1];
           if (entry) {
             entry.title = props.title;
             entry.color = props.color;
+            entry.collapsed = props.collapsed;
           }
         },
       },
@@ -113,12 +115,12 @@ describe("session snapshots and recovery", () => {
     expect(stored).toHaveLength(1);
 
     // Recovery banner triggers when current browser has <= 2 http tabs
-    const recoverable = findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS * 2);
+    const recoverable = await findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS * 2);
     expect(recoverable?.id).toBe(snap1!.id);
     expect(recoverable?.tabCount).toBe(5);
 
     // Does NOT trigger during normal browsing
-    expect(findRecoverableSnapshot(tabs, stored, t0 + SNAPSHOT_INTERVAL_MS * 2)).toBeNull();
+    expect(await findRecoverableSnapshot(tabs, stored, t0 + SNAPSHOT_INTERVAL_MS * 2)).toBeNull();
   });
 
   test("caps retained snapshots at MAX_SNAPSHOTS", async () => {
@@ -145,7 +147,7 @@ describe("session snapshots and recovery", () => {
     openChromeTabs = [{ id: 1, url: "https://example1.com/page", pinned: true }];
 
     const res = await restoreSessionSnapshot(snap!.id);
-    expect(res).toEqual({ restored: 2, skippedExisting: 1 });
+    expect(res).toEqual({ restored: 2, skippedExisting: 1, windowsCreated: 0 });
     expect(createdTabs.map((t) => t.url)).toEqual([
       "https://example2.com/page",
       "https://example3.com/page",
@@ -159,6 +161,31 @@ describe("session snapshots and recovery", () => {
     expect(groupedCalls[0]!.title).toBe("Work");
     expect(groupedCalls[0]!.color).toBe("blue");
     expect(groupedCalls[0]!.tabIds).toEqual([createdTabs[0]!.id, createdTabs[1]!.id]);
+  });
+
+  test("current-window restore keeps tabs and groups in the selected window when focus moves", async () => {
+    const snap = await captureSessionSnapshot([1, 2, 3].map(id => makeTab(id, { groupId: 7, active: id === 1 })), { force: true });
+    let focused = 31;
+    const destinations: number[] = [];
+    const active: boolean[] = [];
+    const groups: number[] = [];
+    Object.assign(chrome.tabs, {
+      create: async (opts: chrome.tabs.CreateProperties) => {
+        destinations.push(opts.windowId ?? focused);
+        active.push(Boolean(opts.active));
+        focused = 44;
+        return { id: nextTabId++ };
+      },
+      group: async (opts: chrome.tabs.GroupOptions) => {
+        groups.push(opts.createProperties?.windowId ?? focused);
+        return 1;
+      },
+    });
+    const result = await restoreSessionSnapshot(snap!.id, { mode: "current_window", targetWindowId: 31 });
+    expect(result.restored).toBe(3);
+    expect(destinations).toEqual([31, 31, 31]);
+    expect(groups).toEqual([31]);
+    expect(active).toEqual([false, false, false]);
   });
 
   test("skips mega-URLs, prunes on QuotaExceededError, and clears snapshots cleanly", async () => {
@@ -188,5 +215,119 @@ describe("session snapshots and recovery", () => {
 
     await clearSnapshots();
     expect(await loadSnapshots()).toEqual([]);
+  });
+
+  test("refuses an offline manual save that would evict an unpublished manual snapshot", async () => {
+    storageData["tabReaper.folderSyncOptedIn"] = true;
+    const tabs = Array.from({ length: 170 }, (_, i) =>
+      makeTab(i, { url: `https://example.org/${i}/${"a".repeat(3000)}` })
+    );
+    const first = await captureSessionSnapshot(tabs, { force: true, skipSync: true });
+    expect(first).not.toBeNull();
+    await expect(captureSessionSnapshot(tabs, { force: true, skipSync: true })).rejects.toThrow(/space/i);
+    expect((await loadSnapshots()).map(s => s.id)).toEqual([first!.id]);
+  });
+
+  test("restore honors disabled automatic snapshots and reports a missing recovery file", async () => {
+    const snap = await captureSessionSnapshot([makeTab(1)], { force: true, skipSync: true });
+    storageData["tabReaper.config"] = { enableSessionSnapshots: false };
+    openChromeTabs = [2, 3, 4].map(id => ({ id, url: makeTab(id).url }));
+    await restoreSessionSnapshot(snap!.id);
+    expect((await loadSnapshots()).map(s => s.id)).toEqual([snap!.id]);
+    await expect(restoreSessionSnapshot("absent", { relPath: "devices/b/snapshots/missing.json" })).rejects.toThrow(/try again/i);
+  });
+
+  test("retains a bounded automatic recovery copy of an oversized offline session", async () => {
+    const tabs = Array.from({ length: 400 }, (_, i) => makeTab(i, { url: `https://docs.test/${i}/${"x".repeat(2990)}` }));
+    const snap = await captureSessionSnapshot(tabs);
+    expect(snap!.tabCount).toBeGreaterThan(300);
+    expect(snap!.tabCount).toBeLessThan(tabs.length);
+    expect(snap!.tabs.length).toBe(snap!.tabCount);
+    expect(new TextEncoder().encode(JSON.stringify(await loadSnapshots())).length).toBeLessThanOrEqual(1_000_000);
+  });
+
+  test("a closed window cannot evict the only recoverable session from a full local cache", async () => {
+    const tabs = Array.from({ length: 400 }, (_, id) => makeTab(id, { url: `https://docs.test/${id}/${"x".repeat(2990)}` }));
+    const latest = await captureSessionSnapshot(tabs);
+    expect(latest!.tabCount).toBeGreaterThan(300);
+    await captureSessionSnapshot(tabs.slice(0, 2), { force: true, trigger: "window_closed" });
+    const recovery = await findRecoverableSnapshot([], await loadSnapshots());
+    expect(recovery?.id).toBe(latest!.id);
+    expect(recovery?.tabCount).toBe(latest!.tabCount);
+  });
+
+  test("pre-restore capture preserves kept tabs", async () => {
+    const snap = await captureSessionSnapshot([makeTab(1)], { force: true });
+    storageData["tabReaper.keptTabIds"] = [3];
+    openChromeTabs = [2, 3, 4].map(id => ({ id, url: makeTab(id).url, windowId: 10 }));
+    await restoreSessionSnapshot(snap!.id);
+    const pre = (await loadSnapshots()).find(s => s.trigger === "pre_restore");
+    expect(pre?.tabs.filter(t => t.kept).map(t => t.url)).toEqual([makeTab(3).url]);
+  });
+
+  test("restores distinct unnamed groups with identical colors and legacy groups without IDs", async () => {
+    Object.assign(chrome.tabGroups, { get: async (id: number) => ({ title: "", color: "blue", collapsed: id === 7 }) });
+    const tabs = [makeTab(1, { groupId: 7 }), makeTab(2, { groupId: 8 }), makeTab(3, { groupId: 7 })];
+    const snap = (await captureSessionSnapshot(tabs, { force: true }))!;
+    await restoreSessionSnapshot(snap.id);
+    expect(groupedCalls.map(g => [g.tabIds, g.collapsed])).toEqual([[[100, 102], true], [[101], false]]);
+    const old = { ...snap, tabs: snap.tabs.map(t => ({ ...t, groupId: undefined })) };
+    storageData["tabReaper.sessionSnapshots"] = [old];
+    groupedCalls.length = 0;
+    openChromeTabs.length = 0;
+    await restoreSessionSnapshot(old.id);
+    expect(groupedCalls).toHaveLength(1);
+    expect(groupedCalls[0]?.tabIds.length).toBe(3);
+  });
+
+  test.each(["maximized", "fullscreen"] as const)("restores separate windows and saved focus with a %s background window", async state => {
+    const createdWindows: Array<{ id: number; url?: string; state?: string }> = [];
+    let nextWinId = 500;
+    let focused = 31;
+    const chromeMock = (globalThis as unknown as { chrome: Record<string, unknown> }).chrome;
+    chromeMock.windows = {
+      getLastFocused: async () => ({ id: 31 }),
+      getAll: async () => [
+        { id: 1, focused: true, state: "normal", width: 1400, height: 900 },
+        { id: 2, focused: false, state, width: 1600, height: 1000 },
+      ],
+      update: async (id: number, options: { focused?: boolean }) => {
+        if (options.focused) focused = id;
+      },
+      create: async (opts: chrome.windows.CreateData) => {
+        if (opts.focused === false && (opts.state === "maximized" || opts.state === "fullscreen")) {
+          throw new Error("Invalid window state with focused: false");
+        }
+        const winId = nextWinId++;
+        if (opts.focused !== false) focused = winId;
+        const url = String(opts.url);
+        const firstTab = { id: nextTabId++, url };
+        createdTabs.push(firstTab);
+        openChromeTabs.push(firstTab);
+        createdWindows.push({ id: winId, url, state: opts.state });
+        return { id: winId, tabs: [firstTab] };
+      },
+    };
+
+    const tabs = [
+      makeTab(1, { windowId: 1, index: 0, pinned: true, favIconUrl: "https://example1.com/fav.ico" }),
+      makeTab(2, { windowId: 1, index: 1, favIconUrl: "data:image/png;base64,AAAA" }),
+      // Duplicate URL across two saved windows must preserve both windows in "windows" mode.
+      makeTab(3, { windowId: 2, index: 0, url: "https://example1.com/page", active: true }),
+      makeTab(4, { windowId: 2, index: 1 }),
+    ];
+
+    const snap = await captureSessionSnapshot(tabs, { force: true, label: "Two windows", now: 1_700_000_000_000 });
+    expect(snap).not.toBeNull();
+    expect(snap!.windowCount).toBe(2);
+    expect(snap!.label).toBe("Two windows");
+    expect(snap!.tabs[0]!.favIconUrl).toBe("https://example1.com/fav.ico");
+    expect(snap!.tabs[1]!.favIconUrl).toBeUndefined(); // data: URI stripped
+
+    const res = await restoreSessionSnapshot(snap!.id, { mode: "windows" });
+    expect(res).toEqual({ restored: 4, skippedExisting: 0, windowsCreated: 2 });
+    expect(createdWindows).toHaveLength(2);
+    expect(createdWindows[1]!.state).toBe(state);
+    expect(focused).toBe(createdWindows[0]!.id);
   });
 });

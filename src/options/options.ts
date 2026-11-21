@@ -1,5 +1,14 @@
 import { DEFAULT_CONFIG } from "../shared/config.ts";
-import type { MemoryBudgetMode, SessionSnapshot, StatusPayload, TabReaperConfig } from "../shared/types.ts";
+import type {
+  MemoryBudgetMode,
+  RestoreMode,
+  SessionSnapshot,
+  SnapshotListItem,
+  StatusPayload,
+  SyncFolderCandidate,
+  SyncStatus,
+  TabReaperConfig,
+} from "../shared/types.ts";
 
 const form = document.getElementById("settings-form") as HTMLFormElement;
 const memoryMode = document.getElementById("memory-mode") as HTMLSelectElement;
@@ -30,8 +39,21 @@ const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonEl
 const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
 const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
 const btnClearSnapshots = document.getElementById("btn-clear-snapshots") as HTMLButtonElement;
+const snapshotLabelInput = document.getElementById("snapshot-label") as HTMLInputElement;
 const snapshotStatus = document.getElementById("snapshot-status") as HTMLElement;
 const snapshotList = document.getElementById("snapshot-list") as HTMLElement;
+
+const syncStatusEl = document.getElementById("sync-status") as HTMLElement;
+const syncControlsEl = document.getElementById("sync-controls") as HTMLElement;
+const syncCandidatesWrap = document.getElementById("sync-candidates-wrap") as HTMLElement;
+const syncCandidatesEl = document.getElementById("sync-candidates") as HTMLElement;
+const syncFolderInput = document.getElementById("sync-folder-input") as HTMLInputElement;
+const btnSyncPick = document.getElementById("btn-sync-pick") as HTMLButtonElement;
+const btnSyncApply = document.getElementById("btn-sync-apply") as HTMLButtonElement;
+const btnSyncNow = document.getElementById("btn-sync-now") as HTMLButtonElement;
+const btnSyncDisable = document.getElementById("btn-sync-disable") as HTMLButtonElement;
+const deviceNameInput = document.getElementById("device-name-input") as HTMLInputElement;
+const btnDeviceName = document.getElementById("btn-device-name") as HTMLButtonElement;
 
 function syncBudgetVisibility(): void {
   const isFixed = memoryMode.value === "fixed_gb";
@@ -242,8 +264,119 @@ function formatSnapshotTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
+async function applySyncFolder(path: string | null): Promise<void> {
+  syncStatusEl.textContent = path ? "Configuring sync folder..." : "Disabling folder sync...";
+  syncStatusEl.className = "status-text";
+  const res = (await chrome.runtime.sendMessage({ type: "set_sync_folder", path })) as SyncStatus & {
+    ok?: boolean;
+    error?: string;
+  };
+  if (res?.ok) {
+    await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
+    if (path) {
+      const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+      populateForm(status.config);
+    }
+  } else {
+    syncStatusEl.textContent = `Error: ${res?.error ?? "failed to update sync folder"}`;
+    syncStatusEl.className = "status-text err";
+  }
+}
+
+let currentDeviceId: string | null = null;
+
+async function refreshSyncUI(): Promise<void> {
+  const status = (await chrome.runtime.sendMessage({ type: "get_sync_status" })) as SyncStatus;
+  currentDeviceId = status?.deviceId ?? null;
+  if (!status?.hostConnected) {
+    syncControlsEl.classList.add("hidden");
+    btnSyncNow.classList.add("hidden");
+    btnSyncDisable.classList.add("hidden");
+    syncStatusEl.textContent = "Enable and connect Local Companion above to use Folder Sync.";
+    syncStatusEl.className = "status-text";
+    return;
+  }
+
+  if (status.hostOutdated) {
+    syncControlsEl.classList.add("hidden");
+    btnSyncNow.classList.add("hidden");
+    btnSyncDisable.classList.add("hidden");
+    syncStatusEl.textContent =
+      status.lastError ??
+      `Connected host v${status.hostVersion ?? "unknown"} does not support Folder Sync. Re-run the install command above to upgrade.`;
+    syncStatusEl.className = "status-text err";
+    return;
+  }
+
+  syncControlsEl.classList.remove("hidden");
+  btnSyncNow.classList.toggle("hidden", !status.enabled);
+  btnSyncDisable.classList.toggle("hidden", !status.enabled);
+  syncFolderInput.value = status.syncDir ?? "";
+  deviceNameInput.value = status.deviceName ?? "";
+
+  if (status.enabled && status.writable) {
+    const lastText = status.lastSyncAt ? ` · Last synced ${formatSnapshotTime(status.lastSyncAt)}` : "";
+    syncStatusEl.textContent = `Active: ${status.syncDir}${lastText}`;
+    syncStatusEl.className = "status-text ok";
+  } else if (status.enabled && !status.writable) {
+    syncStatusEl.textContent = `Configured folder is not writable: ${status.syncDir}`;
+    syncStatusEl.className = "status-text err";
+  } else {
+    syncStatusEl.textContent = "Local Companion connected. Choose a cloud-synced folder below to enable sync.";
+    syncStatusEl.className = "status-text";
+  }
+
+  const candidates = (await chrome.runtime.sendMessage({ type: "detect_sync_folders" })) as SyncFolderCandidate[];
+  syncCandidatesEl.replaceChildren();
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    syncCandidatesWrap.classList.add("hidden");
+    return;
+  }
+  syncCandidatesWrap.classList.remove("hidden");
+  for (const cand of candidates) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `chip-btn${status.syncDir === cand.path ? " active" : ""}`;
+    btn.textContent = cand.exists ? `${cand.label} (existing)` : cand.label;
+    btn.title = cand.path;
+    btn.addEventListener("click", () => {
+      syncFolderInput.value = cand.path;
+      void applySyncFolder(cand.path);
+    });
+    syncCandidatesEl.appendChild(btn);
+  }
+}
+
+async function runRestore(snap: SnapshotListItem, mode: RestoreMode): Promise<void> {
+  snapshotStatus.textContent = "Restoring session...";
+  snapshotStatus.className = "status-text";
+  const res = (await chrome.runtime.sendMessage({
+    type: "restore_snapshot",
+    targetWindowId: (await chrome.windows.getCurrent()).id,
+    id: snap.id,
+    mode,
+    relPath: snap.relPath,
+  })) as {
+    ok?: boolean;
+    error?: string;
+    restored?: number;
+    skippedExisting?: number;
+    windowsCreated?: number;
+  };
+  if (!res?.ok) {
+    snapshotStatus.textContent = res?.error ?? "Restore failed. Try again.";
+    snapshotStatus.className = "status-text err";
+    return;
+  }
+  const winPart = res?.windowsCreated ? ` across ${res.windowsCreated} window(s)` : "";
+  const skipped = res?.skippedExisting ? `, ${res.skippedExisting} already open` : "";
+  snapshotStatus.textContent = `Restored ${res?.restored ?? 0} tab(s)${winPart}${skipped}.`;
+  snapshotStatus.className = "status-text ok";
+  await refreshSnapshotsUI();
+}
+
 async function refreshSnapshotsUI(): Promise<void> {
-  const snapshots = (await chrome.runtime.sendMessage({ type: "get_snapshots" })) as SessionSnapshot[];
+  const snapshots = (await chrome.runtime.sendMessage({ type: "get_snapshots" })) as SnapshotListItem[];
   snapshotList.replaceChildren();
   if (!Array.isArray(snapshots) || snapshots.length === 0) {
     const empty = document.createElement("div");
@@ -259,32 +392,101 @@ async function refreshSnapshotsUI(): Promise<void> {
 
     const info = document.createElement("div");
     const count = document.createElement("strong");
-    count.textContent = `${snap.tabCount} tabs`;
+    const winLabel = snap.windowCount > 1 ? ` · ${snap.windowCount} windows` : "";
+    count.textContent = snap.label
+      ? `${snap.label} (${snap.tabCount} tabs${winLabel})`
+      : `${snap.tabCount} tabs${winLabel}`;
+
     const meta = document.createElement("span");
     meta.className = "snapshot-meta";
-    meta.textContent = ` · ${formatSnapshotTime(snap.capturedAt)}`;
+    const devicePart = snap.deviceName ? ` · ${snap.deviceName}` : "";
+    meta.textContent = ` · ${formatSnapshotTime(snap.capturedAt)}${devicePart}`;
     info.append(count, meta);
+
+    if (snap.trigger === "manual") {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge manual";
+      badge.textContent = "manual";
+      info.appendChild(badge);
+    } else if (snap.trigger === "pre_restore") {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge";
+      badge.textContent = "pre-restore";
+      info.appendChild(badge);
+    }
+
+    if (snap.source === "sync") {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge sync";
+      badge.textContent = "synced";
+      info.appendChild(badge);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "snapshot-actions";
+
+    const isOwnSnapshot = !snap.deviceId || !currentDeviceId || snap.deviceId === currentDeviceId;
 
     const restoreBtn = document.createElement("button");
     restoreBtn.type = "button";
     restoreBtn.className = "secondary small";
     restoreBtn.textContent = "Restore";
-    restoreBtn.addEventListener("click", async () => {
-      restoreBtn.disabled = true;
-      snapshotStatus.textContent = "Restoring session...";
-      snapshotStatus.className = "status-text";
-      const res = (await chrome.runtime.sendMessage({ type: "restore_snapshot", id: snap.id })) as {
-        ok?: boolean;
-        restored?: number;
-        skippedExisting?: number;
-      };
-      const skipped = res?.skippedExisting ? `, ${res.skippedExisting} already open` : "";
-      snapshotStatus.textContent = `Restored ${res?.restored ?? 0} tab(s)${skipped}.`;
-      snapshotStatus.className = "status-text ok";
-      restoreBtn.disabled = false;
+
+    const delBtn = isOwnSnapshot ? document.createElement("button") : null;
+    if (delBtn) {
+      delBtn.type = "button";
+      delBtn.className = "secondary small";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", async () => {
+        delBtn.disabled = true;
+        await chrome.runtime.sendMessage({ type: "delete_snapshot", id: snap.id, syncDir: snap.syncDir });
+        await refreshSnapshotsUI();
+      });
+    }
+
+    const renderDefaultActions = () => {
+      if (delBtn) {
+        actions.replaceChildren(restoreBtn, delBtn);
+      } else {
+        actions.replaceChildren(restoreBtn);
+      }
+    };
+
+    restoreBtn.addEventListener("click", () => {
+      actions.replaceChildren();
+      const prompt = document.createElement("div");
+      prompt.className = "restore-prompt";
+
+      const winBtn = document.createElement("button");
+      winBtn.type = "button";
+      winBtn.className = "small";
+      winBtn.textContent = snap.windowCount > 1 ? `Restore ${snap.windowCount} windows` : "New window";
+      winBtn.addEventListener("click", async () => {
+        winBtn.disabled = true;
+        await runRestore(snap, "windows");
+      });
+
+      const curBtn = document.createElement("button");
+      curBtn.type = "button";
+      curBtn.className = "secondary small";
+      curBtn.textContent = "Current window";
+      curBtn.addEventListener("click", async () => {
+        curBtn.disabled = true;
+        await runRestore(snap, "current_window");
+      });
+
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "secondary small";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", renderDefaultActions);
+
+      prompt.append(winBtn, curBtn, cancelBtn);
+      actions.appendChild(prompt);
     });
 
-    row.append(info, restoreBtn);
+    renderDefaultActions();
+    row.append(info, actions);
     snapshotList.appendChild(row);
   }
 }
@@ -293,7 +495,7 @@ async function init(): Promise<void> {
   installCmd.textContent = buildInstallCommand(chrome.runtime.id);
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
   populateForm(status.config);
-  await Promise.all([refreshPermissionsUI(), refreshSnapshotsUI()]);
+  await Promise.all([refreshPermissionsUI(), refreshSyncUI(), refreshSnapshotsUI()]);
 }
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
@@ -399,10 +601,73 @@ btnNativeTest.addEventListener("click", async () => {
   if (resp?.ok) {
     nativeStatus.textContent = `Connected: tab-reaper-host v${resp.version} (${resp.platform})`;
     nativeStatus.className = "status-text ok";
+    await refreshSyncUI();
   } else {
     nativeStatus.textContent = `Unavailable: ${resp?.error ?? "unknown error"}`;
     nativeStatus.className = "status-text err";
   }
+});
+
+btnSyncPick.addEventListener("click", async () => {
+  btnSyncPick.disabled = true;
+  const res = (await chrome.runtime.sendMessage({ type: "pick_sync_folder" })) as {
+    ok?: boolean;
+    path?: string;
+    cancelled?: boolean;
+    error?: string;
+  };
+  btnSyncPick.disabled = false;
+  if (res?.ok && res.path) {
+    syncFolderInput.value = res.path;
+    await applySyncFolder(res.path);
+  } else if (res?.error && !res.cancelled) {
+    syncStatusEl.textContent = `Picker error: ${res.error}`;
+    syncStatusEl.className = "status-text err";
+  }
+});
+
+btnSyncApply.addEventListener("click", async () => {
+  const path = syncFolderInput.value.trim();
+  if (!path) return;
+  btnSyncApply.disabled = true;
+  await applySyncFolder(path);
+  btnSyncApply.disabled = false;
+});
+
+btnSyncDisable.addEventListener("click", async () => {
+  btnSyncDisable.disabled = true;
+  await applySyncFolder(null);
+  btnSyncDisable.disabled = false;
+});
+
+btnSyncNow.addEventListener("click", async () => {
+  btnSyncNow.disabled = true;
+  syncStatusEl.textContent = "Syncing...";
+  syncStatusEl.className = "status-text";
+  const res = (await chrome.runtime.sendMessage({ type: "sync_now" })) as {
+    ok?: boolean;
+    configUpdated?: boolean;
+    archiveChanged?: boolean;
+  };
+  await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
+  if (!res?.ok) {
+    syncStatusEl.textContent = "Sync failed. Check folder connection, permissions, or disk space and try again.";
+    syncStatusEl.className = "status-text err";
+  }
+  if (res?.configUpdated) {
+    const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+    populateForm(status.config);
+  }
+  btnSyncNow.disabled = false;
+});
+
+btnDeviceName.addEventListener("click", async () => {
+  const name = deviceNameInput.value.trim();
+  if (!name) return;
+  btnDeviceName.disabled = true;
+  await chrome.runtime.sendMessage({ type: "set_device_name", deviceName: name });
+  await refreshSyncUI();
+  btnDeviceName.disabled = false;
 });
 
 btnHostPerm.addEventListener("click", async () => {
@@ -424,16 +689,19 @@ btnHostPerm.addEventListener("click", async () => {
 
 btnSaveSnapshot.addEventListener("click", async () => {
   btnSaveSnapshot.disabled = true;
-  const res = (await chrome.runtime.sendMessage({ type: "capture_snapshot_now" })) as {
+  const label = snapshotLabelInput.value.trim() || undefined;
+  const res = (await chrome.runtime.sendMessage({ type: "capture_snapshot_now", label })) as {
     ok?: boolean;
     snapshot?: SessionSnapshot;
+    error?: string;
   };
   if (res?.ok && res.snapshot) {
+    snapshotLabelInput.value = "";
     snapshotStatus.textContent = `Saved snapshot (${res.snapshot.tabCount} tabs).`;
     snapshotStatus.className = "status-text ok";
   } else {
-    snapshotStatus.textContent = "No http(s) tabs open to snapshot.";
-    snapshotStatus.className = "status-text";
+    snapshotStatus.textContent = res?.error ?? "No http(s) tabs open to snapshot.";
+    snapshotStatus.className = res?.error ? "status-text err" : "status-text";
   }
   await refreshSnapshotsUI();
   btnSaveSnapshot.disabled = false;

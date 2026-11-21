@@ -1,15 +1,15 @@
 import { isInternalUrl, loadConfig, saveConfig } from "../shared/config.ts";
-import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
+import type { ActivityState, BackgroundMessage, OpenTabInfo, SnapshotWindow, StatusPayload, TabSummary } from "../shared/types.ts";
 import {
   archiveTabs,
   deleteArchivedTab,
   handleBookmarkRemoved,
-  isArchivableUrl,
   loadArchive,
   planArchives,
   planArchivesWithBreakdown,
   removeArchivedByUrl,
   restoreArchivedTab,
+  syncArchive,
   searchArchive,
 } from "./archive.ts";
 import { updateActionBadge } from "./badge.ts";
@@ -18,12 +18,31 @@ import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from 
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
   captureSessionSnapshot,
+  captureWindowMetadata,
+  type CachedGroups,
   clearSnapshots,
+  setSyncFolder,
+  deleteSnapshot,
   findRecoverableSnapshot,
   isRestoreInFlight,
+  listAllSnapshots,
   loadSnapshots,
   restoreSessionSnapshot,
 } from "./session.ts";
+import {
+  detectSyncFolders,
+  enqueueConfigMutation,
+  getSyncStatus,
+  getLocalConfigVersion,
+  loadDeviceIdentity,
+  pickSyncFolder,
+  pullConfigFromSync,
+  pushConfigToSync,
+  setDeviceName,
+  setLocalConfigVersion,
+  syncPendingLocalSnapshots,
+  setLastSyncAt,
+} from "./sync.ts";
 import {
   clearKeptTabIds,
   getTabLastActiveAt,
@@ -36,16 +55,100 @@ import {
   saveActivityState,
   syncActiveTabs,
   toggleKeptTabId,
+  toTabSummary,
 } from "./tracker.ts";
 
 const SWEEP_ALARM = "tabReaper.sweep";
 const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
+const WINDOW_TABS_SESSION_KEY = "tabReaper.windowTabsCache";
+const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let sweepInFlight = false;
+let lastSyncRunAt = 0;
 let activityQueue: Promise<void> = Promise.resolve();
+interface CachedWindow {
+  tabs: TabSummary[];
+  groups?: CachedGroups;
+  window?: SnapshotWindow;
+}
+type WindowTabs = Record<string, CachedWindow>;
 
-function enqueueActivityUpdate(fn: () => Promise<void>): Promise<void> {
+async function loadWindowTabs(): Promise<WindowTabs> {
+  const stored = await chrome.storage.session.get(WINDOW_TABS_SESSION_KEY);
+  const windows = stored[WINDOW_TABS_SESSION_KEY] as Record<string, CachedWindow | TabSummary[]> | undefined;
+  return Object.fromEntries(Object.entries(windows ?? {}).map(([id, value]) =>
+    [id, Array.isArray(value) ? { tabs: value } : value]
+  ));
+}
+
+async function cacheWindowTabs(tabs: TabSummary[], inserted = false): Promise<void> {
+  if (!(await loadConfig()).enableSessionSnapshots) {
+    await chrome.storage.session.remove(WINDOW_TABS_SESSION_KEY);
+    return;
+  }
+  const [windows, metadata, groups] = await Promise.all([
+    loadWindowTabs(),
+    captureWindowMetadata(new Set(tabs.map(t => t.windowId))),
+    chrome.tabGroups.query({}).catch(() => []),
+  ]);
+  // Chrome can report an already partially closed window during a sweep. Only
+  // individual tab-removal events may discard its cached tabs before onRemoved.
+  const byWindow = new Map<number, Map<number, TabSummary>>();
+  for (const tab of tabs) {
+    const known = byWindow.get(tab.windowId) ?? new Map((windows[tab.windowId]?.tabs ?? []).map(t => [t.id, t]));
+    if (inserted && tab.index !== undefined && !known.has(tab.id)) {
+      for (const other of known.values()) {
+        if (other.index !== undefined && other.index >= tab.index) other.index++;
+      }
+    }
+    known.set(tab.id, tab);
+    byWindow.set(tab.windowId, known);
+  }
+  for (const [id, known] of byWindow) {
+    const previous = windows[id];
+    const cachedGroups = { ...previous?.groups };
+    for (const group of groups) {
+      if (group.windowId === id) {
+        cachedGroups[group.id] = { title: group.title, color: group.color, collapsed: group.collapsed };
+      }
+    }
+    windows[id] = { tabs: [...known.values()], groups: cachedGroups, window: metadata.find(w => w.id === id) ?? previous?.window };
+  }
+  try {
+    await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+  } catch (error) {
+    console.warn("Window recovery cache update failed", error);
+  }
+}
+
+async function runPeriodicSync(
+  force = false,
+): Promise<{ ok: boolean; configUpdated: boolean; archiveChanged: boolean }> {
+  const now = Date.now();
+  if (!force && now - lastSyncRunAt < SYNC_INTERVAL_MS) {
+    return { ok: true, configUpdated: false, archiveChanged: false };
+  }
+  lastSyncRunAt = now;
+  try {
+    const configRes = await pullConfigFromSync(loadConfig, async (remoteCfg) => {
+      await saveConfig(remoteCfg);
+    });
+    const archiveRes = await syncArchive(now);
+    const snapRes = await syncPendingLocalSnapshots(loadSnapshots, now);
+    const ok = configRes.ok && archiveRes.ok && snapRes.ok;
+    if (ok) await setLastSyncAt(now);
+    return {
+      ok,
+      configUpdated: configRes.updated,
+      archiveChanged: archiveRes.changed,
+    };
+  } catch {
+    return { ok: false, configUpdated: false, archiveChanged: false };
+  }
+}
+
+function enqueueActivityUpdate<T>(fn: () => Promise<T>): Promise<T> {
   const next = activityQueue.then(fn, fn);
-  activityQueue = next.catch(() => {});
+  activityQueue = next.then(() => {}, () => {});
   return next;
 }
 
@@ -65,32 +168,17 @@ function isBrowserOnline(): boolean {
   return typeof navigator === "undefined" ? true : navigator.onLine !== false;
 }
 
-function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>): TabSummary | null {
-  if (typeof tab.id !== "number" || tab.incognito) return null;
-  return {
-    id: tab.id,
-    url: tab.url ?? tab.pendingUrl ?? "",
-    title: tab.title ?? tab.url ?? "",
-    active: Boolean(tab.active),
-    audible: Boolean(tab.audible),
-    pinned: Boolean(tab.pinned),
-    discarded: Boolean(tab.discarded),
-    kept: keptIds?.has(tab.id) ?? false,
-    status: tab.status,
-    windowId: tab.windowId,
-    groupId: tab.groupId,
-    favIconUrl: tab.favIconUrl,
-  };
-}
-
 async function queryAllTabs(): Promise<TabSummary[]> {
-  const [tabs, keptIds] = await Promise.all([chrome.tabs.query({}), loadKeptTabIds()]);
-  const summaries: TabSummary[] = [];
-  for (const tab of tabs) {
-    const summary = toTabSummary(tab, keptIds);
-    if (summary) summaries.push(summary);
-  }
-  return summaries;
+  return enqueueActivityUpdate(async () => {
+    const [tabs, keptIds] = await Promise.all([chrome.tabs.query({}), loadKeptTabIds()]);
+    const summaries: TabSummary[] = [];
+    for (const tab of tabs) {
+      const summary = toTabSummary(tab, keptIds);
+      if (summary) summaries.push(summary);
+    }
+    await cacheWindowTabs(summaries);
+    return summaries;
+  });
 }
 
 async function ensureAlarm(): Promise<void> {
@@ -161,29 +249,7 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
     let archived = 0;
     if (mode === "sweep") {
       const toArchive = planArchives({ tabs, activity, weights, config, now });
-      if (toArchive.length > 0) {
-        const keptIds = await loadKeptTabIds();
-        const verifiedToArchive: TabSummary[] = [];
-        for (const candidate of toArchive) {
-          try {
-            const raw = await chrome.tabs.get(candidate.id);
-            const live = toTabSummary(raw, keptIds);
-            if (!live || live.url !== candidate.url || isTabProtected(live, config, weights.get(live.id))) {
-              continue;
-            }
-            if (!live.discarded && config.protectUnsavedForms) {
-              const hasForm = await checkTabHasUnsavedForm(live.id);
-              if (hasForm) continue;
-            }
-            verifiedToArchive.push(live);
-          } catch {
-            // Tab closed concurrently.
-          }
-        }
-        if (verifiedToArchive.length > 0) {
-          archived = await archiveTabs(verifiedToArchive, activity, config, now);
-        }
-      }
+      archived = await archiveTabs(toArchive, activity, config, now);
     }
 
     const loadedCount = Math.max(0, tabs.filter((t) => !t.discarded).length - discarded);
@@ -191,10 +257,14 @@ async function runSweep(mode: "sweep" | "startup" = "sweep"): Promise<{ discarde
 
     if (mode === "sweep" && config.enableSessionSnapshots) {
       try {
-        await captureSessionSnapshot(tabs, { now });
+        await captureSessionSnapshot(tabs, { now, activity });
       } catch {
         // Snapshot persistence is best-effort and must never fail a sweep.
       }
+    }
+
+    if (mode === "sweep") {
+      void runPeriodicSync(false);
     }
 
     return { discarded, archived };
@@ -293,7 +363,7 @@ async function buildStatus(): Promise<StatusPayload> {
     protectedCount,
     archivedCount: archive.length,
     openTabs,
-    recoverableSnapshot: findRecoverableSnapshot(tabs, snapshots, now),
+    recoverableSnapshot: await findRecoverableSnapshot(tabs, snapshots, now),
     permissions: { nativeMessaging, hostAccess },
   };
 }
@@ -316,6 +386,7 @@ chrome.runtime.onStartup.addListener(async () => {
     const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
     await saveActivityState(activity);
   }
+  void runPeriodicSync(true);
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
@@ -347,6 +418,12 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (tab.incognito) return;
+  if (changeInfo.url || changeInfo.groupId !== undefined || changeInfo.pinned !== undefined) {
+    await enqueueActivityUpdate(async () => {
+      const summary = toTabSummary(tab, await loadKeptTabIds());
+      if (summary) await cacheWindowTabs([summary]);
+    });
+  }
   if (changeInfo.url && !isInternalUrl(changeInfo.url)) {
     if (tab.active) {
       const nextUrl = changeInfo.url;
@@ -358,15 +435,106 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+async function forgetWindowTab(windowId: number, tabId: number, oldIndex?: number): Promise<void> {
+  const windows = await loadWindowTabs();
+  const cached = windows[windowId];
+  if (!cached) return;
+  const index = oldIndex ?? cached.tabs.find(t => t.id === tabId)?.index;
+  cached.tabs = cached.tabs.filter(t => t.id !== tabId);
+  if (index !== undefined) {
+    for (const tab of cached.tabs) {
+      if (tab.index !== undefined && tab.index > index) tab.index--;
+    }
+  }
+  await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+}
+
+chrome.tabGroups.onUpdated.addListener(group => enqueueActivityUpdate(async () => {
+  const windows = await loadWindowTabs();
+  const cached = windows[group.windowId];
+  if (cached) {
+    (cached.groups ??= {})[group.id] = { title: group.title, color: group.color, collapsed: group.collapsed };
+    await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+  }
+}));
+
+chrome.windows.onBoundsChanged.addListener(win => enqueueActivityUpdate(async () => {
+  if (!win.id || win.incognito) return;
+  const windows = await loadWindowTabs();
+  const cached = windows[win.id];
+  if (cached) {
+    const { id, focused, state, left, top, width, height } = win;
+    cached.window = { id, focused, state, left, top, width, height };
+    await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+  }
+}));
+
+chrome.tabs.onMoved.addListener((tabId, { windowId, fromIndex, toIndex }) =>
+  enqueueActivityUpdate(async () => {
+    const windows = await loadWindowTabs();
+    const cached = windows[windowId];
+    if (!cached) return;
+    for (const tab of cached.tabs) {
+      if (tab.id === tabId) tab.index = toIndex;
+      else if (tab.index !== undefined) {
+        if (toIndex <= tab.index && tab.index < fromIndex) tab.index++;
+        else if (fromIndex < tab.index && tab.index <= toIndex) tab.index--;
+      }
+    }
+    await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+  })
+);
+
+chrome.tabs.onDetached.addListener((tabId, info) =>
+  enqueueActivityUpdate(() => forgetWindowTab(info.oldWindowId, tabId, info.oldPosition))
+);
+chrome.tabs.onAttached.addListener(tabId =>
+  enqueueActivityUpdate(async () => {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return;
+    const summary = toTabSummary(tab, await loadKeptTabIds());
+    if (summary) await cacheWindowTabs([summary], true);
+  })
+);
+
+chrome.tabs.onRemoved.addListener(async (tabId, info) => {
   await Promise.all([
     enqueueActivityUpdate(async () => {
+      if (!info.isWindowClosing) await forgetWindowTab(info.windowId, tabId);
       const state = removeTrackedTab(await loadActivityState(), tabId);
       await saveActivityState(state);
     }),
     removeKeptTabId(tabId),
   ]);
 });
+
+if (chrome.windows?.onRemoved) {
+  chrome.windows.onRemoved.addListener(async (windowId) => {
+    const closed = await enqueueActivityUpdate(async () => {
+      const windows = await loadWindowTabs();
+      const final = windows[windowId];
+      delete windows[windowId];
+      await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
+      return final;
+    });
+    if (!closed || closed.tabs.length < 2 || isRestoreInFlight()) return;
+    try {
+      const config = await loadConfig();
+      if (!config.enableSessionSnapshots) return;
+      const activity = await loadActivityState();
+      await captureSessionSnapshot(closed.tabs, {
+        closedWindow: closed.window,
+        groups: closed.groups,
+        force: true,
+        trigger: "window_closed",
+        label: "Closed window",
+        activity,
+      });
+    } catch {
+      // Best-effort recovery point on window close.
+    }
+  });
+}
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === SWEEP_ALARM) {
@@ -463,7 +631,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
           return { ok: false };
         }
         const archived = await archiveTabs([summary], activity, config, Date.now());
-        await removeKeptTabId(message.tabId);
+        if (archived > 0) await removeKeptTabId(message.tabId);
         return { ok: archived > 0 };
       } catch {
         return { ok: false };
@@ -499,27 +667,74 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       };
     }
     case "save_config": {
-      const saved = await saveConfig(message.config);
+      const saved = await enqueueConfigMutation(async () => {
+        const next = await saveConfig(message.config);
+        const identity = await loadDeviceIdentity();
+        const previous = await getLocalConfigVersion();
+        await setLocalConfigVersion({ updatedAt: Math.max(Date.now(), previous.updatedAt + 1), deviceId: identity.deviceId });
+        return next;
+      });
+      void pushConfigToSync(loadConfig).catch(() => {});
       await runSweep("sweep");
       return { ok: true, config: saved };
     }
     case "get_snapshots":
-      return loadSnapshots();
+      return listAllSnapshots();
     case "capture_snapshot_now": {
-      const tabs = await queryAllTabs();
-      const snapshot = await captureSessionSnapshot(tabs, { force: true });
+      const [tabs, activity] = await Promise.all([queryAllTabs(), loadActivityState()]);
+      const snapshot = await captureSessionSnapshot(tabs, {
+        force: true,
+        trigger: "manual",
+        label: message.label,
+        activity,
+      });
       return { ok: Boolean(snapshot), snapshot };
     }
     case "clear_snapshots": {
       await clearSnapshots();
       return { ok: true };
     }
+    case "delete_snapshot": {
+      const ok = await deleteSnapshot(message.id, message.syncDir);
+      return { ok };
+    }
     case "restore_snapshot": {
-      const res = await restoreSessionSnapshot(message.id);
+      const res = await restoreSessionSnapshot(message.id, {
+        targetWindowId: message.targetWindowId,
+        mode: message.mode,
+        relPath: message.relPath,
+      });
       return { ok: true, ...res };
     }
     case "test_native_host":
       return pingNativeHost();
+    case "get_sync_status":
+      return getSyncStatus();
+    case "detect_sync_folders":
+      return detectSyncFolders();
+    case "pick_sync_folder":
+      return pickSyncFolder();
+    case "set_sync_folder": {
+      const status = await setSyncFolder(message.path);
+      if (status.ok && status.enabled) {
+        await runPeriodicSync(true);
+      }
+      return status;
+    }
+    case "set_device_name": {
+      const identity = await setDeviceName(message.deviceName);
+      return { ok: true, ...identity };
+    }
+    case "sync_now": {
+      const [tabs, activity] = await Promise.all([queryAllTabs(), loadActivityState()]);
+      const config = await loadConfig();
+      if (config.enableSessionSnapshots) {
+        await captureSessionSnapshot(tabs, { force: false, activity, skipSync: true });
+      }
+      const res = await runPeriodicSync(true);
+      const status = await getSyncStatus();
+      return { ...res, ok: res.ok && status.hostConnected && status.enabled && status.writable, status };
+    }
   }
 }
 

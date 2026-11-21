@@ -1,4 +1,4 @@
-import type { ArchivedTab, OpenTabInfo, StatusPayload } from "../shared/types.ts";
+import type { ArchivedTab, OpenTabInfo, RestoreMode, StatusPayload } from "../shared/types.ts";
 
 type ActiveView = "open" | "archived";
 
@@ -18,7 +18,7 @@ const recoveryBanner = document.getElementById("recovery-banner") as HTMLElement
 const recoveryText = document.getElementById("recovery-text") as HTMLElement;
 const btnRestoreSession = document.getElementById("btn-restore-session") as HTMLButtonElement;
 
-let recoverableSnapshotId: string | null = null;
+let recoverableSnapshot: StatusPayload["recoverableSnapshot"] = null;
 
 const CLOSE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
@@ -98,11 +98,15 @@ async function refreshStatus(): Promise<StatusPayload> {
   tabArchivedBtn.textContent = `Archived (${status.archivedCount})`;
 
   if (status.recoverableSnapshot) {
-    recoverableSnapshotId = status.recoverableSnapshot.id;
-    recoveryText.textContent = `Previous session saved (${status.recoverableSnapshot.tabCount} tabs · ${formatAge(status.recoverableSnapshot.capturedAt)})`;
+    recoverableSnapshot = status.recoverableSnapshot;
+    const winSuffix =
+      status.recoverableSnapshot.windowCount && status.recoverableSnapshot.windowCount > 1
+        ? ` · ${status.recoverableSnapshot.windowCount} windows`
+        : "";
+    recoveryText.textContent = `Previous session saved (${status.recoverableSnapshot.tabCount} tabs${winSuffix} · ${formatAge(status.recoverableSnapshot.capturedAt)})`;
     recoveryBanner.classList.remove("hidden");
   } else {
-    recoverableSnapshotId = null;
+    recoverableSnapshot = null;
     recoveryBanner.classList.add("hidden");
   }
 
@@ -407,16 +411,77 @@ btnOptions.addEventListener("click", () => {
   void chrome.runtime.openOptionsPage();
 });
 
-btnRestoreSession.addEventListener("click", async () => {
-  if (!recoverableSnapshotId) return;
-  btnRestoreSession.disabled = true;
+async function executePopupRestore(mode: RestoreMode): Promise<void> {
+  if (!recoverableSnapshot) return;
+  const { id, relPath } = recoverableSnapshot;
   const res = (await chrome.runtime.sendMessage({
     type: "restore_snapshot",
-    id: recoverableSnapshotId,
-  })) as { restored?: number; skippedExisting?: number };
+    targetWindowId: (await chrome.windows.getCurrent()).id,
+    relPath,
+    id,
+    mode,
+  })) as { ok?: boolean; error?: string; restored?: number; skippedExisting?: number; windowsCreated?: number };
   await refreshStatus();
-  showActionStatus(`Restored ${res?.restored ?? 0} tab(s) from previous session.`);
-  btnRestoreSession.disabled = false;
+  if (!res?.ok) {
+    showActionStatus(res?.error ?? "Restore failed. Try again.");
+    return;
+  }
+  const winPart = res?.windowsCreated ? ` across ${res.windowsCreated} window(s)` : "";
+  showActionStatus(`Restored ${res?.restored ?? 0} tab(s)${winPart} from previous session.`);
+}
+
+btnRestoreSession.addEventListener("click", () => {
+  if (!recoverableSnapshot) return;
+  const winCount = recoverableSnapshot.windowCount ?? 1;
+
+  const existingChoice = recoveryBanner.querySelector(".recovery-choice");
+  if (existingChoice) {
+    existingChoice.remove();
+    return;
+  }
+
+  btnRestoreSession.classList.add("hidden");
+  const choice = document.createElement("div");
+  choice.className = "recovery-choice";
+  choice.style.display = "flex";
+  choice.style.gap = "4px";
+  choice.style.flexShrink = "0";
+
+  const winBtn = document.createElement("button");
+  winBtn.type = "button";
+  winBtn.className = "item-action";
+  winBtn.textContent = winCount > 1 ? `Restore ${winCount} windows` : "New window";
+  winBtn.addEventListener("click", async () => {
+    winBtn.disabled = true;
+    curBtn.disabled = true;
+    await executePopupRestore("windows");
+    choice.remove();
+    btnRestoreSession.classList.remove("hidden");
+  });
+
+  const curBtn = document.createElement("button");
+  curBtn.type = "button";
+  curBtn.className = "item-action";
+  curBtn.textContent = "Current window";
+  curBtn.addEventListener("click", async () => {
+    winBtn.disabled = true;
+    curBtn.disabled = true;
+    await executePopupRestore("current_window");
+    choice.remove();
+    btnRestoreSession.classList.remove("hidden");
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "item-action";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => {
+    choice.remove();
+    btnRestoreSession.classList.remove("hidden");
+  });
+
+  choice.append(winBtn, curBtn, cancelBtn);
+  recoveryBanner.appendChild(choice);
 });
 
 async function init(): Promise<void> {

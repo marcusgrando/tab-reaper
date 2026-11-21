@@ -85,6 +85,7 @@ export interface TabSummary {
   kept?: boolean;
   status?: string;
   windowId: number;
+  index?: number;
   groupId?: number;
   favIconUrl?: string;
 }
@@ -115,21 +116,87 @@ export interface EvictionCandidate {
   reason: "over_tab_cap" | "over_memory_budget" | "idle_timeout";
 }
 
+export type SnapshotTrigger = "auto" | "manual" | "pre_restore" | "window_closed";
+export type RestoreMode = "windows" | "current_window";
+
+export interface SnapshotWindow {
+  id: number;
+  focused: boolean;
+  state?: string;
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface SnapshotTab {
   url: string;
   title: string;
   pinned: boolean;
   kept: boolean;
   windowId: number;
+  index?: number;
+  active?: boolean;
+  discarded?: boolean;
+  groupId?: number;
   groupTitle?: string;
   groupColor?: string;
+  groupCollapsed?: boolean;
+  lastActiveAt?: number;
+  favIconUrl?: string;
 }
 
 export interface SessionSnapshot {
   id: string;
+  schemaVersion?: number;
   capturedAt: number;
   tabCount: number;
+  windowCount?: number;
+  trigger?: SnapshotTrigger;
+  label?: string;
+  deviceId?: string;
+  deviceName?: string;
+  windows?: SnapshotWindow[];
   tabs: SnapshotTab[];
+}
+
+export interface SnapshotListItem {
+  id: string;
+  capturedAt: number;
+  tabCount: number;
+  windowCount: number;
+  trigger: SnapshotTrigger;
+  label?: string;
+  deviceId?: string;
+  deviceName?: string;
+  source: "local" | "sync";
+  syncDir?: string | null;
+  relPath?: string;
+}
+
+export interface SyncFolderCandidate {
+  provider: string;
+  label: string;
+  path: string;
+  exists: boolean;
+}
+
+export interface SyncStatus {
+  hostConnected: boolean;
+  hostOutdated?: boolean;
+  hostVersion?: string | null;
+  enabled: boolean;
+  syncDir: string | null;
+  writable: boolean;
+  deviceId: string;
+  deviceName: string;
+  lastSyncAt: number | null;
+  lastError?: string | null;
+}
+
+export interface DeviceIdentity {
+  deviceId: string;
+  deviceName: string;
 }
 
 export interface StatusPayload {
@@ -141,7 +208,7 @@ export interface StatusPayload {
   protectedCount: number;
   archivedCount: number;
   openTabs: OpenTabInfo[];
-  recoverableSnapshot: { id: string; capturedAt: number; tabCount: number } | null;
+  recoverableSnapshot: { id: string; capturedAt: number; tabCount: number; windowCount?: number; relPath?: string } | null;
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
@@ -160,8 +227,15 @@ export type BackgroundMessage =
   | { type: "discard_idle_now" }
   | { type: "archive_old_now" }
   | { type: "get_snapshots" }
-  | { type: "capture_snapshot_now" }
+  | { type: "capture_snapshot_now"; label?: string }
   | { type: "clear_snapshots" }
-  | { type: "restore_snapshot"; id: string }
+  | { type: "delete_snapshot"; id: string; syncDir?: string | null }
+  | { type: "restore_snapshot"; id: string; targetWindowId?: number; mode?: RestoreMode; relPath?: string }
   | { type: "save_config"; config: Partial<TabReaperConfig> }
-  | { type: "test_native_host" };
+  | { type: "test_native_host" }
+  | { type: "get_sync_status" }
+  | { type: "detect_sync_folders" }
+  | { type: "pick_sync_folder" }
+  | { type: "set_sync_folder"; path: string | null }
+  | { type: "set_device_name"; deviceName: string }
+  | { type: "sync_now" };

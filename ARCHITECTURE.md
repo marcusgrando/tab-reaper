@@ -102,6 +102,21 @@ Archived tabs live in two synchronized places:
 - **Auto-cleanup on restore/visit:** Restoring from the popup/Omnibox or navigating to an archived URL removes the entry from both `chrome.storage.local` and the bookmark folder.
 - **Two-way bookmark deletion:** `chrome.bookmarks.onRemoved` removes the matching record from `chrome.storage.local`.
 
+## Local Companion (Exact Chrome RAM + Folder Sync)
+
+The optional Rust Native Messaging host (`native-host/`) serves both exact Chrome RAM reporting and conflict-free folder sync (snapshots, settings, and archived tabs) to any local or cloud-synced directory (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing).
+
+### Multi-Device Concurrency Model
+
+Cloud-synced folders propagate files asynchronously, so distributed locks are unreliable and shared mutable files produce conflicted copies. To eliminate conflicts by construction, **every writable file is strictly single-writer per `deviceId`** under `devices/<deviceId>/`:
+
+- `devices/<deviceId>/meta.json` — device identity and last seen timestamp.
+- `devices/<deviceId>/config.json` — device settings with `updatedAt`; reads across all `devices/*/config.json` resolve deterministically by highest `updatedAt` (tie-break by `deviceId`).
+- `devices/<deviceId>/archive.json` identifies the published generation of archived tabs and deletion markers. The writer saves overflow parts under unique generation names before atomically replacing this file. Readers also accept the original unversioned part names. A deletion marker can expire after 90 days once a complete scan finds no peer still advertising the URL.
+- `devices/<deviceId>/snapshots/<iso>_<id>.json` + `devices/<deviceId>/index.json` — full session snapshots (with window geometry/state, tab index, pinned, kept, active, collapsed tab groups, and sanitized favicon URL) retained under a GFS policy (unlimited manual, 20 recent auto, 1/hour for 24h, 1/day for 30d). Once a snapshot index spans multiple files, `index.json` points to overflow parts under `index-parts/<generation>-p<N>.json`. The writer publishes the manifest only after writing every part. A reader that cannot assemble the published generation retries without replacing the index.
+
+Each native file request carries the directory selected at the start of the operation. The host checks it against the profile’s approval in `host.json` while holding a shared lock on `host.lock`. Changing a profile’s approval takes an exclusive lock through the atomic replacement of `host.json`. A request for a previous directory fails before accessing backup files. File operations use directory handles rooted at the approved path.
+
 ## Permissions and Distribution
 
 - **Core permissions:** `tabs`, `storage`, `alarms`, `bookmarks`, `system.memory`, `tabGroups`.

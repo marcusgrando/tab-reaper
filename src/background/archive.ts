@@ -1,7 +1,16 @@
-import { normalizeUrl } from "../shared/config.ts";
+import { loadConfig, normalizeUrl } from "../shared/config.ts";
 import type { ActivityState, ArchivedTab, TabReaperConfig, TabSummary, TabWeightSample } from "../shared/types.ts";
 import { isTabProtected } from "./eviction.ts";
-import { getTabLastActiveAt } from "./tracker.ts";
+import {
+  bumpArchiveRevision,
+  enqueueArchiveMutation,
+  isFolderSyncOptedIn,
+  loadArchiveTombstones,
+  pullAndMergeArchive,
+  saveArchiveTombstones,
+} from "./sync.ts";
+import { checkTabHasUnsavedForm } from "./sampler.ts";
+import { getTabLastActiveAt, loadKeptTabIds, toTabSummary } from "./tracker.ts";
 
 export const ARCHIVE_STORAGE_KEY = "tabReaper.archive";
 
@@ -75,8 +84,8 @@ export function searchArchive(items: ArchivedTab[], query: string | undefined): 
   const scored: Array<{ item: ArchivedTab; rank: number }> = [];
 
   for (const item of sorted) {
-    const title = item.title.toLowerCase();
-    const url = item.url.toLowerCase();
+    const title = (item.title ?? "").toLowerCase();
+    const url = (item.url ?? "").toLowerCase();
     const group = (item.groupTitle ?? "").toLowerCase();
     const haystack = `${title} ${url} ${group}`;
 
@@ -103,6 +112,14 @@ export async function saveArchive(items: ArchivedTab[]): Promise<void> {
   await chrome.storage.local.set({ [ARCHIVE_STORAGE_KEY]: items });
 }
 
+export async function syncArchive(now = Date.now()) {
+  const { bookmarkFolderName } = await loadConfig();
+  return pullAndMergeArchive({
+    loadLocal: loadArchive,
+    saveMergedLocal: (items, previous) => saveMergedArchiveWithBookmarks(items, previous, bookmarkFolderName),
+  }, now);
+}
+
 export async function ensureBookmarkFolder(folderName: string): Promise<string> {
   const tree = await chrome.bookmarks.getTree();
   const root = tree[0];
@@ -117,6 +134,20 @@ export async function ensureBookmarkFolder(folderName: string): Promise<string> 
   return created.id;
 }
 
+async function canStillArchive(tab: TabSummary, config: TabReaperConfig): Promise<boolean> {
+  try {
+    if (!tab.discarded && config.protectUnsavedForms && await checkTabHasUnsavedForm(tab.id)) return false;
+    const kept = await loadKeptTabIds();
+    const raw = await chrome.tabs.get(tab.id);
+    const live = toTabSummary(raw, kept);
+    if (!live || live.url !== tab.url || raw.pendingUrl && raw.pendingUrl !== tab.url) return false;
+    if (tab.discarded && !live.discarded || isTabProtected(live, config)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function archiveTabs(
   tabs: TabSummary[],
   activity: ActivityState,
@@ -125,114 +156,157 @@ export async function archiveTabs(
 ): Promise<number> {
   if (tabs.length === 0) return 0;
 
-  const folderId = await ensureBookmarkFolder(config.bookmarkFolderName);
-  const groupCache = new Map<number, { title?: string; color?: string }>();
-  const archive = await loadArchive();
   let archivedCount = 0;
+  let finalArchive: ArchivedTab[] | null = null;
 
-  try {
-    for (const tab of tabs) {
-      if (!isArchivableUrl(tab.url)) continue;
+  await enqueueArchiveMutation(async () => {
+    const folderId = await ensureBookmarkFolder(config.bookmarkFolderName);
+    const groupCache = new Map<number, { title?: string; color?: string }>();
+    const archive = await loadArchive();
+    const tombstones = await loadArchiveTombstones();
+    let changed = false;
 
-      const normalizedUrl = normalizeUrl(tab.url);
-      const lastActiveAt = getTabLastActiveAt(activity, tab, now);
+    try {
+      for (const tab of tabs) {
+        if (!isArchivableUrl(tab.url) || !(await canStillArchive(tab, config))) continue;
 
-      let groupMeta: { title?: string; color?: string } = {};
-      if (typeof tab.groupId === "number" && tab.groupId >= 0) {
-        if (!groupCache.has(tab.groupId)) {
-          try {
-            const group = await chrome.tabGroups.get(tab.groupId);
-            groupCache.set(tab.groupId, { title: group.title || undefined, color: group.color });
-          } catch {
-            groupCache.set(tab.groupId, {});
-          }
-        }
-        groupMeta = groupCache.get(tab.groupId) ?? {};
-      }
+        const normalizedUrl = normalizeUrl(tab.url);
+        const lastActiveAt = getTabLastActiveAt(activity, tab, now);
 
-      const existingIdx = archive.findIndex((item) => item.normalizedUrl === normalizedUrl);
-      let bookmarkId: string | undefined;
-
-      try {
-        if (existingIdx >= 0) {
-          const existing = archive[existingIdx]!;
-          bookmarkId = existing.bookmarkId;
-          if (bookmarkId) {
+        let groupMeta: { title?: string; color?: string } = {};
+        if (typeof tab.groupId === "number" && tab.groupId >= 0) {
+          if (!groupCache.has(tab.groupId)) {
             try {
-              await chrome.bookmarks.update(bookmarkId, { title: tab.title || tab.url, url: tab.url });
+              const group = await chrome.tabGroups.get(tab.groupId);
+              groupCache.set(tab.groupId, { title: group.title || undefined, color: group.color });
             } catch {
+              groupCache.set(tab.groupId, {});
+            }
+          }
+          groupMeta = groupCache.get(tab.groupId) ?? {};
+        }
+
+        const existingIdx = archive.findIndex((item) => item.normalizedUrl === normalizedUrl);
+        const archivedAt = Math.max(now, (archive[existingIdx]?.archivedAt ?? 0) + 1, (tombstones[normalizedUrl] ?? 0) + 1);
+        let bookmarkId: string | undefined;
+
+        try {
+          if (existingIdx >= 0) {
+            const existing = archive[existingIdx]!;
+            bookmarkId = existing.bookmarkId;
+            if (bookmarkId) {
+              try {
+                await chrome.bookmarks.update(bookmarkId, { title: tab.title || tab.url, url: tab.url });
+              } catch {
+                const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
+                bookmarkId = bm.id;
+              }
+            } else {
               const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
               bookmarkId = bm.id;
             }
+
+            archive[existingIdx] = {
+              ...existing,
+              url: tab.url,
+              title: tab.title || tab.url,
+              favIconUrl: tab.favIconUrl ?? existing.favIconUrl,
+              groupTitle: groupMeta.title ?? existing.groupTitle,
+              groupColor: groupMeta.color ?? existing.groupColor,
+              lastActiveAt,
+              archivedAt,
+              bookmarkId,
+            };
           } else {
-            const bm = await chrome.bookmarks.create({ parentId: folderId, title: tab.title || tab.url, url: tab.url });
+            const bm = await chrome.bookmarks.create({
+              parentId: folderId,
+              title: tab.title || tab.url,
+              url: tab.url,
+            });
             bookmarkId = bm.id;
+
+            archive.unshift({
+              id: crypto.randomUUID(),
+              url: tab.url,
+              normalizedUrl,
+              title: tab.title || tab.url,
+              favIconUrl: tab.favIconUrl,
+              groupTitle: groupMeta.title,
+              groupColor: groupMeta.color,
+              lastActiveAt,
+              archivedAt,
+              bookmarkId,
+            });
           }
-
-          archive[existingIdx] = {
-            ...existing,
-            url: tab.url,
-            title: tab.title || tab.url,
-            favIconUrl: tab.favIconUrl ?? existing.favIconUrl,
-            groupTitle: groupMeta.title ?? existing.groupTitle,
-            groupColor: groupMeta.color ?? existing.groupColor,
-            lastActiveAt,
-            archivedAt: now,
-            bookmarkId,
-          };
-        } else {
-          const bm = await chrome.bookmarks.create({
-            parentId: folderId,
-            title: tab.title || tab.url,
-            url: tab.url,
-          });
-          bookmarkId = bm.id;
-
-          archive.unshift({
-            id: crypto.randomUUID(),
-            url: tab.url,
-            normalizedUrl,
-            title: tab.title || tab.url,
-            favIconUrl: tab.favIconUrl,
-            groupTitle: groupMeta.title,
-            groupColor: groupMeta.color,
-            lastActiveAt,
-            archivedAt: now,
-            bookmarkId,
-          });
+        } catch {
+          // Never close a tab if creating/updating its bookmark failed; continue with the rest.
+          continue;
         }
-      } catch {
-        // Never close a tab if creating/updating its bookmark failed; continue with the rest.
-        continue;
-      }
 
-      try {
-        await chrome.tabs.remove(tab.id);
-        archivedCount++;
-      } catch {
-        // Tab may have been closed concurrently.
+        changed = true;
+        try {
+          if (!(await canStillArchive(tab, config))) continue;
+          await chrome.tabs.remove(tab.id);
+          archivedCount++;
+        } catch {
+          // Tab may have been closed concurrently.
+        }
+      }
+    } finally {
+      if (changed) {
+        await saveArchive(archive);
+        await bumpArchiveRevision();
+        finalArchive = archive;
       }
     }
-  } finally {
-    if (archivedCount > 0) {
-      await saveArchive(archive);
-    }
+  });
+
+  if (finalArchive) {
+    void syncArchive(now).catch(() => {});
   }
 
   return archivedCount;
 }
 
-export async function restoreArchivedTab(id: string): Promise<boolean> {
-  const archive = await loadArchive();
-  const idx = archive.findIndex((item) => item.id === id);
-  if (idx < 0) return false;
-
-  const entry = archive[idx]!;
-  // Create the tab first so a failure never deletes the archived entry or bookmark.
-  await chrome.tabs.create({ url: entry.url, active: true });
-
-  archive.splice(idx, 1);
+async function commitArchiveDeletionLocked(
+  archive: ArchivedTab[],
+  removedItems: ArchivedTab[],
+  now = Date.now(),
+): Promise<void> {
   await saveArchive(archive);
+  await bumpArchiveRevision();
+  // Only persist deletion tombstones for profiles that opted into Folder Sync.
+  if (await isFolderSyncOptedIn()) {
+    const tombstones = await loadArchiveTombstones();
+    for (const item of removedItems) {
+      const url = normalizeUrl(item.url);
+      tombstones[url] = Math.max(now, item.archivedAt + 1, (tombstones[url] ?? 0) + 1);
+    }
+    await saveArchiveTombstones(tombstones);
+  }
+}
+
+export async function restoreArchivedTab(id: string): Promise<boolean> {
+  let removedEntry: ArchivedTab | null = null;
+  let updatedArchive: ArchivedTab[] | null = null;
+
+  await enqueueArchiveMutation(async () => {
+    const archive = await loadArchive();
+    const idx = archive.findIndex((item) => item.id === id);
+    if (idx < 0) return;
+
+    const entry = archive[idx]!;
+    // Create the tab first so a failure never deletes the archived entry or bookmark.
+    await chrome.tabs.create({ url: entry.url, active: true });
+
+    archive.splice(idx, 1);
+    await commitArchiveDeletionLocked(archive, [entry]);
+    removedEntry = entry;
+    updatedArchive = archive;
+  });
+
+  if (!removedEntry) return false;
+  const entry = removedEntry as ArchivedTab;
 
   if (entry.bookmarkId) {
     try {
@@ -241,18 +315,30 @@ export async function restoreArchivedTab(id: string): Promise<boolean> {
       // Bookmark may have been removed manually.
     }
   }
-
+  if (updatedArchive) {
+    void syncArchive().catch(() => {});
+  }
   return true;
 }
 
 export async function deleteArchivedTab(id: string): Promise<boolean> {
-  const archive = await loadArchive();
-  const idx = archive.findIndex((item) => item.id === id);
-  if (idx < 0) return false;
+  let removedEntry: ArchivedTab | null = null;
+  let updatedArchive: ArchivedTab[] | null = null;
 
-  const entry = archive[idx]!;
-  archive.splice(idx, 1);
-  await saveArchive(archive);
+  await enqueueArchiveMutation(async () => {
+    const archive = await loadArchive();
+    const idx = archive.findIndex((item) => item.id === id);
+    if (idx < 0) return;
+
+    const entry = archive[idx]!;
+    archive.splice(idx, 1);
+    await commitArchiveDeletionLocked(archive, [entry]);
+    removedEntry = entry;
+    updatedArchive = archive;
+  });
+
+  if (!removedEntry) return false;
+  const entry = removedEntry as ArchivedTab;
 
   if (entry.bookmarkId) {
     try {
@@ -261,18 +347,31 @@ export async function deleteArchivedTab(id: string): Promise<boolean> {
       // Bookmark already gone.
     }
   }
+  if (updatedArchive) {
+    void syncArchive().catch(() => {});
+  }
   return true;
 }
 
 export async function removeArchivedByUrl(rawUrl: string): Promise<boolean> {
   const normalized = normalizeUrl(rawUrl);
-  const archive = await loadArchive();
-  const idx = archive.findIndex((item) => item.normalizedUrl === normalized);
-  if (idx < 0) return false;
+  let removedEntry: ArchivedTab | null = null;
+  let updatedArchive: ArchivedTab[] | null = null;
 
-  const entry = archive[idx]!;
-  archive.splice(idx, 1);
-  await saveArchive(archive);
+  await enqueueArchiveMutation(async () => {
+    const archive = await loadArchive();
+    const idx = archive.findIndex((item) => item.normalizedUrl === normalized);
+    if (idx < 0) return;
+
+    const entry = archive[idx]!;
+    archive.splice(idx, 1);
+    await commitArchiveDeletionLocked(archive, [entry]);
+    removedEntry = entry;
+    updatedArchive = archive;
+  });
+
+  if (!removedEntry) return false;
+  const entry = removedEntry as ArchivedTab;
 
   if (entry.bookmarkId) {
     try {
@@ -281,13 +380,90 @@ export async function removeArchivedByUrl(rawUrl: string): Promise<boolean> {
       // Ignore if already removed.
     }
   }
+  if (updatedArchive) {
+    void syncArchive().catch(() => {});
+  }
   return true;
 }
 
 export async function handleBookmarkRemoved(bookmarkId: string): Promise<void> {
-  const archive = await loadArchive();
-  const filtered = archive.filter((item) => item.bookmarkId !== bookmarkId);
-  if (filtered.length !== archive.length) {
-    await saveArchive(filtered);
+  let updatedArchive: ArchivedTab[] | null = null;
+
+  await enqueueArchiveMutation(async () => {
+    const archive = await loadArchive();
+    const removed = archive.filter((item) => item.bookmarkId === bookmarkId);
+    if (removed.length === 0) return;
+    const filtered = archive.filter((item) => item.bookmarkId !== bookmarkId);
+    await commitArchiveDeletionLocked(filtered, removed);
+    updatedArchive = filtered;
+  });
+
+  if (updatedArchive) {
+    void syncArchive().catch(() => {});
   }
+}
+
+/**
+ * Reconciles Chrome bookmarks after a cross-device archive merge:
+ * reuses matching bookmarks already synced via Chrome Sync, creates missing ones,
+ * and deletes bookmarks for remote removals.
+ */
+export async function saveMergedArchiveWithBookmarks(
+  mergedItems: ArchivedTab[],
+  previousItems: ArchivedTab[],
+  bookmarkFolderName: string,
+): Promise<ArchivedTab[]> {
+  const reconciled = mergedItems.map((item) => ({ ...item }));
+
+  if (typeof chrome.bookmarks?.create === "function") {
+    try {
+      const mergedUrls = new Set(reconciled.map((i) => i.normalizedUrl));
+      for (const prev of previousItems) {
+        if (prev.bookmarkId && !mergedUrls.has(prev.normalizedUrl)) {
+          try {
+            await chrome.bookmarks.remove(prev.bookmarkId);
+          } catch {
+            // Bookmark may already be absent.
+          }
+        }
+      }
+
+      const needsBookmark = reconciled.some((item) => !item.bookmarkId);
+      if (needsBookmark) {
+        const folderId = await ensureBookmarkFolder(bookmarkFolderName);
+        const existingChildren = await chrome.bookmarks.getChildren(folderId).catch(() => []);
+        const existingByUrl = new Map<string, string>();
+        for (const child of existingChildren) {
+          if (child.url) {
+            existingByUrl.set(normalizeUrl(child.url), child.id);
+          }
+        }
+
+        for (const item of reconciled) {
+          if (item.bookmarkId) continue;
+          const reusedId = existingByUrl.get(item.normalizedUrl);
+          if (reusedId) {
+            item.bookmarkId = reusedId;
+            continue;
+          }
+          try {
+            const bm = await chrome.bookmarks.create({
+              parentId: folderId,
+              title: item.title || item.url,
+              url: item.url,
+            });
+            item.bookmarkId = bm.id;
+            existingByUrl.set(item.normalizedUrl, bm.id);
+          } catch {
+            // Keep synced item even if bookmark creation fails.
+          }
+        }
+      }
+    } catch {
+      // Best-effort bookmark reconciliation.
+    }
+  }
+
+  await saveArchive(reconciled);
+  return reconciled;
 }

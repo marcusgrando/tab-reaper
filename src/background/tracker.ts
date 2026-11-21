@@ -249,3 +249,22 @@ export async function removeKeptTabId(tabId: number): Promise<void> {
 export async function clearKeptTabIds(): Promise<void> {
   await chrome.storage.local.remove(KEPT_TABS_STORAGE_KEY);
 }
+
+export function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>): TabSummary | null {
+  if (typeof tab.id !== "number" || tab.incognito) return null;
+  return {
+    id: tab.id,
+    url: tab.url ?? tab.pendingUrl ?? "",
+    title: tab.title ?? tab.url ?? "",
+    active: Boolean(tab.active),
+    audible: Boolean(tab.audible),
+    pinned: Boolean(tab.pinned),
+    discarded: Boolean(tab.discarded),
+    kept: keptIds?.has(tab.id) ?? false,
+    status: tab.status,
+    windowId: tab.windowId,
+    index: tab.index,
+    groupId: tab.groupId,
+    favIconUrl: tab.favIconUrl,
+  };
+}

@@ -153,9 +153,9 @@
 
         <div class="cap-row">
           <div>
-            <strong>Exact Chrome RAM (Optional Native Host)</strong>
+            <strong>Local Companion (Exact Chrome RAM + Folder Sync)</strong>
             <p class="hint">
-              Optional. Reads exact Chrome process memory on macOS, Linux, and Windows instead of OS-wide RAM. No build tools required — copy and run once, then click Enable and Test.
+              Optional. Measures exact Chrome process memory on macOS, Linux, and Windows instead of OS-wide RAM, and enables conflict-free backup &amp; sync of snapshots, settings, and archived tabs to any local or cloud-synced folder (iCloud Drive, Google Drive, OneDrive, Dropbox).
             </p>
             <div class="install-cmd-row">
               <code id="install-cmd"></code>
@@ -183,17 +183,58 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="sync-card">
         <div class="section-head">
-          <h2>Session Recovery (Local Snapshots)</h2>
+          <h2>Folder Sync &amp; Backup</h2>
           <div class="cap-buttons">
-            <button id="btn-save-snapshot" type="button" class="secondary small">Save Snapshot Now</button>
-            <button id="btn-clear-snapshots" type="button" class="secondary small">Clear</button>
+            <button id="btn-sync-now" type="button" class="secondary small">Sync Now</button>
+            <button id="btn-sync-disable" type="button" class="secondary small hidden">Disable Sync</button>
           </div>
         </div>
         <p class="hint">
-          Automatically saves up to 5 local session snapshots (every 5 min when tabs change) including pinned, kept, and tab groups. Stored locally without touching Chrome Sync.
+          Sync snapshots, settings, and archived tabs across devices using a folder synced by your OS (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing). Each device writes only its own files so concurrent devices never conflict.
         </p>
+        <div id="sync-status" class="status-text"></div>
+
+        <div id="sync-controls" class="hidden">
+          <div class="field" id="sync-candidates-wrap">
+            <label>Detected cloud folders</label>
+            <div id="sync-candidates" class="sync-candidates"></div>
+          </div>
+
+          <div class="field">
+            <label for="sync-folder-input">Sync folder path</label>
+            <div class="inline-row">
+              <input id="sync-folder-input" type="text" placeholder="/Users/.../TabReaper" />
+              <button id="btn-sync-pick" type="button" class="secondary small">Choose Folder...</button>
+              <button id="btn-sync-apply" type="button" class="small">Save Folder</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="device-name-input">Device name (shown on synced snapshots)</label>
+            <div class="inline-row">
+              <input id="device-name-input" type="text" maxlength="64" placeholder="MacBook Pro" />
+              <button id="btn-device-name" type="button" class="secondary small">Save Name</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Session Recovery (Snapshots)</h2>
+          <div class="cap-buttons">
+            <button id="btn-clear-snapshots" type="button" class="secondary small">Clear Local</button>
+          </div>
+        </div>
+        <p class="hint">
+          Saves up to 5 snapshots locally and, when Folder Sync is enabled, retains 20 recent + 24 hourly + 30 daily + unlimited manual snapshots across all your devices with window, order, pinned, kept, and tab group metadata.
+        </p>
+        <div class="inline-row" style="margin-bottom: 8px">
+          <input id="snapshot-label" type="text" maxlength="80" placeholder="Optional label for manual snapshot (never auto-pruned)" />
+          <button id="btn-save-snapshot" type="button" class="small">Save Snapshot Now</button>
+        </div>
         <div id="snapshot-status" class="status-text"></div>
         <div id="snapshot-list" class="snapshot-list"></div>
       </section>
