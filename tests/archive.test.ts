@@ -198,4 +198,22 @@ describe("auto-bookmark dual archive", () => {
     const saved = await loadArchive();
     expect(saved.map((i) => i.title).sort()).toEqual(["OK 1", "OK 2"]);
   });
+
+  test("auto-archive is disabled by default (archiveAfterHours = 0)", () => {
+    const now = 1_700_000_000_000;
+    const cfg = sanitizeConfig({});
+    expect(cfg.archiveAfterHours).toBe(0);
+    const tab: TabSummary = {
+      id: 50,
+      url: "https://old.example/page",
+      title: "Old",
+      active: false,
+      audible: false,
+      pinned: false,
+      discarded: true,
+      windowId: 1,
+    };
+    const activity = recordTabVisit(createEmptyActivityState(), 50, tab.url, now - 200 * 60 * 60 * 1000);
+    expect(planArchives({ tabs: [tab], activity, config: cfg, now })).toEqual([]);
+  });
 });

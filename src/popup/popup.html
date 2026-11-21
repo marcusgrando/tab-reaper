@@ -23,8 +23,8 @@
     </header>
 
     <nav class="tabs" role="tablist">
-      <button id="tab-loaded" class="tab-btn active" type="button" role="tab" aria-selected="true">
-        Loaded
+      <button id="tab-open" class="tab-btn active" type="button" role="tab" aria-selected="true">
+        Open
       </button>
       <button id="tab-archived" class="tab-btn" type="button" role="tab" aria-selected="false">
         Archived
@@ -35,7 +35,7 @@
       <input
         id="search-input"
         type="text"
-        placeholder="Filter tabs... (Enter to open, Esc to close)"
+        placeholder="Filter open tabs... (Enter to switch, Esc to close)"
         autocomplete="off"
         autofocus
       />
@@ -46,8 +46,7 @@
     <div id="action-status" class="action-status hidden"></div>
 
     <footer class="footer">
-      <button id="btn-discard" type="button">Discard Idle</button>
-      <button id="btn-archive" type="button">Archive Discarded</button>
+      <button id="btn-discard" type="button">Sleep Idle</button>
       <button id="btn-options" type="button" class="secondary">Settings</button>
     </footer>
 

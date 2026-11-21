@@ -22,6 +22,7 @@ export function getTabProtectedReason(
 ): string | null {
   if (isInternalUrl(tab.url)) return "Internal";
   if (tab.status === "loading") return "Loading";
+  if (tab.kept) return "Kept";
   if (config.protectActive && tab.active) return "Active";
   if (config.protectAudible && tab.audible) return "Audio";
   if (config.protectPinned && tab.pinned) return "Pinned";

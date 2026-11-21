@@ -79,23 +79,27 @@ export interface TabSummary {
   audible: boolean;
   pinned: boolean;
   discarded: boolean;
+  kept?: boolean;
   status?: string;
   windowId: number;
   groupId?: number;
   favIconUrl?: string;
 }
 
-export interface LoadedTabInfo {
+export interface OpenTabInfo {
   id: number;
   url: string;
   title: string;
+  discarded: boolean;
+  kept: boolean;
   idleMinutes: number;
   protectedReason: string | null;
   weightMultiplier: number;
   jsHeapBytes: number | null;
   hasUnsavedForm: boolean;
   isPwa: boolean;
-  canDiscardManually: boolean;
+  canSleep: boolean;
+  canArchive: boolean;
 }
 
 export interface EvictionCandidate {
@@ -114,7 +118,7 @@ export interface StatusPayload {
   discardedCount: number;
   protectedCount: number;
   archivedCount: number;
-  loadedTabs: LoadedTabInfo[];
+  openTabs: OpenTabInfo[];
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
@@ -127,6 +131,8 @@ export type BackgroundMessage =
   | { type: "restore_archived"; id: string }
   | { type: "delete_archived"; id: string }
   | { type: "discard_tab"; tabId: number }
+  | { type: "toggle_keep_tab"; tabId: number }
+  | { type: "archive_tab"; tabId: number }
   | { type: "discard_idle_now" }
   | { type: "archive_old_now" }
   | { type: "save_config"; config: Partial<TabReaperConfig> }

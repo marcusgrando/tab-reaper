@@ -54,13 +54,15 @@ describe("config helpers", () => {
 describe("eviction engine", () => {
   const now = 1_700_000_000_000;
 
-  test("protects active, audible, pinned, internal, and allowlisted tabs", () => {
+  test("protects active, audible, pinned, kept, internal, and allowlisted tabs", () => {
     const cfg = sanitizeConfig({ allowlist: ["meet.google.com"] });
     expect(isTabProtected(makeTab(1, { active: true }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(2, { audible: true }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(3, { pinned: true }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(4, { url: "chrome://settings" }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(5, { url: "https://meet.google.com/xyz" }), cfg)).toBe(true);
+    expect(getTabProtectedReason(makeTab(7, { kept: true }), cfg)).toBe("Kept");
+    expect(isTabProtected(makeTab(7, { kept: true }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(6), cfg)).toBe(false);
   });
 

@@ -1,9 +1,10 @@
 import { isInternalUrl, loadConfig, saveConfig } from "../shared/config.ts";
-import type { BackgroundMessage, LoadedTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
+import type { BackgroundMessage, OpenTabInfo, StatusPayload, TabSummary } from "../shared/types.ts";
 import {
   archiveTabs,
   deleteArchivedTab,
   handleBookmarkRemoved,
+  isArchivableUrl,
   loadArchive,
   planArchives,
   planArchivesWithBreakdown,
@@ -16,12 +17,16 @@ import { getTabProtectedReason, isTabProtected, planEvictions } from "./eviction
 import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
+  clearKeptTabIds,
   getTabLastActiveAt,
   loadActivityState,
+  loadKeptTabIds,
   reconcileActivityOnStartup,
   recordTabVisit,
+  removeKeptTabId,
   removeTrackedTab,
   saveActivityState,
+  toggleKeptTabId,
 } from "./tracker.ts";
 
 const SWEEP_ALARM = "tabReaper.sweep";
@@ -44,7 +49,7 @@ function isBrowserOnline(): boolean {
   return typeof navigator === "undefined" ? true : navigator.onLine !== false;
 }
 
-function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
+function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>): TabSummary | null {
   if (typeof tab.id !== "number") return null;
   return {
     id: tab.id,
@@ -54,6 +59,7 @@ function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
     audible: Boolean(tab.audible),
     pinned: Boolean(tab.pinned),
     discarded: Boolean(tab.discarded),
+    kept: keptIds?.has(tab.id) ?? false,
     status: tab.status,
     windowId: tab.windowId,
     groupId: tab.groupId,
@@ -62,10 +68,10 @@ function toTabSummary(tab: chrome.tabs.Tab): TabSummary | null {
 }
 
 async function queryAllTabs(): Promise<TabSummary[]> {
-  const tabs = await chrome.tabs.query({});
+  const [tabs, keptIds] = await Promise.all([chrome.tabs.query({}), loadKeptTabIds()]);
   const summaries: TabSummary[] = [];
   for (const tab of tabs) {
-    const summary = toTabSummary(tab);
+    const summary = toTabSummary(tab, keptIds);
     if (summary) summaries.push(summary);
   }
   return summaries;
@@ -174,7 +180,7 @@ async function buildStatus(): Promise<StatusPayload> {
   let loadedCount = 0;
   let discardedCount = 0;
   let protectedCount = 0;
-  const loadedTabs: LoadedTabInfo[] = [];
+  const openTabs: OpenTabInfo[] = [];
 
   for (const tab of tabs) {
     const sample = weights.get(tab.id);
@@ -186,34 +192,40 @@ async function buildStatus(): Promise<StatusPayload> {
       discardedCount++;
     } else {
       loadedCount++;
-      const win = windowById.get(tab.windowId);
-      const isPwa = win?.type === "app";
-      const isFocusedActive = tab.active && win?.focused === true;
-      const canDiscardManually = !isInternalUrl(tab.url) && !isFocusedActive && tab.status !== "loading";
-      const lastActiveAt = getTabLastActiveAt(activity, tab, now);
-      const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
-      loadedTabs.push({
-        id: tab.id,
-        url: tab.url,
-        title: tab.title,
-        idleMinutes,
-        protectedReason,
-        weightMultiplier: sample?.weightMultiplier ?? 1.0,
-        jsHeapBytes: sample ? sample.jsHeapBytes : null,
-        hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
-        isPwa,
-        canDiscardManually,
-      });
     }
+
+    const win = windowById.get(tab.windowId);
+    const isPwa = win?.type === "app";
+    const isFocusedActive = tab.active && win?.focused === true;
+    const canSleep = !tab.discarded && !isInternalUrl(tab.url) && !isFocusedActive && tab.status !== "loading";
+    const canArchive = isArchivableUrl(tab.url);
+    const lastActiveAt = getTabLastActiveAt(activity, tab, now);
+    const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
+
+    openTabs.push({
+      id: tab.id,
+      url: tab.url,
+      title: tab.title,
+      discarded: tab.discarded,
+      kept: Boolean(tab.kept),
+      idleMinutes,
+      protectedReason,
+      weightMultiplier: sample?.weightMultiplier ?? 1.0,
+      jsHeapBytes: sample ? sample.jsHeapBytes : null,
+      hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
+      isPwa,
+      canSleep,
+      canArchive,
+    });
   }
 
-  loadedTabs.sort((a, b) => {
-    const aHeap = a.jsHeapBytes ?? -1;
-    const bHeap = b.jsHeapBytes ?? -1;
-    if (aHeap !== bHeap) return bHeap - aHeap;
-    const aProt = a.protectedReason ? 1 : 0;
-    const bProt = b.protectedReason ? 1 : 0;
-    if (aProt !== bProt) return aProt - bProt;
+  openTabs.sort((a, b) => {
+    if (a.discarded !== b.discarded) return a.discarded ? 1 : -1;
+    if (!a.discarded) {
+      const aHeap = a.jsHeapBytes ?? -1;
+      const bHeap = b.jsHeapBytes ?? -1;
+      if (aHeap !== bHeap) return bHeap - aHeap;
+    }
     return b.idleMinutes - a.idleMinutes;
   });
 
@@ -227,7 +239,7 @@ async function buildStatus(): Promise<StatusPayload> {
     discardedCount,
     protectedCount,
     archivedCount: archive.length,
-    loadedTabs,
+    openTabs,
     permissions: { nativeMessaging, hostAccess },
   };
 }
@@ -241,6 +253,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureAlarm();
+  await clearKeptTabIds();
   const config = await loadConfig();
   if (config.startupSweep) {
     await runSweep("startup");
@@ -286,7 +299,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const state = removeTrackedTab(await loadActivityState(), tabId);
-  await saveActivityState(state);
+  await Promise.all([saveActivityState(state), removeKeptTabId(tabId)]);
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -344,11 +357,41 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: await deleteArchivedTab(message.id) };
     case "discard_tab":
       try {
+        await removeKeptTabId(message.tabId);
         await chrome.tabs.discard(message.tabId);
         return { ok: true };
       } catch {
         return { ok: false };
       }
+    case "toggle_keep_tab": {
+      const kept = await toggleKeptTabId(message.tabId);
+      if (kept) {
+        try {
+          const tab = await chrome.tabs.get(message.tabId);
+          if (tab.discarded) {
+            await chrome.tabs.reload(message.tabId);
+          }
+        } catch {
+          // Tab may have been closed concurrently.
+        }
+      }
+      return { ok: true, kept };
+    }
+    case "archive_tab": {
+      try {
+        const raw = await chrome.tabs.get(message.tabId);
+        const summary = toTabSummary(raw);
+        if (!summary || !isArchivableUrl(summary.url)) {
+          return { ok: false };
+        }
+        const [config, activity] = await Promise.all([loadConfig(), loadActivityState()]);
+        const archived = await archiveTabs([summary], activity, config, Date.now());
+        await removeKeptTabId(message.tabId);
+        return { ok: archived > 0 };
+      } catch {
+        return { ok: false };
+      }
+    }
     case "discard_idle_now":
       return runSweep("sweep");
     case "archive_old_now": {

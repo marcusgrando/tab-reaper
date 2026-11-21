@@ -2,6 +2,7 @@ import { isInternalUrl, normalizeUrl } from "../shared/config.ts";
 import type { ActivityState, TabSummary } from "../shared/types.ts";
 
 export const ACTIVITY_STORAGE_KEY = "tabReaper.activity";
+export const KEPT_TABS_STORAGE_KEY = "tabReaper.keptTabIds";
 const MAX_TRACKED_URLS = 2000;
 
 export function createEmptyActivityState(): ActivityState {
@@ -109,4 +110,40 @@ export async function loadActivityState(): Promise<ActivityState> {
 
 export async function saveActivityState(state: ActivityState): Promise<void> {
   await chrome.storage.local.set({ [ACTIVITY_STORAGE_KEY]: state });
+}
+
+export async function loadKeptTabIds(): Promise<Set<number>> {
+  const result = await chrome.storage.local.get(KEPT_TABS_STORAGE_KEY);
+  const raw = result[KEPT_TABS_STORAGE_KEY];
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(raw.filter((id): id is number => typeof id === "number" && Number.isFinite(id)));
+}
+
+export async function saveKeptTabIds(ids: Set<number>): Promise<void> {
+  await chrome.storage.local.set({ [KEPT_TABS_STORAGE_KEY]: [...ids] });
+}
+
+export async function toggleKeptTabId(tabId: number): Promise<boolean> {
+  const ids = await loadKeptTabIds();
+  let kept: boolean;
+  if (ids.has(tabId)) {
+    ids.delete(tabId);
+    kept = false;
+  } else {
+    ids.add(tabId);
+    kept = true;
+  }
+  await saveKeptTabIds(ids);
+  return kept;
+}
+
+export async function removeKeptTabId(tabId: number): Promise<void> {
+  const ids = await loadKeptTabIds();
+  if (ids.delete(tabId)) {
+    await saveKeptTabIds(ids);
+  }
+}
+
+export async function clearKeptTabIds(): Promise<void> {
+  await chrome.storage.local.remove(KEPT_TABS_STORAGE_KEY);
 }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tab Reaper",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Strict Chrome memory budget, weighted tab discarding, fast startup, and automatic searchable tab archiving.",
   "icons": {
     "16": "icons/icon16.png",

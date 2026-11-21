@@ -1,6 +1,6 @@
-import type { ArchivedTab, LoadedTabInfo, StatusPayload } from "../shared/types.ts";
+import type { ArchivedTab, OpenTabInfo, StatusPayload } from "../shared/types.ts";
 
-type ActiveView = "loaded" | "archived";
+type ActiveView = "open" | "archived";
 
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const listEl = document.getElementById("archive-list") as HTMLElement;
@@ -9,15 +9,14 @@ const memoryBar = document.getElementById("memory-bar") as HTMLElement;
 const statLoaded = document.getElementById("stat-loaded") as HTMLElement;
 const statDiscarded = document.getElementById("stat-discarded") as HTMLElement;
 const statArchived = document.getElementById("stat-archived") as HTMLElement;
-const tabLoadedBtn = document.getElementById("tab-loaded") as HTMLButtonElement;
+const tabOpenBtn = document.getElementById("tab-open") as HTMLButtonElement;
 const tabArchivedBtn = document.getElementById("tab-archived") as HTMLButtonElement;
 const btnDiscard = document.getElementById("btn-discard") as HTMLButtonElement;
-const btnArchive = document.getElementById("btn-archive") as HTMLButtonElement;
 const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
 const actionStatus = document.getElementById("action-status") as HTMLElement;
 
-let activeView: ActiveView = "loaded";
-let loadedTabs: LoadedTabInfo[] = [];
+let activeView: ActiveView = "open";
+let openTabs: OpenTabInfo[] = [];
 let archivedItems: ArchivedTab[] = [];
 let hasHostAccess = false;
 let selectedIndex = 0;
@@ -53,36 +52,41 @@ function extractHost(url: string): string {
   }
 }
 
-function filteredLoadedTabs(): LoadedTabInfo[] {
+function filteredOpenTabs(): OpenTabInfo[] {
   const q = searchInput.value.trim().toLowerCase();
-  if (!q) return loadedTabs;
-  return loadedTabs.filter(
+  if (!q) return openTabs;
+  return openTabs.filter(
     (tab) => tab.title.toLowerCase().includes(q) || tab.url.toLowerCase().includes(q),
   );
+}
+
+function showActionStatus(text: string): void {
+  actionStatus.textContent = text;
+  actionStatus.classList.remove("hidden");
 }
 
 function setActiveView(view: ActiveView): void {
   activeView = view;
   selectedIndex = 0;
-  tabLoadedBtn.classList.toggle("active", view === "loaded");
-  tabLoadedBtn.setAttribute("aria-selected", String(view === "loaded"));
+  tabOpenBtn.classList.toggle("active", view === "open");
+  tabOpenBtn.setAttribute("aria-selected", String(view === "open"));
   tabArchivedBtn.classList.toggle("active", view === "archived");
   tabArchivedBtn.setAttribute("aria-selected", String(view === "archived"));
   searchInput.placeholder =
-    view === "loaded"
-      ? "Filter loaded tabs... (Enter to switch, Esc to close)"
+    view === "open"
+      ? "Filter open tabs... (Enter to switch, Esc to close)"
       : "Search archived tabs... (Enter to open, Esc to close)";
   renderList();
 }
 
 async function refreshStatus(): Promise<StatusPayload> {
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
-  loadedTabs = status.loadedTabs ?? [];
+  openTabs = status.openTabs ?? [];
   hasHostAccess = Boolean(status.permissions?.hostAccess);
   statLoaded.textContent = `${status.loadedCount} (cap ${status.config.maxActiveTabs})`;
   statDiscarded.textContent = String(status.discardedCount);
   statArchived.textContent = String(status.archivedCount);
-  tabLoadedBtn.textContent = `Loaded (${status.loadedCount})`;
+  tabOpenBtn.textContent = `Open (${openTabs.length})`;
   tabArchivedBtn.textContent = `Archived (${status.archivedCount})`;
 
   if (status.memory) {
@@ -101,7 +105,7 @@ async function refreshStatus(): Promise<StatusPayload> {
     memoryBar.classList.toggle("over", status.memory.overBudget);
   }
 
-  if (activeView === "loaded") {
+  if (activeView === "open") {
     renderList();
   }
   return status;
@@ -116,22 +120,22 @@ async function refreshArchive(query = searchInput.value): Promise<void> {
 }
 
 function renderList(): void {
-  if (activeView === "loaded") {
-    renderLoadedTabs();
+  if (activeView === "open") {
+    renderOpenTabs();
   } else {
     renderArchivedTabs();
   }
 }
 
-function renderLoadedTabs(): void {
+function renderOpenTabs(): void {
   listEl.replaceChildren();
-  const items = filteredLoadedTabs();
+  const items = filteredOpenTabs();
   selectedIndex = Math.min(selectedIndex, Math.max(0, items.length - 1));
 
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = searchInput.value.trim() ? "No loaded tabs match your filter." : "No loaded tabs.";
+    empty.textContent = searchInput.value.trim() ? "No open tabs match your filter." : "No open tabs.";
     listEl.appendChild(empty);
     return;
   }
@@ -143,9 +147,20 @@ function renderLoadedTabs(): void {
     listEl.appendChild(tip);
   }
 
+  const sleepingCount = items.filter((t) => t.discarded).length;
+  let renderedSleepingHeader = false;
+
   items.forEach((tab, index) => {
+    if (tab.discarded && !renderedSleepingHeader) {
+      renderedSleepingHeader = true;
+      const divider = document.createElement("div");
+      divider.className = "section-divider";
+      divider.textContent = `Sleeping (${sleepingCount})`;
+      listEl.appendChild(divider);
+    }
+
     const row = document.createElement("div");
-    row.className = `archive-item${index === selectedIndex ? " selected" : ""}`;
+    row.className = `archive-item${tab.discarded ? " sleeping" : ""}${index === selectedIndex ? " selected" : ""}`;
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", String(index === selectedIndex));
 
@@ -157,7 +172,9 @@ function renderLoadedTabs(): void {
     title.textContent = tab.title || tab.url;
 
     const metaParts: string[] = [];
-    if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
+    if (tab.discarded) {
+      metaParts.push("Sleeping");
+    } else if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
       metaParts.push(`JS ${formatMb(tab.jsHeapBytes)}`);
     }
     metaParts.push(extractHost(tab.url), formatIdle(tab.idleMinutes));
@@ -182,26 +199,64 @@ function renderLoadedTabs(): void {
       right.appendChild(pwaPill);
     }
 
-    if (tab.protectedReason) {
+    if (tab.protectedReason && tab.protectedReason !== "Kept") {
       const pill = document.createElement("span");
       pill.className = "pill";
       pill.textContent = tab.protectedReason;
       right.appendChild(pill);
     }
 
-    if (tab.canDiscardManually && (!tab.protectedReason || tab.isPwa || tab.protectedReason === "Form")) {
-      const discardBtn = document.createElement("button");
-      discardBtn.className = "item-action";
-      discardBtn.type = "button";
-      discardBtn.title = "Discard this tab to free RAM";
-      discardBtn.textContent = "Discard";
-      discardBtn.addEventListener("click", async (event) => {
+    // 1. Keep toggle (lock tab in RAM so it is never discarded or archived)
+    if (tab.protectedReason !== "Internal") {
+      const keepBtn = document.createElement("button");
+      keepBtn.className = `item-action${tab.kept ? " kept" : ""}`;
+      keepBtn.type = "button";
+      keepBtn.title = tab.kept
+        ? "Stop keeping this tab always loaded"
+        : "Keep this tab always loaded (never sleep or archive)";
+      keepBtn.textContent = tab.kept ? "Kept" : "Keep";
+      keepBtn.addEventListener("click", async (event) => {
         event.stopPropagation();
-        discardBtn.disabled = true;
+        keepBtn.disabled = true;
+        await chrome.runtime.sendMessage({ type: "toggle_keep_tab", tabId: tab.id });
+        await refreshStatus();
+      });
+      right.appendChild(keepBtn);
+    }
+
+    // 2. Sleep button (free RAM now, keeping tab in strip)
+    if (tab.canSleep && !tab.kept) {
+      const sleepBtn = document.createElement("button");
+      sleepBtn.className = "item-action";
+      sleepBtn.type = "button";
+      sleepBtn.title = "Put this tab to sleep now to free RAM";
+      sleepBtn.textContent = "Sleep";
+      sleepBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        sleepBtn.disabled = true;
         await chrome.runtime.sendMessage({ type: "discard_tab", tabId: tab.id });
         await refreshStatus();
       });
-      right.appendChild(discardBtn);
+      right.appendChild(sleepBtn);
+    }
+
+    // 3. Archive button (save to Bookmarks + Archive and close tab)
+    if (tab.canArchive) {
+      const archiveBtn = document.createElement("button");
+      archiveBtn.className = "item-action";
+      archiveBtn.type = "button";
+      archiveBtn.title = "Archive to bookmarks and close this tab";
+      archiveBtn.textContent = "Archive";
+      archiveBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        archiveBtn.disabled = true;
+        const res = (await chrome.runtime.sendMessage({ type: "archive_tab", tabId: tab.id })) as { ok?: boolean };
+        await Promise.all([refreshStatus(), refreshArchive()]);
+        if (res?.ok) {
+          showActionStatus(`Archived "${tab.title || extractHost(tab.url)}".`);
+        }
+      });
+      right.appendChild(archiveBtn);
     }
 
     row.append(main, right);
@@ -217,7 +272,7 @@ function renderArchivedTabs(): void {
     empty.className = "empty";
     empty.textContent = searchInput.value.trim()
       ? "No archived tabs match your query."
-      : "No archived tabs yet. Tabs idle beyond your archive threshold will appear here.";
+      : "No archived tabs yet. Click Archive on any open tab to save it here and in Bookmarks.";
     listEl.appendChild(empty);
     return;
   }
@@ -263,7 +318,7 @@ function renderArchivedTabs(): void {
   });
 }
 
-tabLoadedBtn.addEventListener("click", () => setActiveView("loaded"));
+tabOpenBtn.addEventListener("click", () => setActiveView("open"));
 tabArchivedBtn.addEventListener("click", () => {
   setActiveView("archived");
   void refreshArchive(searchInput.value);
@@ -274,12 +329,12 @@ searchInput.addEventListener("input", () => {
   if (activeView === "archived") {
     void refreshArchive(searchInput.value);
   } else {
-    renderLoadedTabs();
+    renderOpenTabs();
   }
 });
 
 searchInput.addEventListener("keydown", async (event) => {
-  const count = activeView === "loaded" ? filteredLoadedTabs().length : archivedItems.length;
+  const count = activeView === "open" ? filteredOpenTabs().length : archivedItems.length;
   if (event.key === "ArrowDown") {
     event.preventDefault();
     if (count > 0) {
@@ -294,8 +349,8 @@ searchInput.addEventListener("keydown", async (event) => {
     }
   } else if (event.key === "Enter") {
     event.preventDefault();
-    if (activeView === "loaded") {
-      const target = filteredLoadedTabs()[selectedIndex];
+    if (activeView === "open") {
+      const target = filteredOpenTabs()[selectedIndex];
       if (target) {
         await chrome.tabs.update(target.id, { active: true });
         window.close();
@@ -312,40 +367,14 @@ searchInput.addEventListener("keydown", async (event) => {
   }
 });
 
-function showActionStatus(text: string): void {
-  actionStatus.textContent = text;
-  actionStatus.classList.remove("hidden");
-}
-
 btnDiscard.addEventListener("click", async () => {
   btnDiscard.disabled = true;
   const res = (await chrome.runtime.sendMessage({ type: "discard_idle_now" })) as {
     discarded?: number;
-    archived?: number;
   };
   await refreshStatus();
-  showActionStatus(`Discarded ${res?.discarded ?? 0} tab(s).`);
+  showActionStatus(`Put ${res?.discarded ?? 0} idle tab(s) to sleep.`);
   btnDiscard.disabled = false;
-});
-
-btnArchive.addEventListener("click", async () => {
-  btnArchive.disabled = true;
-  const res = (await chrome.runtime.sendMessage({ type: "archive_old_now" })) as {
-    archived?: number;
-    skippedProtected?: number;
-    skippedNotDiscarded?: number;
-    skippedNonHttp?: number;
-    failed?: number;
-  };
-  await Promise.all([refreshStatus(), refreshArchive()]);
-  const skippedParts: string[] = [];
-  if (res?.skippedNotDiscarded) skippedParts.push(`${res.skippedNotDiscarded} still loaded`);
-  if (res?.skippedProtected) skippedParts.push(`${res.skippedProtected} protected`);
-  if (res?.skippedNonHttp) skippedParts.push(`${res.skippedNonHttp} internal/non-http`);
-  if (res?.failed) skippedParts.push(`${res.failed} failed`);
-  const detail = skippedParts.length > 0 ? ` (${skippedParts.join(", ")})` : "";
-  showActionStatus(`Archived ${res?.archived ?? 0} discarded tab(s)${detail}.`);
-  btnArchive.disabled = false;
 });
 
 btnOptions.addEventListener("click", () => {
@@ -353,8 +382,8 @@ btnOptions.addEventListener("click", () => {
 });
 
 async function init(): Promise<void> {
-  const [status] = await Promise.all([refreshStatus(), refreshArchive("")]);
-  setActiveView(status.archivedCount > 0 ? "archived" : "loaded");
+  await Promise.all([refreshStatus(), refreshArchive("")]);
+  setActiveView("open");
   searchInput.focus();
 }
 

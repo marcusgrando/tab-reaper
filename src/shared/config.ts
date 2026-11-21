@@ -8,7 +8,7 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   memoryBudgetGb: 4,
   maxActiveTabs: 10,
   discardAfterMinutes: 15,
-  archiveAfterHours: 72,
+  archiveAfterHours: 0,
   startupSweep: true,
   protectActive: true,
   protectAudible: true,
