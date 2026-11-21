@@ -252,44 +252,50 @@ describe("open tab action coherence", () => {
       canKeep: false,
       canSleep: false,
       canArchive: false,
+      canClose: false,
     });
     expect(computeOpenTabActions(makeTab(2, { active: true }), cfg)).toEqual({
       protectedReason: "Active",
       canKeep: false,
       canSleep: false,
       canArchive: false,
+      canClose: true,
     });
     expect(computeOpenTabActions(makeTab(3, { status: "loading" }), cfg)).toEqual({
       protectedReason: "Loading",
       canKeep: false,
       canSleep: false,
       canArchive: false,
+      canClose: true,
     });
   });
 
-  test("exposes Keep, Sleep, and Archive on pinned tab when protectPinned is disabled", () => {
+  test("exposes Keep, Sleep, and Archive on pinned tab when protectPinned is disabled, but still hides Close", () => {
     const cfg = sanitizeConfig({ protectPinned: false });
     expect(computeOpenTabActions(makeTab(1, { pinned: true }), cfg)).toEqual({
       protectedReason: null,
       canKeep: true,
       canSleep: true,
       canArchive: true,
+      canClose: false,
     });
   });
 
-  test("shows only Kept toggle when user locked a tab, and Keep + Archive when sleeping", () => {
+  test("shows only Kept toggle when user locked a tab (no Close), and Keep + Archive + Close when sleeping", () => {
     const cfg = sanitizeConfig({});
     expect(computeOpenTabActions(makeTab(1, { kept: true }), cfg)).toEqual({
       protectedReason: "Kept",
       canKeep: true,
       canSleep: false,
       canArchive: false,
+      canClose: false,
     });
     expect(computeOpenTabActions(makeTab(2, { discarded: true }), cfg)).toEqual({
       protectedReason: null,
       canKeep: true,
       canSleep: false,
       canArchive: true,
+      canClose: true,
     });
   });
 });

@@ -15,6 +15,9 @@ const btnDiscard = document.getElementById("btn-discard") as HTMLButtonElement;
 const btnOptions = document.getElementById("btn-options") as HTMLButtonElement;
 const actionStatus = document.getElementById("action-status") as HTMLElement;
 
+const CLOSE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
 let activeView: ActiveView = "open";
 let openTabs: OpenTabInfo[] = [];
 let archivedItems: ArchivedTab[] = [];
@@ -250,6 +253,22 @@ function renderOpenTabs(): void {
         }
       });
       right.appendChild(archiveBtn);
+    }
+
+    if (tab.canClose) {
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "item-close";
+      closeBtn.type = "button";
+      closeBtn.title = "Close tab";
+      closeBtn.setAttribute("aria-label", "Close tab");
+      closeBtn.innerHTML = CLOSE_ICON_SVG;
+      closeBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        closeBtn.disabled = true;
+        await chrome.runtime.sendMessage({ type: "close_tab", tabId: tab.id });
+        await refreshStatus();
+      });
+      right.appendChild(closeBtn);
     }
 
     row.append(main, right);

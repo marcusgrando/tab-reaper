@@ -40,10 +40,11 @@ export interface OpenTabActions {
   canKeep: boolean;
   canSleep: boolean;
   canArchive: boolean;
+  canClose: boolean;
 }
 
 /**
- * Single source of truth for which manual actions (Keep, Sleep, Archive) are coherent
+ * Single source of truth for which manual actions (Keep, Sleep, Archive, Close) are coherent
  * with the user's protection settings for a given open tab.
  */
 export function computeOpenTabActions(
@@ -54,6 +55,7 @@ export function computeOpenTabActions(
 ): OpenTabActions {
   const protectedReason = getTabProtectedReason(tab, config, sample);
   const isHttp = /^https?:\/\//i.test(tab.url);
+  const canClose = !tab.pinned && !tab.kept;
 
   // Protected by a config rule or browser state (Internal, Loading, Active, Audio, Pinned, Allowlist, Form):
   // hide Keep/Sleep/Archive so manual actions never contradict active protection settings.
@@ -63,6 +65,7 @@ export function computeOpenTabActions(
       canKeep: false,
       canSleep: false,
       canArchive: false,
+      canClose,
     };
   }
 
@@ -73,6 +76,7 @@ export function computeOpenTabActions(
       canKeep: true,
       canSleep: false,
       canArchive: false,
+      canClose: false,
     };
   }
 
@@ -82,6 +86,7 @@ export function computeOpenTabActions(
     canKeep: true,
     canSleep: !tab.discarded && !isFocusedActive,
     canArchive: isHttp,
+    canClose,
   };
 }
 

@@ -101,6 +101,7 @@ export interface OpenTabInfo {
   canKeep: boolean;
   canSleep: boolean;
   canArchive: boolean;
+  canClose: boolean;
 }
 
 export interface EvictionCandidate {
@@ -134,6 +135,7 @@ export type BackgroundMessage =
   | { type: "discard_tab"; tabId: number }
   | { type: "toggle_keep_tab"; tabId: number }
   | { type: "archive_tab"; tabId: number }
+  | { type: "close_tab"; tabId: number }
   | { type: "discard_idle_now" }
   | { type: "archive_old_now" }
   | { type: "save_config"; config: Partial<TabReaperConfig> }

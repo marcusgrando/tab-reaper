@@ -216,6 +216,7 @@ async function buildStatus(): Promise<StatusPayload> {
       canKeep: actions.canKeep,
       canSleep: actions.canSleep,
       canArchive: actions.canArchive,
+      canClose: actions.canClose,
     });
   }
 
@@ -401,6 +402,18 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
         const archived = await archiveTabs([summary], activity, config, Date.now());
         await removeKeptTabId(message.tabId);
         return { ok: archived > 0 };
+      } catch {
+        return { ok: false };
+      }
+    }
+    case "close_tab": {
+      try {
+        const [raw, keptIds] = await Promise.all([chrome.tabs.get(message.tabId), loadKeptTabIds()]);
+        if (raw.pinned || keptIds.has(message.tabId)) {
+          return { ok: false };
+        }
+        await chrome.tabs.remove(message.tabId);
+        return { ok: true };
       } catch {
         return { ok: false };
       }
