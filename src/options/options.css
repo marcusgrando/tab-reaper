@@ -161,6 +161,21 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   background: var(--bg);
-  padding: 2px 5px;
+  padding: 4px 7px;
   border-radius: 4px;
+  user-select: all;
+  word-break: break-all;
+}
+
+.install-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+button.small {
+  padding: 4px 9px;
+  font-size: 12px;
+  flex-shrink: 0;
 }

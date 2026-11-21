@@ -8,6 +8,11 @@ if [ $# -lt 1 ]; then
 fi
 
 EXT_ID="$1"
+if [[ ! "$EXT_ID" =~ ^[a-p]{32}$ ]]; then
+  echo "Error: invalid Chrome extension ID '$EXT_ID' (got ${#EXT_ID} chars; expected 32 lowercase letters a-p)." >&2
+  echo "Copy the full ID from chrome://extensions or the Tab Reaper Settings page." >&2
+  exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/tab-reaper/target}"
 BIN_DIR="$HOME/.local/bin"

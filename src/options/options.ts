@@ -18,6 +18,7 @@ const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
 const saveStatus = document.getElementById("save-status") as HTMLElement;
 
 const installCmd = document.getElementById("install-cmd") as HTMLElement;
+const btnCopyInstall = document.getElementById("btn-copy-install") as HTMLButtonElement;
 const nativeStatus = document.getElementById("native-status") as HTMLElement;
 const hostStatus = document.getElementById("host-status") as HTMLElement;
 const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonElement;
@@ -103,6 +104,20 @@ form.addEventListener("submit", async (event) => {
   } else {
     saveStatus.textContent = "Failed to save settings.";
     saveStatus.className = "status-text err";
+  }
+});
+
+btnCopyInstall.addEventListener("click", async () => {
+  const cmd = installCmd.textContent ?? "";
+  if (!cmd) return;
+  try {
+    await navigator.clipboard.writeText(cmd);
+    btnCopyInstall.textContent = "Copied";
+    setTimeout(() => {
+      btnCopyInstall.textContent = "Copy";
+    }, 1500);
+  } catch {
+    btnCopyInstall.textContent = "Copy failed";
   }
 });
 

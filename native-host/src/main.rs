@@ -1,6 +1,8 @@
 use std::env;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 const MAX_MESSAGE_LEN: usize = 1024 * 1024;
