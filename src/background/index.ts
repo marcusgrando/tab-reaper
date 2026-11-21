@@ -13,7 +13,7 @@ import {
   searchArchive,
 } from "./archive.ts";
 import { updateActionBadge } from "./badge.ts";
-import { getTabProtectedReason, isTabProtected, planEvictions } from "./eviction.ts";
+import { computeOpenTabActions, isTabProtected, planEvictions } from "./eviction.ts";
 import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
@@ -184,8 +184,12 @@ async function buildStatus(): Promise<StatusPayload> {
 
   for (const tab of tabs) {
     const sample = weights.get(tab.id);
-    const protectedReason = getTabProtectedReason(tab, config, sample);
-    if (protectedReason !== null) {
+    const win = windowById.get(tab.windowId);
+    const isPwa = win?.type === "app";
+    const isFocusedActive = tab.active && win?.focused === true;
+    const actions = computeOpenTabActions(tab, config, sample, isFocusedActive);
+
+    if (actions.protectedReason !== null) {
       protectedCount++;
     }
     if (tab.discarded) {
@@ -194,11 +198,6 @@ async function buildStatus(): Promise<StatusPayload> {
       loadedCount++;
     }
 
-    const win = windowById.get(tab.windowId);
-    const isPwa = win?.type === "app";
-    const isFocusedActive = tab.active && win?.focused === true;
-    const canSleep = !tab.discarded && !isInternalUrl(tab.url) && !isFocusedActive && tab.status !== "loading";
-    const canArchive = isArchivableUrl(tab.url);
     const lastActiveAt = getTabLastActiveAt(activity, tab, now);
     const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
 
@@ -209,13 +208,14 @@ async function buildStatus(): Promise<StatusPayload> {
       discarded: tab.discarded,
       kept: Boolean(tab.kept),
       idleMinutes,
-      protectedReason,
+      protectedReason: actions.protectedReason,
       weightMultiplier: sample?.weightMultiplier ?? 1.0,
       jsHeapBytes: sample ? sample.jsHeapBytes : null,
       hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
       isPwa,
-      canSleep,
-      canArchive,
+      canKeep: actions.canKeep,
+      canSleep: actions.canSleep,
+      canArchive: actions.canArchive,
     });
   }
 
@@ -357,7 +357,15 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: await deleteArchivedTab(message.id) };
     case "discard_tab":
       try {
-        await removeKeptTabId(message.tabId);
+        const [raw, config, keptIds] = await Promise.all([
+          chrome.tabs.get(message.tabId),
+          loadConfig(),
+          loadKeptTabIds(),
+        ]);
+        const summary = toTabSummary(raw, keptIds);
+        if (!summary || !computeOpenTabActions(summary, config).canSleep) {
+          return { ok: false };
+        }
         await chrome.tabs.discard(message.tabId);
         return { ok: true };
       } catch {
@@ -379,12 +387,16 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     }
     case "archive_tab": {
       try {
-        const raw = await chrome.tabs.get(message.tabId);
-        const summary = toTabSummary(raw);
-        if (!summary || !isArchivableUrl(summary.url)) {
+        const [raw, config, activity, keptIds] = await Promise.all([
+          chrome.tabs.get(message.tabId),
+          loadConfig(),
+          loadActivityState(),
+          loadKeptTabIds(),
+        ]);
+        const summary = toTabSummary(raw, keptIds);
+        if (!summary || !computeOpenTabActions(summary, config).canArchive) {
           return { ok: false };
         }
-        const [config, activity] = await Promise.all([loadConfig(), loadActivityState()]);
         const archived = await archiveTabs([summary], activity, config, Date.now());
         await removeKeptTabId(message.tabId);
         return { ok: archived > 0 };

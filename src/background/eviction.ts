@@ -35,6 +35,56 @@ export function isTabProtected(tab: TabSummary, config: TabReaperConfig, sample?
   return getTabProtectedReason(tab, config, sample) !== null;
 }
 
+export interface OpenTabActions {
+  protectedReason: string | null;
+  canKeep: boolean;
+  canSleep: boolean;
+  canArchive: boolean;
+}
+
+/**
+ * Single source of truth for which manual actions (Keep, Sleep, Archive) are coherent
+ * with the user's protection settings for a given open tab.
+ */
+export function computeOpenTabActions(
+  tab: TabSummary,
+  config: TabReaperConfig,
+  sample?: TabWeightSample,
+  isFocusedActive = false,
+): OpenTabActions {
+  const protectedReason = getTabProtectedReason(tab, config, sample);
+  const isHttp = /^https?:\/\//i.test(tab.url);
+
+  // Protected by a config rule or browser state (Internal, Loading, Active, Audio, Pinned, Allowlist, Form):
+  // hide Keep/Sleep/Archive so manual actions never contradict active protection settings.
+  if (protectedReason !== null && protectedReason !== "Kept") {
+    return {
+      protectedReason,
+      canKeep: false,
+      canSleep: false,
+      canArchive: false,
+    };
+  }
+
+  // Explicitly kept by the user: only allow toggling Kept off until released.
+  if (protectedReason === "Kept") {
+    return {
+      protectedReason,
+      canKeep: true,
+      canSleep: false,
+      canArchive: false,
+    };
+  }
+
+  // Unprotected tab: Keep is always available; Sleep when loaded (and not focused active); Archive when http(s).
+  return {
+    protectedReason: null,
+    canKeep: true,
+    canSleep: !tab.discarded && !isFocusedActive,
+    canArchive: isHttp,
+  };
+}
+
 export interface PlanEvictionsInput {
   tabs: TabSummary[];
   activity: ActivityState;

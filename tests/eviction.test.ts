@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeBadge } from "../src/background/badge.ts";
-import { MAX_MEMORY_EVICTIONS_PER_PASS, getTabProtectedReason, isTabProtected, planEvictions } from "../src/background/eviction.ts";
+import { MAX_MEMORY_EVICTIONS_PER_PASS, computeOpenTabActions, getTabProtectedReason, isTabProtected, planEvictions } from "../src/background/eviction.ts";
 import { computeWeightMultiplier } from "../src/background/sampler.ts";
 import { createEmptyActivityState, recordTabVisit } from "../src/background/tracker.ts";
 import {
@@ -241,5 +241,55 @@ describe("action badge", () => {
 
     const sysMem: MemorySnapshot = { ...okMem, source: "system_memory" };
     expect(computeBadge(sysMem, 7, true)).toEqual({ text: "7", color: "#16a34a" });
+  });
+});
+
+describe("open tab action coherence", () => {
+  test("hides Keep, Sleep, and Archive when tab is protected by config or loading", () => {
+    const cfg = sanitizeConfig({ protectPinned: true, protectActive: true, protectAudible: true });
+    expect(computeOpenTabActions(makeTab(1, { pinned: true }), cfg)).toEqual({
+      protectedReason: "Pinned",
+      canKeep: false,
+      canSleep: false,
+      canArchive: false,
+    });
+    expect(computeOpenTabActions(makeTab(2, { active: true }), cfg)).toEqual({
+      protectedReason: "Active",
+      canKeep: false,
+      canSleep: false,
+      canArchive: false,
+    });
+    expect(computeOpenTabActions(makeTab(3, { status: "loading" }), cfg)).toEqual({
+      protectedReason: "Loading",
+      canKeep: false,
+      canSleep: false,
+      canArchive: false,
+    });
+  });
+
+  test("exposes Keep, Sleep, and Archive on pinned tab when protectPinned is disabled", () => {
+    const cfg = sanitizeConfig({ protectPinned: false });
+    expect(computeOpenTabActions(makeTab(1, { pinned: true }), cfg)).toEqual({
+      protectedReason: null,
+      canKeep: true,
+      canSleep: true,
+      canArchive: true,
+    });
+  });
+
+  test("shows only Kept toggle when user locked a tab, and Keep + Archive when sleeping", () => {
+    const cfg = sanitizeConfig({});
+    expect(computeOpenTabActions(makeTab(1, { kept: true }), cfg)).toEqual({
+      protectedReason: "Kept",
+      canKeep: true,
+      canSleep: false,
+      canArchive: false,
+    });
+    expect(computeOpenTabActions(makeTab(2, { discarded: true }), cfg)).toEqual({
+      protectedReason: null,
+      canKeep: true,
+      canSleep: false,
+      canArchive: true,
+    });
   });
 });

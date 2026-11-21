@@ -98,6 +98,7 @@ export interface OpenTabInfo {
   jsHeapBytes: number | null;
   hasUnsavedForm: boolean;
   isPwa: boolean;
+  canKeep: boolean;
   canSleep: boolean;
   canArchive: boolean;
 }

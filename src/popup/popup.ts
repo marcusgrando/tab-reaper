@@ -172,6 +172,9 @@ function renderOpenTabs(): void {
     title.textContent = tab.title || tab.url;
 
     const metaParts: string[] = [];
+    if (tab.isPwa) {
+      metaParts.push("PWA");
+    }
     if (tab.discarded) {
       metaParts.push("Sleeping");
     } else if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
@@ -192,13 +195,6 @@ function renderOpenTabs(): void {
     const right = document.createElement("div");
     right.className = "item-right";
 
-    if (tab.isPwa) {
-      const pwaPill = document.createElement("span");
-      pwaPill.className = "pill pwa";
-      pwaPill.textContent = "PWA";
-      right.appendChild(pwaPill);
-    }
-
     if (tab.protectedReason && tab.protectedReason !== "Kept") {
       const pill = document.createElement("span");
       pill.className = "pill";
@@ -206,8 +202,7 @@ function renderOpenTabs(): void {
       right.appendChild(pill);
     }
 
-    // 1. Keep toggle (lock tab in RAM so it is never discarded or archived)
-    if (tab.protectedReason !== "Internal") {
+    if (tab.canKeep) {
       const keepBtn = document.createElement("button");
       keepBtn.className = `item-action${tab.kept ? " kept" : ""}`;
       keepBtn.type = "button";
@@ -224,8 +219,7 @@ function renderOpenTabs(): void {
       right.appendChild(keepBtn);
     }
 
-    // 2. Sleep button (free RAM now, keeping tab in strip)
-    if (tab.canSleep && !tab.kept) {
+    if (tab.canSleep) {
       const sleepBtn = document.createElement("button");
       sleepBtn.className = "item-action";
       sleepBtn.type = "button";
@@ -240,7 +234,6 @@ function renderOpenTabs(): void {
       right.appendChild(sleepBtn);
     }
 
-    // 3. Archive button (save to Bookmarks + Archive and close tab)
     if (tab.canArchive) {
       const archiveBtn = document.createElement("button");
       archiveBtn.className = "item-action";
