@@ -47,10 +47,23 @@ function populateForm(config: TabReaperConfig): void {
   syncBudgetVisibility();
 }
 
+const WEIGHTED_EVICTION_PERMS: chrome.permissions.Permissions = {
+  permissions: ["scripting"],
+  origins: ["<all_urls>"],
+};
+
+function buildInstallCommand(extensionId: string): string {
+  const isWindows = /Windows/i.test(navigator.userAgent);
+  if (isWindows) {
+    return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.ps1))) ${extensionId}`;
+  }
+  return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/native-host/install.sh | bash -s -- ${extensionId}`;
+}
+
 async function refreshPermissionsUI(): Promise<void> {
   const [hasNative, hasHost] = await Promise.all([
     chrome.permissions.contains({ permissions: ["nativeMessaging"] }),
-    chrome.permissions.contains({ origins: ["<all_urls>"] }),
+    chrome.permissions.contains(WEIGHTED_EVICTION_PERMS),
   ]);
 
   btnNativePerm.textContent = hasNative ? "Revoke" : "Enable";
@@ -65,7 +78,7 @@ async function refreshPermissionsUI(): Promise<void> {
 }
 
 async function init(): Promise<void> {
-  installCmd.textContent = `./native-host/install.sh ${chrome.runtime.id}`;
+  installCmd.textContent = buildInstallCommand(chrome.runtime.id);
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
   populateForm(status.config);
   await refreshPermissionsUI();
@@ -150,11 +163,11 @@ btnNativeTest.addEventListener("click", async () => {
 });
 
 btnHostPerm.addEventListener("click", async () => {
-  const hasHost = await chrome.permissions.contains({ origins: ["<all_urls>"] });
+  const hasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
   if (hasHost) {
-    await chrome.permissions.remove({ origins: ["<all_urls>"] });
+    await chrome.permissions.remove(WEIGHTED_EVICTION_PERMS);
   } else {
-    await chrome.permissions.request({ origins: ["<all_urls>"] });
+    await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
   }
   await refreshPermissionsUI();
 });

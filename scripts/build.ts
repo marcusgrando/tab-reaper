@@ -37,7 +37,12 @@ const staticFiles: Array<[string, string]> = [
   ["src/popup/popup.css", "popup.css"],
   ["src/options/options.html", "options.html"],
   ["src/options/options.css", "options.css"],
+  ["assets/icons/icon16.png", "icons/icon16.png"],
+  ["assets/icons/icon48.png", "icons/icon48.png"],
+  ["assets/icons/icon128.png", "icons/icon128.png"],
 ];
+
+await mkdir(path.join(distDir, "icons"), { recursive: true });
 
 for (const [src, dest] of staticFiles) {
   await copyFile(path.join(root, src), path.join(distDir, dest));

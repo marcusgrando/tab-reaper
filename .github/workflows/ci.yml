@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+
+  native-host:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test native host
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test --manifest-path native-host/Cargo.toml
+      - name: Build and self-test (--once)
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo build --release --manifest-path native-host/Cargo.toml
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./native-host/target/release/tab-reaper-host.exe --once
+          else
+            ./native-host/target/release/tab-reaper-host --once
+          fi

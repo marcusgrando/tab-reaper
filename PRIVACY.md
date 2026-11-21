@@ -1,0 +1,38 @@
+# Privacy Policy — Tab Reaper
+
+**Last updated:** 2026-11-21
+
+Tab Reaper runs entirely on your device. It does not collect, transmit, sell, or share any personal data, browsing history, or telemetry with any server.
+
+## Data Stored Locally
+
+All data used by Tab Reaper stays inside your browser profile:
+
+- **Extension settings** (`chrome.storage.local`): your memory budget, tab limits, timeouts, and protected domain allowlist.
+- **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to decide when an idle tab should be discarded or archived across browser restarts.
+- **Archived tabs** (`chrome.storage.local` and `chrome.bookmarks`): titles, URLs, and favicon URLs of tabs automatically archived by Tab Reaper. Bookmarks stored in your chosen folder follow your browser's own Chrome Sync settings if you have Chrome Sync enabled.
+- **Transient weight cache** (`chrome.storage.session`): short-lived numeric metrics (JS heap size, DOM node count, media element count) cleared when Chrome closes.
+
+## Permissions
+
+### Core Permissions
+
+- `tabs`: list open tabs, discard inactive tabs to free RAM, and close tabs after archiving them.
+- `storage`: persist settings, activity timestamps, and the local archive index.
+- `alarms`: run periodic memory and idle-tab checks in the background.
+- `bookmarks`: save and remove archived tabs in your dedicated bookmark folder.
+- `system.memory`: read total and available system RAM to enforce the memory budget without external software.
+- `tabGroups`: preserve tab group metadata for archived tabs.
+
+### Optional Permissions (Off by Default)
+
+- `nativeMessaging`: connects only to the local `com.tabreaper.host` binary if you choose to install it, returning only numeric Chrome memory totals and OS RAM counters.
+- `scripting` and `<all_urls>`: used only when you opt into Weighted Eviction to read numeric `performance.memory.usedJSHeapSize`, DOM element count, and `iframe`/`canvas`/`video` counts on candidate tabs. Tab Reaper never reads page text, form inputs, cookies, or credentials.
+
+## Third Parties
+
+Tab Reaper makes zero outbound network requests and includes no analytics, crash reporters, or third-party SDKs.
+
+## Contact
+
+Questions or issues can be filed at https://github.com/marcusgrando/tab-reaper/issues.

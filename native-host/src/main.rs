@@ -201,7 +201,138 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
     })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn collect_memory_report() -> Result<MemoryReport, String> {
+    use std::ffi::c_void;
+    use std::mem::{size_of, zeroed};
+
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
+        fn Process32FirstW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> *mut c_void;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn K32GetProcessMemoryInfo(
+            process: *mut c_void,
+            ppsmem_counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut mem_status: MemoryStatusEx = zeroed();
+        mem_status.dw_length = size_of::<MemoryStatusEx>() as u32;
+        if GlobalMemoryStatusEx(&mut mem_status) == 0 {
+            return Err("GlobalMemoryStatusEx failed".to_string());
+        }
+
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot.is_null() || snapshot as isize == INVALID_HANDLE_VALUE {
+            return Err("CreateToolhelp32Snapshot failed".to_string());
+        }
+
+        let mut entry: ProcessEntry32W = zeroed();
+        entry.dw_size = size_of::<ProcessEntry32W>() as u32;
+
+        let mut chrome_bytes: u64 = 0;
+        let mut process_count: usize = 0;
+
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let nul_pos = entry
+                    .sz_exe_file
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.sz_exe_file.len());
+                let exe_name = String::from_utf16_lossy(&entry.sz_exe_file[..nul_pos]);
+
+                if is_windows_chrome_exe(&exe_name) {
+                    let proc_handle =
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32_process_id);
+                    if !proc_handle.is_null() {
+                        let mut counters: ProcessMemoryCounters = zeroed();
+                        counters.cb = size_of::<ProcessMemoryCounters>() as u32;
+                        if K32GetProcessMemoryInfo(proc_handle, &mut counters, counters.cb) != 0 {
+                            chrome_bytes =
+                                chrome_bytes.saturating_add(counters.working_set_size as u64);
+                            process_count += 1;
+                        }
+                        CloseHandle(proc_handle);
+                    }
+                }
+
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snapshot);
+
+        Ok(MemoryReport {
+            chrome_bytes,
+            process_count,
+            system_total_bytes: mem_status.ull_total_phys,
+            system_available_bytes: mem_status.ull_avail_phys,
+            metric: "rss",
+        })
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_chrome_exe(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "chrome.exe" | "chromium.exe" | "brave.exe")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn collect_memory_report() -> Result<MemoryReport, String> {
     Err(format!("unsupported platform: {}", env::consts::OS))
 }
@@ -390,5 +521,15 @@ mod tests {
    12000 /Users/dev/.local/bin/tab-reaper-host\n\
    90000 /usr/bin/vim\n";
         assert_eq!(parse_macos_ps_chrome(ps), (430_000 * 1024, 2));
+    }
+
+    #[test]
+    fn matches_windows_chrome_executables() {
+        assert!(is_windows_chrome_exe("chrome.exe"));
+        assert!(is_windows_chrome_exe("Chrome.EXE"));
+        assert!(is_windows_chrome_exe("brave.exe"));
+        assert!(is_windows_chrome_exe("chromium.exe"));
+        assert!(!is_windows_chrome_exe("tab-reaper-host.exe"));
+        assert!(!is_windows_chrome_exe("notepad.exe"));
     }
 }

@@ -20,7 +20,10 @@ export function computeWeightMultiplier(metrics: RawPageMetrics): number {
 
 export async function hasHostAccessPermission(): Promise<boolean> {
   try {
-    return await chrome.permissions.contains({ origins: ["<all_urls>"] });
+    return await chrome.permissions.contains({
+      permissions: ["scripting"],
+      origins: ["<all_urls>"],
+    });
   } catch {
     return false;
   }
@@ -71,6 +74,7 @@ export async function sampleTabWeights(
 }
 
 async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSample | null> {
+  if (!chrome.scripting?.executeScript) return null;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },

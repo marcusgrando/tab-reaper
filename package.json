@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "icons": "bun run scripts/generate-icons.ts",
+    "package": "bun run build && rm -f dist/tab-reaper-extension.zip && (cd dist && zip -qr tab-reaper-extension.zip .)",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo test --manifest-path native-host/Cargo.toml",

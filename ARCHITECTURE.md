@@ -10,7 +10,7 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 
 | Requirement | Mechanism | Status | Hard Platform Limit |
 | --- | --- | --- | --- |
-| Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux) or `ps` (macOS). **Fallback (extension-only):** `chrome.system.memory` OS pressure (`availableCapacity`). | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
+| Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `ps` (macOS), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** `chrome.system.memory` OS pressure (`availableCapacity`). | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
 | Keep at most `X` loaded tabs (default `10`) | Event-driven `chrome.tabs.discard()` on `onActivated` / `onCreated` + `chrome.alarms` sweep. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
 | Evict heaviest tabs first | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) fall back to LRU. |
 | Fast, low-memory Chrome startup | Auto-archive keeps open tab count low. `chrome.runtime.onStartup` immediately discards non-protected background tabs. Zero permanent `content_scripts` in manifest. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
@@ -104,11 +104,11 @@ Archived tabs live in two synchronized places:
 
 ## Permissions and Distribution
 
-- **Core permissions:** `tabs`, `storage`, `alarms`, `bookmarks`, `system.memory`, `tabGroups`, `scripting`.
+- **Core permissions:** `tabs`, `storage`, `alarms`, `bookmarks`, `system.memory`, `tabGroups`.
 - **Optional permissions (single-codebase Chrome Web Store compatibility):**
-  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting via the local Rust host binary (`native-host/`). Users who do not install the native host automatically run in System Memory fallback mode.
+  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand tab weight sampling.
   - `optional_host_permissions`: `<all_urls>` for on-demand tab weight sampling. Users who skip granting page access fall back to pure LRU ordering.
-  - Both optional permissions can be toggled with one click on the Options page, avoiding broad install-time permission warnings on the Chrome Web Store.
+  - Both optional capabilities can be toggled with one click on the Options page, avoiding broad install-time permission warnings on the Chrome Web Store.
 
 ## Configuration Defaults
 
