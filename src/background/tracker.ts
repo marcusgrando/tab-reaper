@@ -2,12 +2,30 @@ import { createAsyncQueue, isInternalUrl, normalizeUrl } from "../shared/config.
 import type { ActivityState, TabSummary } from "../shared/types.ts";
 
 export const ACTIVITY_STORAGE_KEY = "tabReaper.activity";
+/**
+ * URL history lives under its own key because it is only read to rebuild recency
+ * after Chrome reassigns tab ids. Tab switches rewrite the small per-tab record;
+ * the history is rewritten only when a tab closes or Chrome restarts.
+ */
+export const URL_HISTORY_STORAGE_KEY = "tabReaper.activityByUrl";
 export const KEPT_TABS_STORAGE_KEY = "tabReaper.keptTabIds";
 export const enqueueActivityUpdate = createAsyncQueue();
 const MAX_TRACKED_URLS = 2000;
+/** Hash-state URLs can reach megabytes. They rank as "now" after a restart instead of bloating storage. */
+const MAX_TRACKED_URL_LENGTH = 4096;
 
 export function createEmptyActivityState(): ActivityState {
   return { byTabId: {}, byUrl: {}, activeByWindow: {} };
+}
+
+function trackedUrl(url: string | undefined): string {
+  if (!url) return "";
+  if (url.length > MAX_TRACKED_URL_LENGTH) return "";
+  return isInternalUrl(url) ? url : normalizeUrl(url);
+}
+
+function isRestorableUrl(url: string): boolean {
+  return url !== "" && !isInternalUrl(url);
 }
 
 export function recordTabVisit(
@@ -17,9 +35,7 @@ export function recordTabVisit(
   now: number,
   windowId?: number,
 ): ActivityState {
-  const normalized = url && !isInternalUrl(url) ? normalizeUrl(url) : url ?? "";
   const nextByTabId = { ...state.byTabId };
-  const nextByUrl = { ...state.byUrl };
   const nextActiveByWindow = { ...(state.activeByWindow ?? {}) };
 
   if (typeof windowId === "number") {
@@ -30,34 +46,35 @@ export function recordTabVisit(
       const prevRecord = nextByTabId[prevKey];
       if (prevRecord) {
         nextByTabId[prevKey] = { ...prevRecord, lastActiveAt: now };
-        if (prevRecord.url && !isInternalUrl(prevRecord.url)) {
-          nextByUrl[prevRecord.url] = now;
-        }
       }
     }
     nextActiveByWindow[winKey] = tabId;
   }
 
-  nextByTabId[String(tabId)] = { url: normalized, lastActiveAt: now };
-  if (normalized && !isInternalUrl(normalized)) {
-    nextByUrl[normalized] = now;
-  }
-  return pruneUrlHistory({ byTabId: nextByTabId, byUrl: nextByUrl, activeByWindow: nextActiveByWindow });
+  nextByTabId[String(tabId)] = { url: trackedUrl(url), lastActiveAt: now };
+  return { byTabId: nextByTabId, byUrl: state.byUrl, activeByWindow: nextActiveByWindow };
 }
 
 export function removeTrackedTab(state: ActivityState, tabId: number): ActivityState {
   const key = String(tabId);
-  const hasTab = key in state.byTabId;
+  const record = state.byTabId[key];
   const activeByWindow = state.activeByWindow ?? {};
   const staleWindowKeys = Object.entries(activeByWindow)
     .filter(([, activeId]) => activeId === tabId)
     .map(([winKey]) => winKey);
 
-  if (!hasTab && staleWindowKeys.length === 0) return state;
+  if (!record && staleWindowKeys.length === 0) return state;
 
-  const nextByTabId = hasTab ? { ...state.byTabId } : state.byTabId;
-  if (hasTab) {
+  let nextByTabId = state.byTabId;
+  let nextByUrl = state.byUrl;
+  if (record) {
+    nextByTabId = { ...state.byTabId };
     delete nextByTabId[key];
+    // Closing a window fires onRemoved for each tab, and "reopen closed window"
+    // brings them back with new ids, so their recency moves to the URL history.
+    if (isRestorableUrl(record.url) && (nextByUrl[record.url] ?? 0) < record.lastActiveAt) {
+      nextByUrl = { ...nextByUrl, [record.url]: record.lastActiveAt };
+    }
   }
 
   let nextActiveByWindow = activeByWindow;
@@ -68,12 +85,15 @@ export function removeTrackedTab(state: ActivityState, tabId: number): ActivityS
     }
   }
 
-  return { byTabId: nextByTabId, byUrl: state.byUrl, activeByWindow: nextActiveByWindow };
+  return pruneUrlHistory({ byTabId: nextByTabId, byUrl: nextByUrl, activeByWindow: nextActiveByWindow });
 }
 
 /**
- * Keeps active tabs' timestamps fresh during periodic sweeps and bootstraps
- * missing activeByWindow entries (for example after an extension reload).
+ * Drops window entries for closed tabs and bootstraps missing activeByWindow
+ * entries and tab records (for example after an extension reload). It does not
+ * restamp tracked active tabs: getTabLastActiveAt ranks an active tab as "now",
+ * and recordTabVisit stamps it when the user leaves it. Returning the same state
+ * when nothing changed lets periodic sweeps skip the storage write.
  * Never overwrites an already-tracked window entry so a stale tab snapshot
  * cannot clobber a concurrent tab switch.
  */
@@ -87,7 +107,6 @@ export function syncActiveTabs(
 
   let changed = false;
   const nextByTabId = { ...state.byTabId };
-  const nextByUrl = { ...state.byUrl };
   const nextActiveByWindow = { ...existingActiveByWindow };
 
   for (const [winKey, activeId] of Object.entries(nextActiveByWindow)) {
@@ -106,25 +125,17 @@ export function syncActiveTabs(
     }
     if (nextActiveByWindow[winKey] !== tab.id) continue;
 
-    const normalized = tab.url && !isInternalUrl(tab.url) ? normalizeUrl(tab.url) : tab.url ?? "";
+    const url = trackedUrl(tab.url);
     const key = String(tab.id);
     const existing = nextByTabId[key];
-    const nextTimestamp = Math.max(existing?.lastActiveAt ?? 0, now);
-    if (!existing || existing.url !== normalized || existing.lastActiveAt !== nextTimestamp) {
-      nextByTabId[key] = { url: normalized, lastActiveAt: nextTimestamp };
+    if (!existing || existing.url !== url) {
+      nextByTabId[key] = { url, lastActiveAt: Math.max(existing?.lastActiveAt ?? 0, now) };
       changed = true;
-    }
-    if (normalized && !isInternalUrl(normalized)) {
-      const nextUrlTimestamp = Math.max(nextByUrl[normalized] ?? 0, now);
-      if (nextByUrl[normalized] !== nextUrlTimestamp) {
-        nextByUrl[normalized] = nextUrlTimestamp;
-        changed = true;
-      }
     }
   }
 
   if (!changed) return state;
-  return pruneUrlHistory({ byTabId: nextByTabId, byUrl: nextByUrl, activeByWindow: nextActiveByWindow });
+  return { byTabId: nextByTabId, byUrl: state.byUrl, activeByWindow: nextActiveByWindow };
 }
 
 /**
@@ -141,25 +152,32 @@ export function reconcileActivityOnStartup(
   const nextByUrl: ActivityState["byUrl"] = { ...state.byUrl };
   const nextActiveByWindow: Record<string, number> = {};
 
+  // Chrome can quit without tabs.onRemoved, leaving the last session's recency only in byTabId.
+  for (const record of Object.values(state.byTabId)) {
+    if (isRestorableUrl(record.url) && (nextByUrl[record.url] ?? 0) < record.lastActiveAt) {
+      nextByUrl[record.url] = record.lastActiveAt;
+    }
+  }
+
   for (const tab of openTabs) {
-    const normalized = tab.url && !isInternalUrl(tab.url) ? normalizeUrl(tab.url) : tab.url ?? "";
+    const url = trackedUrl(tab.url);
     const existingById = state.byTabId[String(tab.id)];
 
     let lastActiveAt: number;
     if (tab.active) {
       lastActiveAt = now;
       nextActiveByWindow[String(tab.windowId)] = tab.id;
-    } else if (existingById && existingById.url === normalized) {
+    } else if (existingById && existingById.url === url) {
       lastActiveAt = existingById.lastActiveAt;
-    } else if (normalized && normalized in state.byUrl) {
-      lastActiveAt = state.byUrl[normalized]!;
+    } else if (isRestorableUrl(url) && url in nextByUrl) {
+      lastActiveAt = nextByUrl[url]!;
     } else {
       lastActiveAt = now;
     }
 
-    nextByTabId[String(tab.id)] = { url: normalized, lastActiveAt };
-    if (normalized && !isInternalUrl(normalized)) {
-      nextByUrl[normalized] = lastActiveAt;
+    nextByTabId[String(tab.id)] = { url, lastActiveAt };
+    if (isRestorableUrl(url)) {
+      nextByUrl[url] = lastActiveAt;
     }
   }
 
@@ -174,8 +192,9 @@ export function getTabLastActiveAt(
   if (tab.active) return now;
   const byId = state.byTabId[String(tab.id)];
   if (byId) return byId.lastActiveAt;
-  if (tab.url && !isInternalUrl(tab.url)) {
-    const byUrl = state.byUrl[normalizeUrl(tab.url)];
+  const url = trackedUrl(tab.url);
+  if (isRestorableUrl(url)) {
+    const byUrl = state.byUrl[url];
     if (typeof byUrl === "number") return byUrl;
   }
   return now;
@@ -190,14 +209,19 @@ function pruneUrlHistory(state: ActivityState): ActivityState {
   return { byTabId: state.byTabId, byUrl: kept, activeByWindow: state.activeByWindow };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export async function loadActivityState(): Promise<ActivityState> {
-  const result = await chrome.storage.local.get(ACTIVITY_STORAGE_KEY);
-  const raw = result[ACTIVITY_STORAGE_KEY] as ActivityState | undefined;
-  if (!raw || typeof raw !== "object") {
-    return createEmptyActivityState();
+  const result = await chrome.storage.local.get([ACTIVITY_STORAGE_KEY, URL_HISTORY_STORAGE_KEY]);
+  const raw = result[ACTIVITY_STORAGE_KEY] as Partial<ActivityState> | undefined;
+  const storedByUrl = result[URL_HISTORY_STORAGE_KEY];
+  const byUrl = isRecord(storedByUrl) ? storedByUrl : {};
+  if (!isRecord(raw)) {
+    return { ...createEmptyActivityState(), byUrl: byUrl as ActivityState["byUrl"] };
   }
-  const rawActiveByWindow =
-    raw.activeByWindow && typeof raw.activeByWindow === "object" ? raw.activeByWindow : {};
+  const rawActiveByWindow = isRecord(raw.activeByWindow) ? raw.activeByWindow : {};
   const activeByWindow: Record<string, number> = {};
   for (const [winKey, tabId] of Object.entries(rawActiveByWindow)) {
     if (typeof tabId === "number" && Number.isFinite(tabId)) {
@@ -205,14 +229,24 @@ export async function loadActivityState(): Promise<ActivityState> {
     }
   }
   return {
-    byTabId: raw.byTabId && typeof raw.byTabId === "object" ? raw.byTabId : {},
-    byUrl: raw.byUrl && typeof raw.byUrl === "object" ? raw.byUrl : {},
+    byTabId: isRecord(raw.byTabId) ? (raw.byTabId as ActivityState["byTabId"]) : {},
+    byUrl: byUrl as ActivityState["byUrl"],
     activeByWindow,
   };
 }
 
-export async function saveActivityState(state: ActivityState): Promise<void> {
-  await chrome.storage.local.set({ [ACTIVITY_STORAGE_KEY]: state });
+/**
+ * Persists the per-tab records, and the URL history only when it differs from
+ * `previous` (the state this one was derived from). Without `previous` both are written.
+ */
+export async function saveActivityState(state: ActivityState, previous?: ActivityState): Promise<void> {
+  const items: Record<string, unknown> = {
+    [ACTIVITY_STORAGE_KEY]: { byTabId: state.byTabId, activeByWindow: state.activeByWindow ?? {} },
+  };
+  if (!previous || previous.byUrl !== state.byUrl) {
+    items[URL_HISTORY_STORAGE_KEY] = state.byUrl;
+  }
+  await chrome.storage.local.set(items);
 }
 
 export async function loadKeptTabIds(): Promise<Set<number>> {

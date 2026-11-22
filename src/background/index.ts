@@ -189,7 +189,7 @@ async function runSweep(
           ? reconcileActivityOnStartup(loaded, tabs, now)
           : syncActiveTabs(loaded, tabs, now);
       if (mode === "startup" || activity !== loaded) {
-        await saveActivityState(activity);
+        await saveActivityState(activity, loaded);
       }
     });
 
@@ -393,8 +393,8 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const url = tab.url ?? tab.pendingUrl;
     await activeCacheUpdate;
     await enqueueActivityUpdate(async () => {
-      const state = recordTabVisit(await loadActivityState(), tabId, url, Date.now(), windowId);
-      await saveActivityState(state);
+      const loaded = await loadActivityState();
+      await saveActivityState(recordTabVisit(loaded, tabId, url, Date.now(), windowId), loaded);
     });
     await runSweep("sweep", { periodic: false });
   } catch {
@@ -410,7 +410,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   await enqueueActivityUpdate(async () => {
     const [activity, keptIds] = await Promise.all([loadActivityState(), loadKeptTabIds()]);
     const state = recordTabVisit(activity, tabId, url, Date.now(), activeWindowId);
-    await saveActivityState(state);
+    await saveActivityState(state, activity);
     const summary = toTabSummary(tab, keptIds);
     if (summary) await cacheWindowTabs([summary], true);
   });
@@ -429,8 +429,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (tab.active) {
       const nextUrl = changeInfo.url;
       await enqueueActivityUpdate(async () => {
-        const state = recordTabVisit(await loadActivityState(), tabId, nextUrl, Date.now(), tab.windowId);
-        await saveActivityState(state);
+        const loaded = await loadActivityState();
+        await saveActivityState(recordTabVisit(loaded, tabId, nextUrl, Date.now(), tab.windowId), loaded);
       });
     }
   }
@@ -459,8 +459,9 @@ chrome.tabs.onAttached.addListener((tabId) =>
 chrome.tabs.onRemoved.addListener(async (tabId, info) => {
   await enqueueActivityUpdate(async () => {
     if (!info.isWindowClosing) await forgetWindowTab(info.windowId, tabId);
-    const state = removeTrackedTab(await loadActivityState(), tabId);
-    await saveActivityState(state);
+    const loaded = await loadActivityState();
+    const state = removeTrackedTab(loaded, tabId);
+    if (state !== loaded) await saveActivityState(state, loaded);
     await removeKeptTabId(tabId);
   });
 });

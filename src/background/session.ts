@@ -764,11 +764,12 @@ export async function restoreSessionSnapshot(
 
       if (createdRecords.length > 0) {
         const now = Date.now();
-        let activity = await loadActivityState();
+        const loaded = await loadActivityState();
+        let activity = loaded;
         for (const rec of createdRecords) {
           activity = recordTabVisit(activity, rec.id, rec.url, now);
         }
-        await saveActivityState(activity);
+        await saveActivityState(activity, loaded);
       }
     });
 

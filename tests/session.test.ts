@@ -43,7 +43,8 @@ describe("session snapshots and recovery", () => {
     (globalThis as unknown as { chrome: unknown }).chrome = {
       storage: {
         local: {
-          get: async (key: string) => ({ [key]: storageData[key] }),
+          get: async (keys: string | string[]) =>
+            Object.fromEntries([keys].flat().map((key) => [key, storageData[key]])),
           set: async (obj: Record<string, unknown>) => {
             Object.assign(storageData, obj);
           },

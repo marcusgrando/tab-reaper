@@ -6,7 +6,7 @@ async function worker() {
   const listeners: Record<string, Listener> = {};
   const event = (name: string) => ({ addListener(fn: Listener) { listeners[name] = fn; } });
   const area = (data: Record<string, unknown>) => ({
-    get: async (key: string) => ({ [key]: data[key] }),
+    get: async (keys: string | string[]) => Object.fromEntries([keys].flat().map((key) => [key, data[key]])),
     set: async (changes: Record<string, unknown>) => Object.assign(data, changes),
     remove: async (key: string) => { delete data[key]; },
   });
@@ -140,7 +140,7 @@ test("Keep acknowledged during restore survives the merge of restored tab IDs", 
     const get = chrome.storage.local.get.bind(chrome.storage.local);
     let reads = 0;
     let toggle: Promise<unknown> | undefined;
-    Object.assign(chrome.storage.local, { get: async (k: string) => {
+    Object.assign(chrome.storage.local, { get: async (k: string | string[]) => {
       const snapshot = await get(k);
       if (k === key && ++reads === 2) {
         toggle = message({ type: "toggle_keep_tab", tabId: 2 });

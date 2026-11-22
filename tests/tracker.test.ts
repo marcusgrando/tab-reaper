@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { planEvictions } from "../src/background/eviction.ts";
 import {
+  ACTIVITY_STORAGE_KEY,
+  URL_HISTORY_STORAGE_KEY,
   createEmptyActivityState,
   getTabLastActiveAt,
+  loadActivityState,
   reconcileActivityOnStartup,
   recordTabVisit,
   removeTrackedTab,
+  saveActivityState,
   syncActiveTabs,
 } from "../src/background/tracker.ts";
 import { sanitizeConfig } from "../src/shared/config.ts";
@@ -144,7 +148,7 @@ describe("active tab deactivation tracking", () => {
     expect(state.activeByWindow?.["2"]).toBe(11);
   });
 
-  test("syncActiveTabs bootstraps missing activeByWindow entries and refreshes active tab timestamps", () => {
+  test("syncActiveTabs bootstraps missing activeByWindow entries without restamping tracked tabs", () => {
     const state = {
       activeByWindow: {},
       byTabId: {
@@ -165,7 +169,104 @@ describe("active tab deactivation tracking", () => {
     const tSweep = t0 + 20 * min;
     const synced = syncActiveTabs(state, tabs, tSweep);
     expect(synced.activeByWindow?.["1"]).toBe(1);
-    expect(synced.byTabId["1"]?.lastActiveAt).toBe(tSweep);
-    expect(synced.byTabId["2"]?.lastActiveAt).toBe(t0);
+    // The active tab ranks as "now" through getTabLastActiveAt and is stamped when the user leaves it.
+    expect(synced.byTabId["1"]?.lastActiveAt).toBe(t0);
+    expect(getTabLastActiveAt(synced, tabs[0]!, tSweep)).toBe(tSweep);
+    expect(synced.byUrl).toBe(state.byUrl);
+  });
+
+  test("syncActiveTabs returns the same state when only time has passed, so an idle sweep writes nothing", () => {
+    let state = createEmptyActivityState();
+    state = recordTabVisit(state, 1, "https://a.example.com", t0, 1);
+    state = recordTabVisit(state, 2, "https://b.example.com", t0 + min);
+
+    const tabs = [
+      makeTab(1, { url: "https://a.example.com", active: true, windowId: 1 }),
+      makeTab(2, { url: "https://b.example.com", windowId: 1 }),
+    ];
+    expect(syncActiveTabs(state, tabs, t0 + 60 * min)).toBe(state);
+  });
+
+  test("tab visits leave the URL history untouched until the tab closes", () => {
+    let state = createEmptyActivityState();
+    state = recordTabVisit(state, 1, "https://a.example.com", t0, 1);
+    const byUrlBeforeSwitch = state.byUrl;
+    state = recordTabVisit(state, 2, "https://b.example.com", t0 + 5 * min, 1);
+    expect(state.byUrl).toBe(byUrlBeforeSwitch);
+
+    state = removeTrackedTab(state, 1);
+    expect(state.byUrl["https://a.example.com"]).toBe(t0 + 5 * min);
+  });
+
+  test("restart reconciliation keeps recency for tabs that were open when Chrome quit", () => {
+    // Chrome quits without tabs.onRemoved, so the previous session's records are only in byTabId.
+    let state = createEmptyActivityState();
+    state = recordTabVisit(state, 1, "https://old.example.com", t0, 1);
+    state = recordTabVisit(state, 2, "https://recent.example.com", t0 + 10 * min, 1);
+    state = recordTabVisit(state, 3, "https://current.example.com", t0 + 20 * min, 1);
+
+    const restartAt = t0 + 24 * 60 * min;
+    const restored = [
+      makeTab(101, { url: "https://old.example.com" }),
+      makeTab(102, { url: "https://recent.example.com" }),
+      makeTab(103, { url: "https://current.example.com", active: true }),
+    ];
+    const reconciled = reconcileActivityOnStartup(state, restored, restartAt);
+    expect(getTabLastActiveAt(reconciled, restored[0]!, restartAt)).toBe(t0 + 10 * min);
+    expect(getTabLastActiveAt(reconciled, restored[1]!, restartAt)).toBe(t0 + 20 * min);
+    expect(getTabLastActiveAt(reconciled, restored[2]!, restartAt)).toBe(restartAt);
+  });
+
+  test("does not persist oversized URLs", () => {
+    const huge = `https://app.example.com/#${"x".repeat(10_000)}`;
+    let state = createEmptyActivityState();
+    state = recordTabVisit(state, 1, huge, t0, 1);
+    state = recordTabVisit(state, 2, "https://b.example.com", t0 + min, 1);
+    state = removeTrackedTab(state, 1);
+    expect(JSON.stringify(state).length).toBeLessThan(1_000);
+  });
+});
+
+describe("activity persistence", () => {
+  const t0 = 1_700_000_000_000;
+
+  function installStorage(initial: Record<string, unknown> = {}) {
+    const data: Record<string, unknown> = { ...initial };
+    const writes: string[][] = [];
+    const previous = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: async (keys: string | string[]) =>
+            Object.fromEntries(
+              [keys].flat().filter((key) => key in data).map((key) => [key, structuredClone(data[key])]),
+            ),
+          set: async (items: Record<string, unknown>) => {
+            writes.push(Object.keys(items));
+            Object.assign(data, structuredClone(items));
+          },
+        },
+      },
+    };
+    return { data, writes, restore: () => ((globalThis as { chrome?: unknown }).chrome = previous) };
+  }
+
+  test("writes the URL history only when it changed", async () => {
+    const storage = installStorage();
+    try {
+      const loaded = await loadActivityState();
+      const visited = recordTabVisit(loaded, 1, "https://a.example.com", t0, 1);
+      await saveActivityState(visited, loaded);
+      expect(storage.writes.at(-1)).toEqual([ACTIVITY_STORAGE_KEY]);
+
+      const closed = removeTrackedTab(visited, 1);
+      await saveActivityState(closed, visited);
+      expect(storage.writes.at(-1)?.sort()).toEqual([ACTIVITY_STORAGE_KEY, URL_HISTORY_STORAGE_KEY].sort());
+
+      const reloaded = await loadActivityState();
+      expect(reloaded.byUrl["https://a.example.com"]).toBe(t0);
+    } finally {
+      storage.restore();
+    }
   });
 });
