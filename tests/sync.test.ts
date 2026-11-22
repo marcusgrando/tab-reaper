@@ -418,7 +418,13 @@ describe("multi-device single-writer folder sync integration", () => {
         schemaVersion: 2,
         updatedAt: now,
         deviceId: "dev-z",
-        config: { ...DEFAULT_CONFIG, memoryBudgetGb: 77, discardAfterMinutes: 15, snapshotIntervalMinutes: 1440 },
+        config: {
+          ...DEFAULT_CONFIG,
+          memoryBudgetMode: "fixed_gb",
+          memoryBudgetGb: 77,
+          discardAfterMinutes: 15,
+          snapshotIntervalMinutes: 1440,
+        },
       }),
     );
 
@@ -431,7 +437,9 @@ describe("multi-device single-writer folder sync integration", () => {
     );
     expect(pullRes.updated).toBe(true);
     expect(applied).not.toHaveProperty("discardAfterMinutes");
-    expect(applied!.memoryBudgetGb).toBe(77);
+    // A GB budget sized for another machine's RAM must not apply here.
+    expect(applied!.memoryBudgetMode).toBe("fraction");
+    expect(applied!.memoryBudgetGb).toBe(10);
     expect(applied!.snapshotIntervalMinutes).toBe(1440);
 
     // The next sync publishes settings edited offline.

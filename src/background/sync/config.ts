@@ -12,6 +12,16 @@ import {
 } from "./client.ts";
 
 const CONFIG_VERSION_KEY = "tabReaper.configVersion";
+/** A GB budget sized for one machine's RAM can disable discarding on a smaller one, so it stays per device. */
+const DEVICE_LOCAL_KEYS = ["memoryBudgetMode", "memoryBudgetGb"] as const;
+
+function withDeviceLocalSettings(synced: TabReaperConfig, local: TabReaperConfig): TabReaperConfig {
+  const merged = { ...synced };
+  for (const key of DEVICE_LOCAL_KEYS) {
+    Object.assign(merged, { [key]: local[key] });
+  }
+  return merged;
+}
 
 interface ConfigVersion {
   updatedAt: number;
@@ -82,8 +92,9 @@ export function pullConfigFromSync(
     const local: SyncedConfigEnvelope = {
       schemaVersion: 2, updatedAt: version.updatedAt, deviceId: version.deviceId || identity.deviceId, config,
     };
-    const winner = resolveLatestConfig([local, ...remote])!;
-    const updated = winner !== local;
+    const latest = resolveLatestConfig([local, ...remote])!;
+    const winner = { ...latest, config: withDeviceLocalSettings(latest.config, config) };
+    const updated = latest !== local;
     if (updated) {
       await applyConfig(winner.config);
       await setLocalConfigVersion({ updatedAt: winner.updatedAt, deviceId: winner.deviceId });
