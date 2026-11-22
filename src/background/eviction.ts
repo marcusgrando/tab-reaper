@@ -1,7 +1,6 @@
 import { isInternalUrl, matchesAllowlist } from "../shared/config.ts";
 import type {
   ActivityState,
-  EvictionCandidate,
   MemorySnapshot,
   TabReaperConfig,
   TabSummary,
@@ -101,7 +100,7 @@ export interface PlanEvictionsInput {
   maxEvictions?: number;
 }
 
-export function planEvictions(input: PlanEvictionsInput): EvictionCandidate[] {
+export function planEvictions(input: PlanEvictionsInput): TabSummary[] {
   const {
     tabs,
     activity,
@@ -122,71 +121,29 @@ export function planEvictions(input: PlanEvictionsInput): EvictionCandidate[] {
   if (eligibleLoaded.length === 0) return [];
 
   if (mode === "startup") {
-    return eligibleLoaded.map((tab) => ({
-      tab,
-      idleMinutes: 0,
-      weightMultiplier: 1.0,
-      score: 1.0,
-      reason: "startup" as const,
-    }));
+    return eligibleLoaded;
   }
 
   const idleThreshold = config.idleEvictionPercent / 100;
   const sizeThreshold = Math.max(idleThreshold, config.sizeEvictionPercent / 100);
   const usageRatio = memory && memory.budgetBytes > 0 ? memory.usedBytes / memory.budgetBytes : 0;
 
-  // Below idleEvictionPercent of memory budget: never discard tabs.
-  if (!memory?.overBudget && usageRatio < idleThreshold) {
-    return [];
-  }
+  if (usageRatio < idleThreshold) return [];
 
-  const metrics = eligibleLoaded.map((tab) => {
-    const lastActiveAt = getTabLastActiveAt(activity, tab, now);
-    const idleMinutes = Math.max(0.05, (now - lastActiveAt) / 60_000);
-    const sample = weights.get(tab.id);
-    const weightMultiplier = sample?.weightMultiplier ?? 1.0;
-    const jsHeapBytes = sample?.jsHeapBytes ?? 0;
-    const score = Number((idleMinutes * weightMultiplier).toFixed(4));
-    return { tab, idleMinutes, weightMultiplier, jsHeapBytes, score };
+  const bySize = usageRatio >= sizeThreshold && weights.size > 0;
+  const candidates = eligibleLoaded.map(tab => ({
+    tab,
+    lastActiveAt: getTabLastActiveAt(activity, tab, now),
+    sample: weights.get(tab.id),
+  }));
+  candidates.sort((a, b) => {
+    if (bySize) {
+      const heapDifference = (b.sample?.jsHeapBytes ?? 0) - (a.sample?.jsHeapBytes ?? 0);
+      if (heapDifference) return heapDifference;
+      const weightDifference = (b.sample?.weightMultiplier ?? 1) - (a.sample?.weightMultiplier ?? 1);
+      if (weightDifference) return weightDifference;
+    }
+    return a.lastActiveAt - b.lastActiveAt;
   });
-
-  // At or above sizeEvictionPercent (or overBudget): discard heaviest tabs first when samples exist, otherwise oldest idle.
-  if (Boolean(memory?.overBudget) || usageRatio >= sizeThreshold) {
-    const ordered = [...metrics].sort((a, b) => {
-      if (weights.size > 0) {
-        if ((a.jsHeapBytes > 0 || b.jsHeapBytes > 0) && b.jsHeapBytes !== a.jsHeapBytes) {
-          return b.jsHeapBytes - a.jsHeapBytes;
-        }
-        if (b.weightMultiplier !== a.weightMultiplier) {
-          return b.weightMultiplier - a.weightMultiplier;
-        }
-      }
-      return b.idleMinutes - a.idleMinutes;
-    });
-
-    return ordered.slice(0, maxEvictions).map(({ tab, idleMinutes, weightMultiplier, score }) => ({
-      tab,
-      idleMinutes,
-      weightMultiplier,
-      score,
-      reason: "over_memory_budget" as const,
-    }));
-  }
-
-  // Between idleEvictionPercent and sizeEvictionPercent: discard oldest idle tabs first.
-  if (config.discardAfterMinutes <= 0) {
-    return [];
-  }
-
-  const byOldestIdle = [...metrics].sort((a, b) => b.idleMinutes - a.idleMinutes);
-  return byOldestIdle
-    .filter((item) => item.idleMinutes >= config.discardAfterMinutes)
-    .slice(0, maxEvictions)
-    .map(({ tab, idleMinutes, weightMultiplier, score }) => ({
-      tab,
-      idleMinutes,
-      weightMultiplier,
-      score,
-      reason: "idle_timeout" as const,
-    }));
+  return candidates.slice(0, maxEvictions).map(candidate => candidate.tab);
 }

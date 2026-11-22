@@ -1,6 +1,6 @@
 {
   "name": "tab-reaper",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,12 +9,14 @@
     "package": "bun run build && rm -f dist/tab-reaper-extension.zip && (cd dist && zip -qr tab-reaper-extension.zip .)",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:ui": "bun run build && bun tests/extension-ui.ts",
     "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo test --manifest-path native-host/Cargo.toml",
     "build:host": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo build --release --manifest-path native-host/Cargo.toml"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/chrome": "^0.0.287",
+    "playwright-core": "1.65.1",
     "typescript": "^5.7.0"
   }
 }

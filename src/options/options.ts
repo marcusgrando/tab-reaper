@@ -18,7 +18,6 @@ const memoryFraction = document.getElementById("memory-fraction") as HTMLInputEl
 const memoryGb = document.getElementById("memory-gb") as HTMLInputElement;
 const idleEvictionPercent = document.getElementById("idle-eviction-percent") as HTMLInputElement;
 const sizeEvictionPercent = document.getElementById("size-eviction-percent") as HTMLInputElement;
-const discardMinutes = document.getElementById("discard-minutes") as HTMLInputElement;
 const startupSweep = document.getElementById("startup-sweep") as HTMLInputElement;
 const protectActive = document.getElementById("protect-active") as HTMLInputElement;
 const protectAudible = document.getElementById("protect-audible") as HTMLInputElement;
@@ -159,11 +158,6 @@ const fieldSpecs: FieldSpecs = {
     DEFAULT_CONFIG.sizeEvictionPercent,
     `${DEFAULT_CONFIG.sizeEvictionPercent}%`,
   ),
-  discardAfterMinutes: numberField(
-    discardMinutes,
-    DEFAULT_CONFIG.discardAfterMinutes,
-    `${DEFAULT_CONFIG.discardAfterMinutes} min`,
-  ),
   startupSweep: boolField(startupSweep, DEFAULT_CONFIG.startupSweep),
   protectActive: boolField(protectActive, DEFAULT_CONFIG.protectActive),
   protectAudible: boolField(protectAudible, DEFAULT_CONFIG.protectAudible),
@@ -285,13 +279,13 @@ async function refreshPermissionsUI(): Promise<void> {
   ]);
 
   btnNativePerm.textContent = hasNative ? "Revoke" : "Enable";
-  nativeStatus.textContent = hasNative ? "Permission granted." : "Permission not granted (using System RAM fallback).";
+  nativeStatus.textContent = hasNative ? "Permission granted." : "Permission is off. Tab Reaper uses system RAM.";
   nativeStatus.className = `status-text ${hasNative ? "ok" : ""}`;
 
   btnHostPerm.textContent = hasHost ? "Revoke" : "Enable";
   hostStatus.textContent = hasHost
-    ? "Enabled (weighted eviction active)."
-    : "Disabled (using pure LRU eviction).";
+    ? "On. Heavier tabs sleep first at the size threshold."
+    : "Off. The oldest idle tabs sleep first.";
   hostStatus.className = `status-text ${hasHost ? "ok" : ""}`;
 }
 

@@ -3,6 +3,7 @@ import type { OpenTabInfo, RestoreMode, StatusPayload } from "../shared/types.ts
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const listEl = document.getElementById("tab-list") as HTMLElement;
 const memoryBadge = document.getElementById("memory-badge") as HTMLElement;
+const memorySource = document.getElementById("memory-source") as HTMLElement;
 const memoryBar = document.getElementById("memory-bar") as HTMLElement;
 const statLoaded = document.getElementById("stat-loaded") as HTMLElement;
 const statDiscarded = document.getElementById("stat-discarded") as HTMLElement;
@@ -19,7 +20,6 @@ const CLOSE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 
 let openTabs: OpenTabInfo[] = [];
-let hasHostAccess = false;
 let selectedIndex = 0;
 
 function formatGb(bytes: number): string {
@@ -77,7 +77,6 @@ function showActionStatus(text: string): void {
 async function refreshStatus(): Promise<StatusPayload> {
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
   openTabs = status.openTabs ?? [];
-  hasHostAccess = Boolean(status.permissions?.hostAccess);
   statLoaded.textContent = String(status.loadedCount);
   statDiscarded.textContent = String(status.discardedCount);
 
@@ -101,13 +100,19 @@ async function refreshStatus(): Promise<StatusPayload> {
           ? "Chrome PSS"
           : "Chrome RAM"
         : "System RAM";
-    const offlinePrefix = status.online ? "" : "Offline · ";
-    memoryBadge.textContent = `${offlinePrefix}${formatGb(status.memory.usedBytes)} / ${formatGb(status.memory.budgetBytes)} (${modeLabel})`;
+    memorySource.textContent = status.online ? modeLabel : `${modeLabel} (offline)`;
+    memoryBadge.textContent = `${formatGb(status.memory.usedBytes)} / ${formatGb(status.memory.budgetBytes)} budget`;
     memoryBadge.classList.toggle("over", status.memory.overBudget);
 
     const pct = Math.min(100, Math.round((status.memory.usedBytes / Math.max(1, status.memory.budgetBytes)) * 100));
     memoryBar.style.width = `${pct}%`;
     memoryBar.classList.toggle("over", status.memory.overBudget);
+  } else {
+    memorySource.textContent = status.online ? "Memory usage" : "Memory usage (offline)";
+    memoryBadge.textContent = "Unavailable";
+    memoryBadge.classList.remove("over");
+    memoryBar.style.width = "0%";
+    memoryBar.classList.remove("over");
   }
 
   renderOpenTabs();
@@ -120,19 +125,12 @@ function renderOpenTabs(): void {
   selectedIndex = Math.min(selectedIndex, Math.max(0, items.length - 1));
 
   if (items.length === 0) {
+    searchInput.removeAttribute("aria-activedescendant");
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = searchInput.value.trim() ? "No open tabs match your filter." : "No open tabs.";
     listEl.appendChild(empty);
     return;
-  }
-
-  if (!hasHostAccess) {
-    const tip = document.createElement("div");
-    tip.className = "tip-banner";
-    tip.textContent =
-      "Enable Weighted Eviction in Settings to sort by JS memory and sleep heaviest tabs first at >= 100% RAM.";
-    listEl.appendChild(tip);
   }
 
   const sleepingCount = items.filter((t) => t.discarded).length;
@@ -149,6 +147,8 @@ function renderOpenTabs(): void {
 
     const row = document.createElement("div");
     row.className = `tab-item${tab.discarded ? " sleeping" : ""}${index === selectedIndex ? " selected" : ""}`;
+    row.id = `tab-${tab.id}`;
+    if (index === selectedIndex) searchInput.setAttribute("aria-activedescendant", row.id);
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", String(index === selectedIndex));
 
@@ -245,22 +245,19 @@ function renderOpenTabs(): void {
 searchInput.addEventListener("input", () => {
   selectedIndex = 0;
   renderOpenTabs();
+  listEl.scrollTop = 0;
 });
 
 searchInput.addEventListener("keydown", async (event) => {
   const items = filteredOpenTabs();
   const count = items.length;
-  if (event.key === "ArrowDown") {
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     if (count > 0) {
-      selectedIndex = (selectedIndex + 1) % count;
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      selectedIndex = (selectedIndex + step + count) % count;
       renderOpenTabs();
-    }
-  } else if (event.key === "ArrowUp") {
-    event.preventDefault();
-    if (count > 0) {
-      selectedIndex = (selectedIndex - 1 + count) % count;
-      renderOpenTabs();
+      listEl.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
     }
   } else if (event.key === "Enter") {
     event.preventDefault();
@@ -319,9 +316,6 @@ btnRestoreSession.addEventListener("click", () => {
   btnRestoreSession.classList.add("hidden");
   const choice = document.createElement("div");
   choice.className = "recovery-choice";
-  choice.style.display = "flex";
-  choice.style.gap = "4px";
-  choice.style.flexShrink = "0";
 
   const winBtn = document.createElement("button");
   winBtn.type = "button";

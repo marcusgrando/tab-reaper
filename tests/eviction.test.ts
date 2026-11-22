@@ -63,6 +63,12 @@ describe("config helpers", () => {
     expect(computeMemoryBudgetBytes(cfg, 32 * 1024 ** 3)).toBe(6 * 1024 ** 3);
   });
 
+  test("ignores a retired idle timeout in stored settings and keeps custom memory thresholds", () => {
+    const stored = { discardAfterMinutes: 1440, idleEvictionPercent: 62, sizeEvictionPercent: 92 };
+    expect(sanitizeConfig(stored)).toEqual({ ...DEFAULT_CONFIG, idleEvictionPercent: 62, sizeEvictionPercent: 92 });
+    expect(sanitizeConfig(stored)).not.toHaveProperty("discardAfterMinutes");
+  });
+
   test("normalizeUrl preserves hash fragments and strips bare root trailing slash", () => {
     expect(normalizeUrl("https://docs.example.com/")).toBe("https://docs.example.com");
     expect(normalizeUrl("https://docs.example.com/#section")).toBe("https://docs.example.com/#section");
@@ -128,7 +134,7 @@ describe("eviction engine", () => {
   });
 
   test("never discards below idleEvictionPercent memory budget even when tabs are idle", () => {
-    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100, discardAfterMinutes: 10 });
+    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100 });
     const tabs = [makeTab(1), makeTab(2), makeTab(3)];
     let activity = createEmptyActivityState();
     activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 90 * 60_000);
@@ -161,10 +167,10 @@ describe("eviction engine", () => {
   });
 
   test("between idleEvictionPercent and sizeEvictionPercent, discards idle tabs oldest-first ignoring heavier younger tabs, capped at 2 per pass", () => {
-    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100, discardAfterMinutes: 15 });
+    const cfg = sanitizeConfig({ idleEvictionPercent: 80, sizeEvictionPercent: 100 });
     const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4)];
     let activity = createEmptyActivityState();
-    // Tab 1 idle 45m (light), Tab 2 idle 20m (very heavy), Tab 3 idle 30m (light), Tab 4 idle 5m (not idle)
+    // Tab 1 idle 45m (light), Tab 2 idle 20m (very heavy), Tab 3 idle 30m (light), Tab 4 idle 5m (most recent)
     activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 45 * 60_000);
     activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 20 * 60_000);
     activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 30 * 60_000);
@@ -204,12 +210,11 @@ describe("eviction engine", () => {
     });
 
     expect(planned).toHaveLength(MAX_MEMORY_EVICTIONS_PER_PASS);
-    expect(planned.map((p) => p.tab.id)).toEqual([1, 3]);
-    expect(planned.every((p) => p.reason === "idle_timeout")).toBe(true);
+    expect(planned.map((p) => p.id)).toEqual([1, 3]);
   });
 
   test("honors custom idleEvictionPercent and sizeEvictionPercent thresholds", () => {
-    const cfg = sanitizeConfig({ idleEvictionPercent: 60, sizeEvictionPercent: 85, discardAfterMinutes: 15 });
+    const cfg = sanitizeConfig({ idleEvictionPercent: 60, sizeEvictionPercent: 85 });
     const tabs = [makeTab(1), makeTab(2)];
     let activity = createEmptyActivityState();
     // Tab 1 oldest idle (30m) and light; Tab 2 recent (2m) and heavy
@@ -226,17 +231,14 @@ describe("eviction engine", () => {
     ).toEqual([]);
 
     const idleBand = planEvictions({ tabs, activity, weights, config: cfg, memory: makeMemory(0.65), now, mode: "sweep" });
-    expect(idleBand.map((p) => ({ id: p.tab.id, reason: p.reason }))).toEqual([{ id: 1, reason: "idle_timeout" }]);
+    expect(idleBand.map(tab => tab.id)).toEqual([1, 2]);
 
     const sizeBand = planEvictions({ tabs, activity, weights, config: cfg, memory: makeMemory(0.85), now, mode: "sweep" });
-    expect(sizeBand.map((p) => ({ id: p.tab.id, reason: p.reason }))).toEqual([
-      { id: 2, reason: "over_memory_budget" },
-      { id: 1, reason: "over_memory_budget" },
-    ]);
+    expect(sizeBand.map(tab => tab.id)).toEqual([2, 1]);
   });
 
   test("at >= sizeEvictionPercent with weight samples, discards heaviest tabs first capped at 2 per pass", () => {
-    const cfg = sanitizeConfig({ discardAfterMinutes: 60 });
+    const cfg = DEFAULT_CONFIG;
     const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4)];
     let activity = createEmptyActivityState();
     // Tab 1 oldest idle (40m) but tiny; Tab 2 recent (2m) but heaviest heap;
@@ -264,8 +266,7 @@ describe("eviction engine", () => {
     });
 
     expect(planned).toHaveLength(MAX_MEMORY_EVICTIONS_PER_PASS);
-    expect(planned.map((p) => p.tab.id)).toEqual([2, 3]);
-    expect(planned.every((p) => p.reason === "over_memory_budget")).toBe(true);
+    expect(planned.map((p) => p.id)).toEqual([2, 3]);
 
     // When jsHeapBytes are equal (e.g. 0), fall back to weightMultiplier descending, then idleMinutes descending.
     const zeroHeapWeights = new Map<number, TabWeightSample>([
@@ -282,11 +283,11 @@ describe("eviction engine", () => {
       now,
       mode: "sweep",
     });
-    expect(plannedByWeight.map((p) => p.tab.id)).toEqual([3, 2]);
+    expect(plannedByWeight.map((p) => p.id)).toEqual([3, 2]);
   });
 
   test("at >= 100% RAM without weight samples, falls back to oldest-idle first capped at 2 per pass", () => {
-    const cfg = sanitizeConfig({ discardAfterMinutes: 60 });
+    const cfg = DEFAULT_CONFIG;
     const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4), makeTab(5)];
     let activity = createEmptyActivityState();
     for (let i = 0; i < tabs.length; i++) {
@@ -304,8 +305,7 @@ describe("eviction engine", () => {
     });
 
     expect(planned).toHaveLength(MAX_MEMORY_EVICTIONS_PER_PASS);
-    expect(planned.every((p) => p.reason === "over_memory_budget")).toBe(true);
-    expect(planned.map((p) => p.tab.id)).toEqual([5, 4]);
+    expect(planned.map((p) => p.id)).toEqual([5, 4]);
   });
 
   test("startup sweep discards all non-protected background tabs", () => {
@@ -328,7 +328,7 @@ describe("eviction engine", () => {
       mode: "startup",
     });
 
-    expect(planned.map((p) => p.tab.id)).toEqual([3, 5]);
+    expect(planned.map((p) => p.id)).toEqual([3, 5]);
   });
 
   test("protects loading tabs and tabs with unsaved form input", () => {
@@ -350,16 +350,16 @@ describe("eviction engine", () => {
       tabs: [makeTab(1, { status: "loading" }), makeTab(2), makeTab(3)],
       activity: createEmptyActivityState(),
       weights: new Map([[2, formSample]]),
-      config: sanitizeConfig({ discardAfterMinutes: 0 }),
+      config: cfg,
       memory: makeMemory(0.85),
       now,
       mode: "sweep",
     });
-    expect(planned).toEqual([]);
+    expect(planned.map(tab => tab.id)).toEqual([3]);
   });
 
   test("skips all evictions when offline and skipWhenOffline is enabled", () => {
-    const cfg = sanitizeConfig({ discardAfterMinutes: 1, skipWhenOffline: true });
+    const cfg = sanitizeConfig({ skipWhenOffline: true });
     const tabs = [makeTab(1), makeTab(2), makeTab(3)];
     let activity = createEmptyActivityState();
     for (const tab of tabs) {

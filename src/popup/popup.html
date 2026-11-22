@@ -4,20 +4,28 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tab Reaper</title>
+    <link rel="icon" href="icons/icon48.png" type="image/png" />
+    <link rel="stylesheet" href="ui.css" />
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header class="header">
-      <div class="title-row">
-        <h1>Tab Reaper</h1>
-        <span id="memory-badge" class="badge">Loading...</span>
+    <header>
+      <div class="masthead">
+        <h1 class="brand"><img src="icons/icon48.png" alt="" />Tab Reaper</h1>
+        <button id="btn-options" type="button">
+          <svg class="icon" aria-hidden="true"><use href="ui.svg#settings"/></svg>Settings
+        </button>
       </div>
-      <div class="bar-track">
-        <div id="memory-bar" class="bar-fill"></div>
-      </div>
-      <div class="stats">
-        <span>Loaded: <strong id="stat-loaded">-</strong></span>
-        <span>Discarded: <strong id="stat-discarded">-</strong></span>
+      <div class="memory">
+        <div class="memory-line">
+          <span id="memory-source">Memory usage</span>
+          <span id="memory-badge">Loading…</span>
+        </div>
+        <div class="bar-track" aria-hidden="true"><div id="memory-bar"></div></div>
+        <div class="stats">
+          <span><strong id="stat-loaded">–</strong> loaded</span>
+          <span><strong id="stat-discarded">–</strong> sleeping</span>
+        </div>
       </div>
     </header>
 
@@ -26,25 +34,17 @@
       <button id="btn-restore-session" type="button" class="item-action">Restore</button>
     </div>
 
-    <section class="search-wrap">
-      <input
-        id="search-input"
-        type="text"
-        placeholder="Filter open tabs... (Enter to switch, Esc to close)"
-        autocomplete="off"
-        autofocus
-      />
-    </section>
+    <div class="search-wrap">
+      <svg class="icon" aria-hidden="true"><use href="ui.svg#search"/></svg>
+      <input id="search-input" type="text" role="combobox" aria-expanded="true" aria-controls="tab-list" aria-autocomplete="list" aria-label="Search open tabs" placeholder="Search open tabs" autocomplete="off" autofocus />
+    </div>
+    <main id="tab-list" class="tab-list" role="listbox" aria-label="Open tabs"></main>
+    <div id="action-status" class="action-status hidden" role="status"></div>
 
-    <main id="tab-list" class="tab-list" role="listbox"></main>
-
-    <div id="action-status" class="action-status hidden"></div>
-
-    <footer class="footer">
-      <button id="btn-discard" type="button">Sleep Idle</button>
-      <button id="btn-options" type="button" class="secondary">Settings</button>
+    <footer>
+      <span class="shortcuts"><kbd>Enter</kbd> to switch <kbd>Esc</kbd> to close</span>
+      <button id="btn-discard" type="button"><svg class="icon" aria-hidden="true"><use href="ui.svg#moon"/></svg>Sleep idle tabs</button>
     </footer>
-
     <script type="module" src="popup.js"></script>
   </body>
 </html>

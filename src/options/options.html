@@ -4,33 +4,45 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tab Reaper — Settings</title>
+    <link rel="icon" href="icons/icon48.png" type="image/png" />
+    <link rel="stylesheet" href="ui.css" />
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
+    <aside class="sidebar">
+      <div class="brand"><img src="icons/icon48.png" alt="" />Tab Reaper</div>
+      <nav aria-label="Settings sections">
+        <a href="#memory"><svg class="icon" aria-hidden="true"><use href="ui.svg#memory"/></svg>Memory budget</a>
+        <a href="#protections"><svg class="icon" aria-hidden="true"><use href="ui.svg#shield"/></svg>Protections</a>
+        <a href="#capabilities"><svg class="icon" aria-hidden="true"><use href="ui.svg#plug"/></svg>Capabilities</a>
+        <a href="#sync-card"><svg class="icon" aria-hidden="true"><use href="ui.svg#folder"/></svg>Folder Sync</a>
+        <a href="#snapshots-card"><svg class="icon" aria-hidden="true"><use href="ui.svg#history"/></svg>Session recovery</a>
+      </nav>
+    </aside>
     <main class="container">
-      <h1>Tab Reaper Settings</h1>
+      <h1>Settings</h1>
 
       <form id="settings-form">
-        <section class="card">
-          <h2>Memory &amp; Eviction Bands</h2>
+        <section id="memory">
+          <h2>Memory budget</h2>
           <p class="hint">
-            Below the idle threshold, all tabs stay loaded. Between the idle and size thresholds, idle tabs sleep oldest first (up to 2 per cycle). At or above the size threshold, heaviest tabs sleep first when Weighted Eviction is enabled (otherwise oldest idle).
+            Each check puts up to two eligible tabs to sleep until memory use falls below the sleep threshold.
           </p>
 
           <div class="field">
             <div class="field-header">
-              <label for="memory-mode">Memory budget mode</label>
+              <label for="memory-mode">Budget type</label>
               <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
             </div>
             <select id="memory-mode">
-              <option value="fraction">Fraction of system RAM (default: memory / 2)</option>
-              <option value="fixed_gb">Fixed gigabytes (GB)</option>
+              <option value="fraction">Fraction of system RAM</option>
+              <option value="fixed_gb">Fixed amount in GB</option>
             </select>
           </div>
 
           <div class="field" id="fraction-wrap">
             <div class="field-header">
-              <label for="memory-fraction">System RAM fraction (0.1 – 0.9)</label>
+              <label for="memory-fraction">Fraction of system RAM <small>0.1 to 0.9. Half of system RAM is 0.5.</small></label>
               <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
             </div>
             <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
@@ -38,7 +50,7 @@
 
           <div class="field hidden" id="fixed-gb-wrap">
             <div class="field-header">
-              <label for="memory-gb">Maximum Chrome RAM (GB)</label>
+              <label for="memory-gb">Memory budget (GB)</label>
               <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
             </div>
             <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
@@ -46,7 +58,7 @@
 
           <div class="field">
             <div class="field-header">
-              <label for="idle-eviction-percent">Start sleeping idle tabs at (% of budget, 10 – 100)</label>
+              <label for="idle-eviction-percent">Sleep threshold (% of budget) <small>Start with the least recently used tabs. Range 10–100%.</small></label>
               <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
             </div>
             <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
@@ -54,30 +66,22 @@
 
           <div class="field">
             <div class="field-header">
-              <label for="size-eviction-percent">Start sleeping heaviest tabs first at (% of budget, 10 – 100)</label>
+              <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
               <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
             </div>
             <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
           </div>
 
-          <div class="field">
-            <div class="field-header">
-              <label for="discard-minutes">Idle time before sleeping a tab (minutes, 0 = disabled)</label>
-              <button type="button" class="reset-btn hidden" data-reset="discardAfterMinutes"></button>
-            </div>
-            <input id="discard-minutes" type="number" min="0" max="10080" step="1" />
-          </div>
-
           <div class="checkbox-row">
             <label class="checkbox">
               <input id="startup-sweep" type="checkbox" />
-              <span>Discard background tabs immediately on Chrome startup</span>
+              <span>Put unprotected background tabs to sleep when Chrome starts</span>
             </label>
             <button type="button" class="reset-btn hidden" data-reset="startupSweep"></button>
           </div>
         </section>
 
-        <section class="card">
+        <section id="protections">
           <h2>Protections</h2>
 
           <div class="checkbox-row">
@@ -107,7 +111,7 @@
           <div class="checkbox-row">
             <label class="checkbox">
               <input id="protect-forms" type="checkbox" />
-              <span>Protect tabs with unsaved form input (uses optional Weighted Eviction page access)</span>
+              <span>Protect tabs with unsaved form input <small>Requires page access for Weighted Eviction.</small></span>
             </label>
             <button type="button" class="reset-btn hidden" data-reset="protectUnsavedForms"></button>
           </div>
@@ -122,7 +126,7 @@
 
           <div class="field">
             <div class="field-header">
-              <label for="allowlist">Protected domains or glob patterns (one per line)</label>
+              <label for="allowlist">Protected sites <small>Enter one domain or glob pattern per line.</small></label>
               <button type="button" class="reset-btn hidden" data-reset="allowlist"></button>
             </div>
             <textarea id="allowlist" rows="4" placeholder="meet.google.com&#10;*.slack.com"></textarea>
@@ -130,25 +134,25 @@
         </section>
 
         <div class="actions">
-          <button type="submit">Save Settings</button>
-          <span id="save-status" class="status-text"></span>
+          <button type="submit">Save settings</button>
+          <span id="save-status" class="status-text" role="status"></span>
         </div>
       </form>
 
-      <section class="card">
-        <h2>Optional Capabilities</h2>
+      <section id="capabilities">
+        <h2>Optional capabilities</h2>
 
         <div class="cap-row">
           <div>
-            <strong>Local Companion (Exact Chrome RAM + Folder Sync)</strong>
+            <strong>Local Companion</strong>
             <p class="hint">
-              Optional. Measures exact Chrome process memory on macOS, Linux, and Windows instead of OS-wide RAM, and enables conflict-free backup &amp; sync of snapshots and settings to any local or cloud-synced folder (iCloud Drive, Google Drive, OneDrive, Dropbox).
+              Measures Chrome’s memory use and enables Folder Sync. Run this command to install the companion on your computer.
             </p>
             <div class="install-cmd-row">
               <code id="install-cmd"></code>
               <button id="btn-copy-install" type="button" class="secondary small">Copy</button>
             </div>
-            <div id="native-status" class="status-text"></div>
+            <div id="native-status" class="status-text" role="status"></div>
           </div>
           <div class="cap-buttons">
             <button id="btn-native-perm" type="button">Enable</button>
@@ -158,11 +162,11 @@
 
         <div class="cap-row">
           <div>
-            <strong>Weighted Eviction (JS Heap + DOM Sampling)</strong>
+            <strong>Weighted Eviction</strong>
             <p class="hint">
-              Samples candidate tabs on demand to discard heavier pages first. Zero content scripts at startup.
+              Uses page access to measure memory, page elements and media when choosing which tabs to put to sleep.
             </p>
-            <div id="host-status" class="status-text"></div>
+            <div id="host-status" class="status-text" role="status"></div>
           </div>
           <div class="cap-buttons">
             <button id="btn-host-perm" type="button">Enable</button>
@@ -170,18 +174,18 @@
         </div>
       </section>
 
-      <section class="card" id="sync-card">
+      <section id="sync-card">
         <div class="section-head">
-          <h2>Folder Sync &amp; Backup</h2>
+          <h2>Folder Sync</h2>
           <div class="cap-buttons">
-            <button id="btn-sync-now" type="button" class="secondary small">Sync Now</button>
-            <button id="btn-sync-disable" type="button" class="secondary small hidden">Disable Sync</button>
+            <button id="btn-sync-now" type="button" class="secondary small">Sync now</button>
+            <button id="btn-sync-disable" type="button" class="secondary small hidden">Disable sync</button>
           </div>
         </div>
         <p class="hint">
-          Sync snapshots and settings across devices using a folder synced by your OS (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing). Each device writes only its own files so concurrent devices never conflict.
+          Choose a local folder for backups. To share snapshots and settings across devices, use a folder your cloud storage already syncs.
         </p>
-        <div id="sync-status" class="status-text"></div>
+        <div id="sync-status" class="status-text" role="status"></div>
 
         <div id="sync-controls" class="hidden">
           <div class="field" id="sync-candidates-wrap">
@@ -193,8 +197,8 @@
             <label for="sync-folder-input">Sync folder path</label>
             <div class="inline-row">
               <input id="sync-folder-input" type="text" placeholder="/Users/.../TabReaper" />
-              <button id="btn-sync-pick" type="button" class="secondary small">Choose Folder...</button>
-              <button id="btn-sync-apply" type="button" class="small">Save Folder</button>
+              <button id="btn-sync-pick" type="button" class="secondary small">Choose folder…</button>
+              <button id="btn-sync-apply" type="button" class="small">Save folder</button>
             </div>
           </div>
 
@@ -202,7 +206,7 @@
             <label for="device-name-input">Device name (shown on synced snapshots)</label>
             <div class="inline-row">
               <input id="device-name-input" type="text" maxlength="64" placeholder="MacBook Pro" />
-              <button id="btn-device-name" type="button" class="secondary small">Save Name</button>
+              <button id="btn-device-name" type="button" class="secondary small">Save name</button>
             </div>
           </div>
 
@@ -217,32 +221,33 @@
 
             <div class="field">
               <div class="field-header">
-                <label for="snapshot-interval-minutes">Automatic snapshot interval (minutes, 1 – 1440 / 24h)</label>
+                <label for="snapshot-interval-minutes">Snapshot interval (minutes, 1–1440)</label>
                 <button type="button" class="reset-btn hidden" data-reset="snapshotIntervalMinutes"></button>
               </div>
               <input id="snapshot-interval-minutes" type="number" min="1" max="1440" step="1" />
             </div>
 
-            <div id="sync-snapshots-status" class="status-text"></div>
+            <div id="sync-snapshots-status" class="status-text" role="status"></div>
           </div>
         </div>
       </section>
 
-      <section class="card hidden" id="snapshots-card">
+      <section class="hidden" id="snapshots-card">
         <div class="section-head">
-          <h2>Session Recovery (Snapshots)</h2>
+          <h2>Session recovery</h2>
           <div class="cap-buttons">
-            <button id="btn-clear-snapshots" type="button" class="secondary small">Clear Local</button>
+            <button id="btn-clear-snapshots" type="button" class="secondary small">Clear local snapshots</button>
           </div>
         </div>
         <p class="hint">
-          Saves up to 5 recent snapshots locally and retains 20 recent + 24 hourly + 30 daily + unlimited manual snapshots in your sync folder across all your devices with window, order, pinned, kept, and tab group metadata.
+          Restore windows, tab order, groups, and pinned or kept tabs. Your sync folder keeps 20 recent snapshots, 24 hourly, 30 daily, and all manual snapshots. Up to 5 recent snapshots stay on this device.
         </p>
-        <div class="inline-row" style="margin-bottom: 8px">
-          <input id="snapshot-label" type="text" maxlength="80" placeholder="Optional label for manual snapshot (never auto-pruned)" />
-          <button id="btn-save-snapshot" type="button" class="small">Save Snapshot Now</button>
+        <label for="snapshot-label">Snapshot name (optional)</label>
+        <div class="inline-row">
+          <input id="snapshot-label" type="text" maxlength="80" />
+          <button id="btn-save-snapshot" type="button" class="small">Save snapshot</button>
         </div>
-        <div id="snapshot-status" class="status-text"></div>
+        <div id="snapshot-status" class="status-text" role="status"></div>
         <div id="snapshot-list" class="snapshot-list"></div>
       </section>
     </main>

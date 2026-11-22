@@ -33,18 +33,20 @@ Tab Reaper does not close or archive tabs to bookmarks.
 
 An eviction sweep runs on:
 - `chrome.runtime.onStartup` (immediate startup sweep when `startupSweep` is enabled, default `true`)
-- `chrome.alarms` every 30 seconds (memory budget and idle check)
+- `chrome.alarms` every 30 seconds (memory budget check)
 - Tab creation and activation (memory check only, with no scheduled backup or folder sync)
 
 Periodic sweeps evaluate memory usage as a percentage of `memoryBudgetBytes`:
 
 1. **Below `idleEvictionPercent` (default `80%`) of budget:** No background tabs are discarded by periodic sweeps.
-2. **Between `idleEvictionPercent` and `sizeEvictionPercent` (default `80%–99%`) of budget:** Discards eligible idle tabs (`>= discardAfterMinutes`, default `15` min), oldest idle first, up to 2 tabs per sweep pass.
+2. **From `idleEvictionPercent` up to but excluding `sizeEvictionPercent` (defaults 80% and 100%).** Each pass discards up to two eligible tabs in least-recently-used order, regardless of how recently they were used.
 3. **At or above `sizeEvictionPercent` (default `100%`) of budget:** Discards heaviest loaded tabs first (by JS heap, DOM node count, and media weight) when optional Weighted Eviction is enabled, falling back to oldest idle first when Weighted Eviction is disabled, up to 2 tabs per sweep pass.
 
 On Chrome startup (`startupSweep`, default `true`), Tab Reaper still discards non-protected background tabs immediately so the browser starts with minimal RAM.
 
-To avoid over-discarding while Chrome asynchronously tears down a renderer process (~200-500 ms), periodic sweeps discard at most 2 tabs per pass and re-check on the next tick instead of dumping all loaded tabs at once.
+Each check reads memory again before selecting the next batch. Even after reaching the size threshold, eviction continues across checks until the reading falls below the lower threshold or no eligible tabs remain. The two-tab cap gives Chrome time to release discarded renderers between checks.
+
+Chrome Memory Saver offers three levels with different inactivity periods. Tab Reaper uses explicit memory thresholds so a minimum idle time cannot prevent it from reclaiming memory under pressure. [Chrome Memory Saver](https://support.google.com/chrome/answer/12929150?hl=en)
 
 ### Memory Measurement Modes
 
@@ -86,7 +88,7 @@ Because Chrome reassigns all `tabId` values on restart and wipes `chrome.storage
 - Active tab timestamps are stored in `chrome.storage.local` in two structures:
   - `byTabId[tabId] = { url, lastActiveAt }` for fast runtime lookups
   - `byUrl[normalizedUrl] = lastActiveAt` for restart reconciliation
-- On `onStartup`, open tabs are matched against `byUrl` so idle timers survive browser restarts accurately.
+- On `onStartup`, open tabs are matched against `byUrl` so tabs retain their recency order across browser restarts.
 
 ## Local Companion (Exact Chrome RAM + Folder Sync)
 
@@ -133,7 +135,6 @@ All values are user-configurable on the Options page:
 | `memoryBudgetMode` | `fraction` (`0.5`) | `memory / 2` of total system RAM, or explicit GB value (`fixed_gb`, default `4` GiB) |
 | `idleEvictionPercent` | `80` | Budget percentage at which idle-tab discarding starts (`10` to `100`) |
 | `sizeEvictionPercent` | `100` | Budget percentage at which size-based discarding starts (`10` to `100`, `>= idleEvictionPercent`) |
-| `discardAfterMinutes` | `15` | Idle timeout before discarding a loaded tab in the idle memory band (`0` = disabled) |
 | `startupSweep` | `true` | Discard non-protected background tabs on Chrome startup |
 | `protectActive` | `true` | Never discard active tabs |
 | `protectAudible` | `true` | Never discard tabs playing audio |

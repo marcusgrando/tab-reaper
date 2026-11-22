@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light dark;
+  --canvas: #f3f6fb;
+  --surface: #fff;
+  --tint: #e9f1ff;
+  --ink: #162944;
+  --muted: #536581;
+  --line: #d7e1ee;
+  --control: #899bb2;
+  --accent: #2659c7;
+  --action: #2759c6;
+  --action-hover: #1948ad;
+  --navy: #142e55;
+  --on-navy: #f6f9ff;
+  --pale-blue: #b6d5ff;
+  --danger: #a33335;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #101b2c;
+    --surface: #18273c;
+    --tint: #243b59;
+    --ink: #eff5ff;
+    --muted: #afc1d9;
+    --line: #34465f;
+    --control: #7389a7;
+    --accent: #a2c6ff;
+    --action: #305fc2;
+    --action-hover: #396bce;
+    --navy: #122846;
+    --danger: #ffadae;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: inherit; background: var(--canvas); color: var(--ink); }
+h1, h2, h3, p { margin: 0; }
+button, input, select, textarea { font: inherit; }
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--action);
+  color: #fff;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+}
+button:hover { background: var(--action-hover); }
+button.secondary, .item-action, .chip-btn {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--control);
+}
+button.secondary:hover, .item-action:hover, .chip-btn:hover {
+  border-color: var(--accent);
+  background: var(--tint);
+  color: var(--accent);
+}
+button:disabled { opacity: .6; cursor: wait; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -.045em;
+}
+.brand img { width: 36px; height: 36px; }
+.icon {
+  display: block;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.hidden { display: none !important; }

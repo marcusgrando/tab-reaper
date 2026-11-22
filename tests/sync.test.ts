@@ -54,19 +54,19 @@ describe("folder sync conflict-free algorithms", () => {
       schemaVersion: 2,
       updatedAt: 1000,
       deviceId: "dev-a",
-      config: { ...DEFAULT_CONFIG, discardAfterMinutes: 8 },
+      config: { ...DEFAULT_CONFIG, memoryBudgetGb: 8 },
     };
     const b: SyncedConfigEnvelope = {
       schemaVersion: 2,
       updatedAt: 2000,
       deviceId: "dev-b",
-      config: { ...DEFAULT_CONFIG, discardAfterMinutes: 15 },
+      config: { ...DEFAULT_CONFIG, memoryBudgetGb: 15 },
     };
     const c: SyncedConfigEnvelope = {
       schemaVersion: 2,
       updatedAt: 2000,
       deviceId: "dev-c",
-      config: { ...DEFAULT_CONFIG, discardAfterMinutes: 20 },
+      config: { ...DEFAULT_CONFIG, memoryBudgetGb: 20 },
     };
 
     expect(resolveLatestConfig([a, b])?.deviceId).toBe("dev-b");
@@ -411,37 +411,38 @@ describe("multi-device single-writer folder sync integration", () => {
 
     // Equal-timestamp config from dev-z (> dev-mac) must converge on pull
     await setLocalConfigVersion({ updatedAt: now, deviceId: "dev-mac" });
-    await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, discardAfterMinutes: 10 }), async () => {});
+    await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, memoryBudgetGb: 10 }), async () => {});
     virtualFs.set(
       "devices/dev-z/config-v2.json",
       JSON.stringify({
         schemaVersion: 2,
         updatedAt: now,
         deviceId: "dev-z",
-        config: { ...DEFAULT_CONFIG, discardAfterMinutes: 77, snapshotIntervalMinutes: 1440 },
+        config: { ...DEFAULT_CONFIG, memoryBudgetGb: 77, discardAfterMinutes: 15, snapshotIntervalMinutes: 1440 },
       }),
     );
 
     let applied: TabReaperConfig | null = null;
     const pullRes = await pullConfigFromSync(
-      async () => ({ ...DEFAULT_CONFIG, discardAfterMinutes: 10 }),
+      async () => ({ ...DEFAULT_CONFIG, memoryBudgetGb: 10 }),
       async (cfg) => {
         applied = cfg;
       },
     );
     expect(pullRes.updated).toBe(true);
-    expect(applied!.discardAfterMinutes).toBe(77);
+    expect(applied).not.toHaveProperty("discardAfterMinutes");
+    expect(applied!.memoryBudgetGb).toBe(77);
     expect(applied!.snapshotIntervalMinutes).toBe(1440);
 
     // The next sync publishes settings edited offline.
     hostOnline = false;
     await setLocalConfigVersion({ updatedAt: now + 10_000, deviceId: "dev-mac" });
-    expect((await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, discardAfterMinutes: 42 }), async () => {})).ok).toBe(false);
+    expect((await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, memoryBudgetGb: 42 }), async () => {})).ok).toBe(false);
     hostOnline = true;
-    await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, discardAfterMinutes: 42 }), async () => {});
+    await pullConfigFromSync(async () => ({ ...DEFAULT_CONFIG, memoryBudgetGb: 42 }), async () => {});
     const storedRemote = JSON.parse(virtualFs.get("devices/dev-mac/config-v2.json")!) as SyncedConfigEnvelope;
     expect(storedRemote.schemaVersion).toBe(2);
-    expect(storedRemote.config.discardAfterMinutes).toBe(42);
+    expect(storedRemote.config.memoryBudgetGb).toBe(42);
 
     // A host must enforce the selected directory for each file operation.
     hostOutdated = true;
@@ -470,7 +471,7 @@ describe("multi-device single-writer folder sync integration", () => {
 
   test("saves one complete settings record and syncs it with one version", async () => {
     storageData["tabReaper.config"] = { unusedSetting: true };
-    const config = await saveConfig({ discardAfterMinutes: 51 });
+    const config = await saveConfig({ memoryBudgetGb: 51 });
     expect(storageData["tabReaper.config"]).toEqual(config);
     await setLocalConfigVersion({ updatedAt: 200, deviceId: "dev-mac" });
     expect((await pullConfigFromSync(loadConfig, async () => {})).ok).toBe(true);

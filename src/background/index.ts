@@ -134,7 +134,8 @@ async function queryAllTabs(updateCache = true): Promise<TabSummary[]> {
 async function discardTabSafely(
   tabId: number,
   config: TabReaperConfig,
-  reason: "manual" | "startup" | "idle_timeout" | "over_memory_budget",
+  mode: "manual" | "automatic",
+  plannedLastActiveAt?: number,
 ): Promise<boolean> {
   if (config.protectUnsavedForms && (await checkTabHasUnsavedForm(tabId))) {
     return false;
@@ -143,13 +144,13 @@ async function discardTabSafely(
     const [raw, keptIds] = await Promise.all([chrome.tabs.get(tabId), loadKeptTabIds()]);
     const live = toTabSummary(raw, keptIds);
     if (!live || live.discarded) return false;
-    if (reason === "manual" ? !computeOpenTabActions(live, config).canSleep : isTabProtected(live, config)) {
+    if (mode === "manual" ? !computeOpenTabActions(live, config).canSleep : isTabProtected(live, config)) {
       return false;
     }
-    if (reason === "idle_timeout") {
+    if (plannedLastActiveAt !== undefined) {
+      // A tab used during form inspection must be ranked again on the next pass.
       const state = await loadActivityState();
-      const now = Date.now();
-      if (now - getTabLastActiveAt(state, live, now) < config.discardAfterMinutes * 60_000) return false;
+      if (getTabLastActiveAt(state, live, 0) !== plannedLastActiveAt) return false;
     }
     await chrome.tabs.discard(tabId);
     return true;
@@ -213,10 +214,11 @@ async function runSweep(
     });
 
     let discarded = 0;
-    for (const candidate of evictions) {
+    for (const tab of evictions) {
       if (mode === "sweep" && discarded >= MAX_MEMORY_EVICTIONS_PER_PASS) break;
       try {
-        if (await discardTabSafely(candidate.tab.id, config, candidate.reason)) {
+        const plannedLastActiveAt = mode === "sweep" && !atSizeBand ? getTabLastActiveAt(activity, tab, 0) : undefined;
+        if (await discardTabSafely(tab.id, config, "automatic", plannedLastActiveAt)) {
           discarded++;
         }
       } catch {

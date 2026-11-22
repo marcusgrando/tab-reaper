@@ -9,7 +9,6 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   memoryBudgetGb: 4,
   idleEvictionPercent: 80,
   sizeEvictionPercent: 100,
-  discardAfterMinutes: 15,
   startupSweep: true,
   protectActive: true,
   protectAudible: true,
@@ -43,7 +42,6 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     clampNumber(merged.sizeEvictionPercent, 10, 100, DEFAULT_CONFIG.sizeEvictionPercent),
   );
   const sizeEvictionPercent = Math.max(idleEvictionPercent, rawSizeEvictionPercent);
-  const discardAfterMinutes = clampNumber(merged.discardAfterMinutes, 0, 10080, DEFAULT_CONFIG.discardAfterMinutes);
   const snapshotIntervalMinutes = Math.round(
     clampNumber(merged.snapshotIntervalMinutes, 1, 1440, DEFAULT_CONFIG.snapshotIntervalMinutes),
   );
@@ -60,7 +58,6 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     memoryBudgetGb,
     idleEvictionPercent,
     sizeEvictionPercent,
-    discardAfterMinutes,
     startupSweep: Boolean(merged.startupSweep),
     protectActive: Boolean(merged.protectActive),
     protectAudible: Boolean(merged.protectAudible),

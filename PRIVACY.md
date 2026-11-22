@@ -8,8 +8,8 @@ Tab Reaper runs entirely on your device. It does not collect, transmit, sell, or
 
 By default, all data used by Tab Reaper stays inside your browser profile:
 
-- **Extension settings** (`chrome.storage.local`): your memory budget, eviction thresholds, timeouts, snapshot interval, and protected domain allowlist.
-- **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to decide when an idle tab should be discarded across browser restarts.
+- **Extension settings** (`chrome.storage.local`): your memory budget, eviction thresholds, snapshot interval, and protected domain allowlist.
+- **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to rank tabs by recent activity across browser restarts.
 - **Local session snapshot cache** (`chrome.storage.local`, key `tabReaper.sessionSnapshots`): active only when Folder Sync is configured. Stores up to 5 recent auto snapshots (plus pending manual snapshots, capped at 1 MB total) of open `http(s)` tabs (URL, title, order, pinned/kept state, window state, and tab group metadata) captured on your configured interval (`1` to `1440` minutes, default `5`), before restores, on window close, and on manual save. Snapshots never sync via Chrome Sync and can be cleared at any time in Settings.
 - **Window recovery cache** (`chrome.storage.session`): active only when Folder Sync and automatic snapshots are enabled. Keeps open tabs' URLs, titles, and window metadata in session storage to capture a closing window after the extension worker restarts.
 - **Transient weight cache** (`chrome.storage.session`): short-lived numeric metrics (JS heap size, DOM node count, media element count) cleared when Chrome closes.

@@ -68,8 +68,8 @@ describe("active tab deactivation tracking", () => {
   const min = 60_000;
   const t0 = 1_700_000_000_000;
 
-  test("does not immediately discard a tab that was active during an idle period when switching away", () => {
-    const cfg = sanitizeConfig({ discardAfterMinutes: 15 });
+  test("ranks the tab just left after older background tabs", () => {
+    const cfg = sanitizeConfig({});
     const tabA = makeTab(1, { url: "https://app.example.com/work", active: true });
     const tabB = makeTab(2, { url: "https://docs.example.com/ref", active: false });
 
@@ -82,9 +82,12 @@ describe("active tab deactivation tracking", () => {
     const tSwitch = t0 + 31 * min;
     state = recordTabVisit(state, tabB.id, tabB.url, tSwitch, 1);
 
+    const older = makeTab(3);
+    state = recordTabVisit(state, older.id, older.url, tSwitch - min);
     const tabsAfterSwitch = [
       { ...tabA, active: false },
       { ...tabB, active: true },
+      older,
     ];
 
     // Tab A's idle clock must start when the user left it, not when they first opened it.
@@ -109,7 +112,7 @@ describe("active tab deactivation tracking", () => {
       now: tSwitch,
       mode: "sweep",
     });
-    expect(evictions).toEqual([]);
+    expect(evictions.map(tab => tab.id)).toEqual([older.id, tabA.id]);
   });
 
   test("background tab creation does not clobber the window's active tab", () => {

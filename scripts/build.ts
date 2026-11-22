@@ -33,6 +33,8 @@ for (const entry of entrypoints) {
 
 const staticFiles: Array<[string, string]> = [
   ["manifest.json", "manifest.json"],
+  ["src/shared/ui.css", "ui.css"],
+  ["assets/ui.svg", "ui.svg"],
   ["src/popup/popup.html", "popup.html"],
   ["src/popup/popup.css", "popup.css"],
   ["src/options/options.html", "options.html"],

@@ -60,6 +60,47 @@ test("a cold worker captures the last navigation when its window closes", async 
   }
 });
 
+test("without optional permissions, successive memory checks discard down to the lower threshold", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  try {
+    const now = Date.now();
+    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabReaper.config"] = { discardAfterMinutes: 0 };
+    for (let id = 4; id <= 8; id++) tabs.push({ ...tabs[0]!, id, url: `https://old.test/${id}` });
+    tabs[7]!.pinned = true;
+    localData["tabReaper.activity"] = {
+      byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - tab.id * 1000 }])),
+      byUrl: {},
+    };
+
+    let used = 100;
+    Object.assign(chrome, {
+      permissions: { contains: async () => false },
+      system: { memory: { getInfo: async () => ({ capacity: 200, availableCapacity: 200 - used }) } },
+    });
+    const discarded: number[] = [];
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
+    });
+    const sweep = () => listeners.alarm!({ name: "tabReaper.sweep" });
+    await sweep();
+    expect(discarded).toEqual([7, 6]);
+    used = 90;
+    await sweep();
+    expect(discarded).toEqual([7, 6, 5, 4]);
+    used = 80;
+    await sweep();
+    expect(discarded).toEqual([7, 6, 5, 4, 3, 2]);
+    used = 79;
+    await sweep();
+    expect(tabs.filter(tab => !tab.discarded).map(tab => tab.id)).toEqual([1, 8]);
+  } finally {
+    restore();
+  }
+});
+
 test("an idle candidate used during form inspection stays open", async () => {
   const { listeners, tabs, localData, restore } = await worker();
   const discarded: number[] = [];
@@ -67,6 +108,7 @@ test("an idle candidate used during form inspection stays open", async () => {
   const message = (body: unknown) => new Promise(resolve => listeners.message!(body, {}, resolve));
   try {
     localData["tabReaper.folderSyncOptedIn"] = false;
+    for (const tab of tabs.slice(1)) tab.pinned = true;
     localData["tabReaper.activity"] = { byTabId: { 1: { url: page.url, lastActiveAt: 1 } }, byUrl: {} };
     Object.assign(chrome, { permissions: { contains: async () => true },
       system: { memory: { getInfo: async () => ({ capacity: 200, availableCapacity: 115 }) } },

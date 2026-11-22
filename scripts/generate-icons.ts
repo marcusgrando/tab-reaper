@@ -67,63 +67,19 @@ function roundedRectSdf(x: number, y: number, cx: number, cy: number, hw: number
 }
 
 function samplePixel(u: number, v: number): [number, number, number, number] {
-  // Normalized coordinates in [0, 1]
-  const bgDist = roundedRectSdf(u, v, 0.5, 0.5, 0.46, 0.46, 0.2);
-  if (bgDist > 0) return [0, 0, 0, 0];
-
-  // Deep slate gradient background
-  let r = 15 + (1 - v) * 14;
-  let g = 23 + (1 - v) * 18;
-  let b = 42 + (1 - v) * 24;
-
-  // Subtle inner rim
-  if (bgDist > -0.03) {
-    r += 24;
-    g += 32;
-    b += 46;
+  // Work on the toolbar's 16 px grid so the tab and crescent survive at native size.
+  const x = u * 16;
+  const y = v * 16;
+  const front = roundedRectSdf(x, y, 8, 9.6, 7.5, 5.6, 2) <= 0;
+  const tab = roundedRectSdf(x, y, 4.2, 5, 3.7, 3, 1.7) <= 0;
+  if (front || tab) {
+    const moon = Math.hypot(x - 8, y - 8.9) <= 4;
+    const cutout = Math.hypot(x - 9.8, y - 7.4) <= 3.7;
+    return moon && !cutout ? [247, 251, 255, 255] : [45, 94, 210, 255];
   }
 
-  // Top stacked tab card (dimmed / discarded tab)
-  const backTab = roundedRectSdf(u, v, 0.5, 0.34, 0.27, 0.08, 0.04);
-  if (backTab <= 0) {
-    r = 71;
-    g = 85;
-    b = 105;
-  }
-
-  // Front active browser window card
-  const frontCard = roundedRectSdf(u, v, 0.5, 0.57, 0.31, 0.21, 0.06);
-  if (frontCard <= 0) {
-    r = 241;
-    g = 245;
-    b = 249;
-  }
-
-  // Memory bar track inside front card
-  const barTrack = roundedRectSdf(u, v, 0.5, 0.62, 0.21, 0.055, 0.03);
-  if (barTrack <= 0) {
-    r = 203;
-    g = 213;
-    b = 225;
-  }
-
-  // Emerald RAM fill bar (half budget)
-  const barFill = roundedRectSdf(u, v, 0.41, 0.62, 0.12, 0.055, 0.03);
-  if (barFill <= 0) {
-    r = 16;
-    g = 185;
-    b = 129;
-  }
-
-  // Accent dot on top-left of front card
-  const dot = Math.hypot(u - 0.29, v - 0.46) - 0.035;
-  if (dot <= 0) {
-    r = 16;
-    g = 185;
-    b = 129;
-  }
-
-  return [r, g, b, 255];
+  const back = roundedRectSdf(x, y, 10, 4, 4.5, 3.2, 1.6) <= 0;
+  return back ? [140, 199, 255, 255] : [0, 0, 0, 0];
 }
 
 function renderIcon(size: number): Uint8Array {

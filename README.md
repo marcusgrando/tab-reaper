@@ -8,10 +8,12 @@ Everything runs locally on your machine. No accounts, no telemetry, no external 
 
 Tab Reaper requests a memory check every 30 seconds and checks again when you open or switch tabs. The default budget is half your system RAM.
 
-- **Below the idle threshold (`80%` by default):** No background tabs are discarded by periodic sweeps.
-- **Idle band (`80%–99%` by default):** Discards eligible idle tabs (`>= 15` minutes by default), oldest idle first, up to 2 tabs per sweep pass.
-- **Size band (`>= 100%` by default):** Discards heaviest loaded tabs first (by JS heap, DOM, and media weight) when optional Weighted Eviction is enabled, or falls back to oldest idle first when disabled, up to 2 tabs per sweep pass. Both percentage thresholds are configurable in Settings.
+- **Below the sleep threshold (default 80%).** Memory checks leave tabs loaded.
+- **At or above the sleep threshold.** Each check puts up to two eligible tabs to sleep, starting with the least recently used. There is no minimum idle time.
+- **At or above the size threshold (default 100%).** With Weighted Eviction enabled, the heaviest tabs go first. As usage drops below the size threshold, checks resume least-recently-used order until usage falls below the sleep threshold or all remaining tabs are protected. Both thresholds are configurable.
 - **Chrome startup:** Non-protected background tabs are discarded immediately on startup (`startupSweep`, enabled by default).
+
+With the extension alone, these percentages compare system-wide memory use with your budget. Other apps can keep usage above the target even after all eligible tabs sleep. The optional Local Companion measures Chrome memory separately.
 
 Tab Reaper protects active, audible, pinned, kept, and allowlisted tabs by default. Checking for unsaved form edits requires the optional Weighted Eviction permission.
 
@@ -70,6 +72,8 @@ bun test
 bun run build        # outputs unpacked extension to dist/
 bun run package      # creates dist/tab-reaper-extension.zip
 bun run test:rust    # runs native-host unit tests
+bun x playwright-core install chromium --no-shell  # once for the UI test
+bun run test:ui      # tests the unpacked extension in Chromium
 ```
 
 To build and install the native host locally from source:

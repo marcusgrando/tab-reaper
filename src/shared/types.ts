@@ -10,8 +10,6 @@ export interface TabReaperConfig {
   idleEvictionPercent: number;
   /** Budget percentage at which size-based eviction starts (10 to 100, default 100, >= idleEvictionPercent). */
   sizeEvictionPercent: number;
-  /** Idle minutes before a loaded eligible tab is discarded once memory reaches idleEvictionPercent (0 disables idle discard). */
-  discardAfterMinutes: number;
   /** Discard non-protected background tabs immediately on Chrome startup. */
   startupSweep: boolean;
   protectActive: boolean;
@@ -94,14 +92,6 @@ export interface OpenTabInfo {
   canKeep: boolean;
   canSleep: boolean;
   canClose: boolean;
-}
-
-export interface EvictionCandidate {
-  tab: TabSummary;
-  idleMinutes: number;
-  weightMultiplier: number;
-  score: number;
-  reason: "startup" | "over_memory_budget" | "idle_timeout";
 }
 
 export type SnapshotTrigger = "auto" | "manual" | "pre_restore" | "window_closed";
