@@ -1,0 +1,169 @@
+import assert from "node:assert/strict";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
+import { chromium, type BrowserContext } from "playwright-core";
+import type { StatusPayload } from "../src/shared/types.ts";
+
+const cache = path.join(homedir(), ".cache", "tab-reaper");
+await mkdir(cache, { recursive: true });
+const dir = await mkdtemp(path.join(cache, "form-test-"));
+const extension = path.join(dir, "extension");
+const launch = () => chromium.launchPersistentContext(path.join(dir, "profile"), {
+  channel: "chromium",
+  args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+});
+let context: BrowserContext | undefined;
+try {
+  // Seed a disposable profile with page access. Run every assertion with the shipping manifest.
+  await cp(path.resolve(import.meta.dir, "../dist"), extension, { recursive: true });
+  const manifestPath = path.join(extension, "manifest.json");
+  const original = await readFile(manifestPath, "utf8");
+  const seed = JSON.parse(original);
+  seed.permissions.push("scripting");
+  seed.optional_permissions = seed.optional_permissions.filter((p: string) => p !== "scripting");
+  seed.host_permissions = seed.optional_host_permissions;
+  delete seed.optional_host_permissions;
+  await writeFile(manifestPath, JSON.stringify(seed));
+  context = await launch();
+  const setup = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  await setup.evaluate(() => chrome.storage.local.set({
+    "tabReaper.config": { protectUnsavedForms: false, startupSweep: false, memoryBudgetMode: "fixed_gb", memoryBudgetGb: 512 },
+  }));
+  await context.close();
+  await writeFile(manifestPath, original);
+  context = await launch();
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  const options = await context.newPage();
+  await options.goto(new URL("options.html", worker.url()).href);
+  const url = "https://planner.example.test/";
+  const child = "https://editor.example.test/";
+  await context.route(url, route => route.fulfill({ contentType: "text/html", body: `
+    <input id="title"><input id="helper" style="width:0;height:0;padding:0;border:0">
+    <form role="search"><input id="search"></form><input type="password"><input type="date"><input type="checkbox">
+    <form id="draft"><button type="reset">Reset</button></form><input form="draft" type="checkbox" id="confirm">
+    <input form="draft" type="radio" name="group" id="a" checked>
+    <input form="draft" type="radio" name="group" id="b">
+    <select form="draft" size="2"><option selected>A</option><option>B</option></select>
+    <iframe src="${child}"></iframe>
+    <script>document.querySelector("#title").value = "Existing plan";</script>` }));
+  await context.route(child, route => route.fulfill({ contentType: "text/html", body: '<div contenteditable>Note</div>' }));
+  const page = await context.newPage();
+  await page.goto(url);
+  const debuggerSession = await context.newCDPSession(page);
+  const { frameTree } = await debuggerSession.send("Page.getFrameTree");
+  let isolatedWorld: number | undefined;
+  debuggerSession.on("Runtime.executionContextCreated", ({ context }) => {
+    if (context.name === "Tab Reaper" && context.auxData?.frameId === frameTree.frame.id) isolatedWorld = context.id;
+  });
+  debuggerSession.on("Runtime.executionContextsCleared", () => { isolatedWorld = undefined; });
+  await debuggerSession.send("Runtime.enable");
+  // Inspect the isolated world even after Chrome withdraws the extension's scripting API.
+  const waitForObserver = async (expected: boolean) => {
+    const deadline = Date.now() + 3000;
+    do {
+      const read = isolatedWorld && await debuggerSession.send("Runtime.evaluate", {
+        contextId: isolatedWorld, expression: "Boolean(window.tabReaperFormObserver?.active)",
+      });
+      if (Boolean(read && read.result.value) === expected) return;
+      await Bun.sleep(20);
+    } while (Date.now() < deadline);
+    assert.fail(`Observer did not become ${expected ? "active" : "inactive"}`);
+  };
+  const status = async () => {
+    const result: StatusPayload = await options.evaluate(() => chrome.runtime.sendMessage({ type: "get_status" }));
+    return result.openTabs.find(tab => tab.url === url)!;
+  };
+  const expectDirty = async (expected: boolean, why: string) => assert.equal((await status()).hasUnsavedForm, expected, why);
+  const configure = async (enabled: boolean) => {
+    await options.evaluate(async protectUnsavedForms => {
+      const key = "tabReaper.config";
+      const values = await chrome.storage.local.get(key);
+      await chrome.storage.local.set({ [key]: { ...values[key], protectUnsavedForms } });
+    }, enabled);
+    await options.waitForFunction(async expected =>
+      (await chrome.scripting.getRegisteredContentScripts()).length === Number(expected), enabled);
+    await waitForObserver(enabled);
+  };
+  const title = page.locator("#title");
+  await expectDirty(false, "protection is off");
+  await configure(true);
+  const storageAccess = await debuggerSession.send("Runtime.evaluate", {
+    contextId: isolatedWorld, awaitPromise: true,
+    expression: "chrome.storage.local.get('tabReaper.config').then(() => true, () => false)",
+  });
+  assert.equal(storageAccess.result.value, false, "page observer cannot read profile data");
+  await expectDirty(false, "app-populated title on an already open page");
+  await title.evaluate((el: HTMLInputElement) => {
+    el.value = "Restored plan";
+    el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+  });
+  await page.locator("[type=password]").fill("ignored");
+  await page.locator("#helper").press("x");
+  await page.locator("#search").press("x");
+  await page.locator("[type=date]").fill("2026-11-22");
+  await page.locator("[type=checkbox]").first().check();
+  await expectDirty(false, "synthetic input, password and standalone filters");
+  await title.press("End");
+  await title.press("x");
+  await expectDirty(true, "first real edit after a cached clean sample");
+  await options.bringToFront();
+  const { id } = await status();
+  assert.deepEqual(await options.evaluate(tabId => chrome.runtime.sendMessage({ type: "discard_tab", tabId }), id), { ok: false });
+  await page.bringToFront();
+  await title.press("ControlOrMeta+z");
+  await expectDirty(false, "undo restored the pre-edit value");
+  await page.locator("#confirm").check();
+  await expectDirty(true, "external form checkbox");
+  await page.locator("#confirm").uncheck();
+  await expectDirty(false, "checkbox restored");
+  await page.locator("#confirm").check();
+  await page.getByRole("button", { name: "Reset" }).click();
+  assert.equal(await page.locator("#confirm").isChecked(), false);
+  await options.waitForFunction(async id => {
+    const status: StatusPayload = await chrome.runtime.sendMessage({ type: "get_status" });
+    return status.openTabs.find(tab => tab.id === id)?.hasUnsavedForm === false;
+  }, id, { timeout: 4000, polling: 100 });
+  await page.locator("#b").check();
+  await expectDirty(true, "radio group changed");
+  await page.locator("#a").check();
+  await expectDirty(false, "radio group restored");
+  await page.locator("select").press("ArrowDown");
+  assert.equal(await page.locator("select").inputValue(), "B");
+  await expectDirty(true, "form selection changed");
+  await page.locator("select").press("ArrowUp");
+  await expectDirty(false, "selection restored");
+  const editor = page.frameLocator("iframe").locator("[contenteditable]");
+  await editor.press("End");
+  await editor.press("x");
+  await expectDirty(true, "trusted edit in a cross-origin frame");
+  await editor.press("Backspace");
+  await expectDirty(false, "frame editor restored");
+  await editor.fill("");
+  await editor.fill("Note");
+  await expectDirty(false, "rich text restored after replacing its contents");
+  await title.press("End");
+  await title.press("x");
+  await title.evaluate(el => el.replaceWith(el.cloneNode(true)));
+  await expectDirty(true, "redrawing the control preserves a pending draft");
+  await configure(false);
+  await title.press("y");
+  await configure(true);
+  await expectDirty(false, "re-enabling starts fresh on an open page");
+  await page.reload();
+  await waitForObserver(true);
+  await expectDirty(false, "app-populated title on a newly registered document");
+  await title.press("End");
+  await title.press("x");
+  await expectDirty(true, "edits observed after navigation");
+  await options.evaluate(() => chrome.permissions.remove({ permissions: ["scripting"] }));
+  await waitForObserver(false);
+  await page.reload();
+  await title.press("x");
+  await waitForObserver(false);
+  await expectDirty(false, "revoking page access clears protection");
+  console.log("Form protection passed in Chromium.");
+} finally {
+  await context?.close();
+  await rm(dir, { recursive: true, force: true });
+}

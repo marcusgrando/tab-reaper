@@ -1,4 +1,6 @@
 import {
+  CONFIG_STORAGE_KEY,
+  DEFAULT_CONFIG,
   isInternalUrl,
   loadConfig,
   REOPEN_OPTIONS_KEY,
@@ -7,6 +9,7 @@ import {
 import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabReaperConfig, TabSummary } from "../shared/types.ts";
 import { updateActionBadge } from "./badge.ts";
 import { computeOpenTabActions, isTabProtected, MAX_MEMORY_EVICTIONS_PER_PASS, planEvictions } from "./eviction.ts";
+import { reconcileFormObserver } from "./form-observer.ts";
 import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
@@ -65,6 +68,7 @@ const SWEEP_ALARM = "tabReaper.sweep";
 const SWEEP_PERIOD_MINUTES = 0.5;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let sweepInFlight = false;
+const privateStorage = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
 const LAST_SYNC_ATTEMPT_KEY = "tabReaper.lastSyncAttempt";
 
 function syncConfig() {
@@ -199,7 +203,7 @@ async function runSweep(
       memory && (memory.overBudget || (memory.budgetBytes > 0 && memory.usedBytes / memory.budgetBytes >= sizeThreshold)),
     );
     const shouldSample = mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand;
-    const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now) : new Map();
+    const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms) : new Map();
 
     const evictions = planEvictions({
       tabs,
@@ -273,7 +277,7 @@ async function buildStatus(): Promise<StatusPayload> {
   }
 
   const loadedSummaries = tabs.filter((t) => !t.discarded);
-  const weights = hostAccess ? await sampleTabWeights(loadedSummaries, now) : await loadCachedWeights(now);
+  const weights = hostAccess ? await sampleTabWeights(loadedSummaries, now, config.protectUnsavedForms) : await loadCachedWeights(now);
 
   let loadedCount = 0;
   let discardedCount = 0;
@@ -346,15 +350,29 @@ async function buildStatus(): Promise<StatusPayload> {
   };
 }
 
+function pageAccessChanged(change: chrome.permissions.Permissions) {
+  if (change.permissions?.includes("scripting") || change.origins?.length) return reconcileFormObserver(true);
+}
+
+chrome.permissions.onAdded.addListener(pageAccessChanged);
+chrome.permissions.onRemoved.addListener(pageAccessChanged);
+chrome.storage.onChanged.addListener((changes, area) => {
+  const entry = changes[CONFIG_STORAGE_KEY];
+  if (area !== "local" || !entry) return;
+  const before = entry.oldValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
+  const after = entry.newValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
+  if (before !== after) return reconcileFormObserver(true);
+});
+
 chrome.runtime.onInstalled.addListener(async () => {
-  await ensureAlarm();
+  await Promise.all([ensureAlarm(), reconcileFormObserver(await hasHostAccessPermission())]);
   const tabs = await queryAllTabs();
   const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
   await saveActivityState(activity);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  await ensureAlarm();
+  await Promise.all([ensureAlarm(), reconcileFormObserver()]);
   await clearKeptTabIds();
   const config = await loadConfig();
   if (config.startupSweep) {
@@ -475,7 +493,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: BackgroundMessage | string, sender, sendResponse) => {
+  if (message === "tab-reaper-form-access") {
+    void Promise.all([loadConfig(), hasHostAccessPermission(), privateStorage])
+      .then(([config, access]) => sendResponse(config.protectUnsavedForms && access))
+      .catch(() => sendResponse(false));
+    return true;
+  }
+  if (typeof message === "string") return false;
+  if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL(""))) return false;
   void handleMessage(message)
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));

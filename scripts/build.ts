@@ -9,6 +9,7 @@ await mkdir(distDir, { recursive: true });
 
 const entrypoints = [
   { in: path.join(root, "src/background/index.ts"), out: "background.js" },
+  { in: path.join(root, "src/content/form-observer.ts"), out: "form-observer.js" },
   { in: path.join(root, "src/popup/popup.ts"), out: "popup.js" },
   { in: path.join(root, "src/options/options.ts"), out: "options.js" },
 ];

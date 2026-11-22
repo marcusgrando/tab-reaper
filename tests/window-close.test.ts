@@ -19,7 +19,8 @@ async function worker() {
   const session = area(sessionData);
   const previous = globalThis.chrome;
   Object.assign(globalThis, { chrome: {
-    storage: { local: area(localData), session },
+    storage: { local: { ...area(localData), setAccessLevel: async () => {} }, session, onChanged: event("storageChanged") },
+    permissions: { onAdded: event("permissionAdded"), onRemoved: event("permissionRemoved") },
     tabs: { onMoved: event("moved"), onDetached: event("detached"), onAttached: event("attached"), onUpdated: event("updated"), onRemoved: event("removed"), onCreated: event("created"), onActivated: event("activated") },
     tabGroups: { onUpdated: event("groupChanged"), query: async () => [{ id: 7, title: "Research", color: "green", collapsed: true, windowId: 5 }] },
     windows: { onBoundsChanged: event("bounds"), onRemoved: event("closed"), getAll: async () => [{ id: 5, state: "maximized", focused: true }] },
@@ -160,7 +161,8 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
   const calls: string[] = [];
   try {
     localData["tabReaper.folderSyncOptedIn"] = false;
-    Object.assign(chrome, { permissions: { contains: async () => true }, scripting: {
+    Object.assign(chrome, { permissions: { ...chrome.permissions, contains: async () => true }, scripting: {
+      getRegisteredContentScripts: async () => [{ id: "tab-reaper-form-observer" }],
       executeScript: async () => { calls.push("script"); return []; },
     } });
     Object.assign(chrome.tabs, { query: async () => tabs });
@@ -172,6 +174,7 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
     Object.assign(chrome.alarms, { get: async () => ({ periodInMinutes: 1 }),
       create: async (_name: string, spec: { periodInMinutes: number }) => alarms.push(spec.periodInMinutes) });
     await listeners.installed!();
+    calls.length = 0;
     await listeners.alarm!({ name: "tabReaper.sweep" });
     await Bun.sleep(0);
     expect(alarms).toEqual([0.5]);
@@ -188,6 +191,36 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
     await listeners.alarm!({ name: "tabReaper.sweep" });
     await Bun.sleep(0);
     expect(calls).toEqual(["chrome_memory"]);
+  } finally {
+    restore();
+  }
+});
+
+test("granting page access attaches to already loaded tabs and revocation stops them", async () => {
+  const { listeners, tabs, restore } = await worker();
+  try {
+    let access = true;
+    let registered = false;
+    const attached: number[] = [];
+    const stopped: number[] = [];
+    tabs[1]!.discarded = true;
+    tabs[2]!.url = "chrome://extensions/";
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      sendMessage: async (tabId: number) => stopped.push(tabId),
+    });
+    Object.assign(chrome.permissions, { contains: async () => access });
+    Object.assign(chrome, { scripting: {
+      getRegisteredContentScripts: async () => registered ? [{ id: "tab-reaper-form-observer" }] : [],
+      registerContentScripts: async () => { registered = true; },
+      executeScript: async ({ target }: { target: { tabId: number } }) => attached.push(target.tabId),
+    } });
+    await listeners.permissionAdded!({ permissions: ["scripting"], origins: ["<all_urls>"] });
+    expect(registered).toBe(true);
+    expect(attached).toEqual([1]);
+    access = false;
+    await listeners.permissionRemoved!({ permissions: ["scripting"] });
+    expect(stopped).toEqual([1]);
   } finally {
     restore();
   }

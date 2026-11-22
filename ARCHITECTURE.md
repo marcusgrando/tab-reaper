@@ -13,7 +13,7 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 | Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `proc_pid_rusage` `phys_footprint` (macOS, matching Activity Monitor), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** `chrome.system.memory` OS pressure (`availableCapacity`). | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
 | Memory-banded discarding (`idleEvictionPercent` / `sizeEvictionPercent`, defaults `80%` / `100%`) | Periodic `chrome.alarms` sweep and event-driven checks using `chrome.tabs.discard()`. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
 | Evict heaviest tabs first at the configured size threshold | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) and disabled Weighted Eviction fall back to oldest idle first. |
-| Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Zero permanent `content_scripts` in manifest. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
+| Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Only profiles with page access and form protection enabled register an edit observer. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
 | Protect active, audible, pinned, kept, unsaved-form, and allowlisted tabs | Filter `tab.active`, `tab.audible`, `tab.pinned`, kept state, unsaved form edits, and user domain allowlist before discard. | Feasible | `tabId` resets on browser restart, so `lastActiveAt` is persisted in `chrome.storage.local` and reconciled by URL on startup. |
 | Fast open-tabs palette | `chrome.commands` (`Alt+Shift+K`) opens the Tab Reaper open-tabs palette focused on search. | Feasible | None. |
 | Conflict-free session snapshots | Gated on optional Folder Sync via the local companion (`com.tabreaper.host`). Captures windows, tab order, pinned/kept state, and tab groups. | Feasible | Requires installing the optional native host and selecting a sync folder. |
@@ -65,13 +65,16 @@ When memory reaches the size threshold (default `100%` of budget) and optional W
 - `usedJSHeapSize` (MB) from `performance.memory`
 - DOM node count (`document.getElementsByTagName('*').length`)
 - Heavy media elements (`iframe`, `canvas`, `video` count)
-- Unsaved non-password form edits (used to protect dirty forms when `protectUnsavedForms` is enabled)
 
-Form inspection uses the same rules on every host. Visible, editable native text fields can contain drafts outside a form. A changed selection, checkbox, or radio button counts only when it has a form owner, including one assigned by the HTML `form` attribute. Custom editors may hold drafts outside native controls, and the DOM cannot confirm that a server has saved an edit.
+Pages where scripting is disallowed receive default weight (`1.0`). When Weighted Eviction is disabled, the size band falls back to oldest idle first.
 
-A cached positive form result is rechecked before it protects a tab or appears in the palette. If the page cannot be inspected, the previous positive lasts until the sample expires. Revoking page access removes the form indication. The final check before discard also catches edits made after a negative sample.
+### Detecting pending edits
 
-Pages where scripting is disallowed receive default weight (`1.0`). When Weighted Eviction is disabled, the size band falls back to oldest idle first. No permanent content scripts are ever registered.
+With `protectUnsavedForms` enabled and Weighted Eviction page access granted, Chrome loads an isolated content script at `document_start` in each accessible frame. Enabling protection also attaches it to loaded tabs. The script checks access before listening and again when Chrome restores a document from the back/forward cache. The observer cannot reconstruct edits made before it starts.
+
+Trusted edit events on visible text inputs, textareas and editable HTML count on every site. Native selections, toggles and other non-text inputs require a form owner. Search, navigation and toolbar controls and password fields are excluded. The observer compares the current field with a local fingerprint or selection recorded before the edit. Reverting a field clears its flag. Removing an edited element leaves the document protected because an app can keep the draft while rebuilding its UI. A submission or silent autosave has no universal browser acknowledgment.
+
+The palette and eviction planner read each frame's edit flag independently of the two-minute weight cache. A failed read can reuse the last positive result until the sample expires. The final discard check reads the live document again. Only the boolean crosses from a frame to the worker.
 
 ### Protections
 
@@ -126,8 +129,8 @@ Each native file request carries the directory selected at the start of the oper
 
 - **Core permissions:** `tabs`, `storage`, `alarms`, `system.memory`, `tabGroups`.
 - **Optional permissions (single-codebase Chrome Web Store compatibility):**
-  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand tab weight and form sampling.
-  - `optional_host_permissions`: `<all_urls>` for on-demand tab weight sampling. Users who skip granting page access fall back to oldest idle first ordering.
+  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand weight sampling and the optional form edit observer.
+  - `optional_host_permissions`: `<all_urls>` for sampling and observing accessible pages. Users who skip granting page access fall back to oldest idle first ordering.
   - Both optional capabilities can be toggled with one click on the Options page, avoiding broad install-time permission warnings on the Chrome Web Store.
 
 ## Configuration Defaults

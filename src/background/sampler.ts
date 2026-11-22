@@ -30,14 +30,10 @@ export async function hasHostAccessPermission(): Promise<boolean> {
   }
 }
 
-/**
- * Samples candidate loaded tabs on demand via chrome.scripting.executeScript.
- * Never injects permanent content scripts. Falls back to weight 1.0 when
- * optional host permission is not granted or a page blocks scripting.
- */
 export async function sampleTabWeights(
   tabs: TabSummary[],
   now = Date.now(),
+  protectUnsavedForms = true,
 ): Promise<Map<number, TabWeightSample>> {
   const weights = new Map<number, TabWeightSample>();
   if (tabs.length === 0) return weights;
@@ -54,12 +50,12 @@ export async function sampleTabWeights(
     let sample: TabWeightSample | null;
     if (cached && now - cached.sampledAt < SAMPLE_TTL_MS) {
       sample = cached;
-      // A saved draft or a new document can reuse the same tab and memory sample.
-      if (cached.hasUnsavedForm && (await inspectFormState(tab.id)) === false) {
-        sample = { ...cached, hasUnsavedForm: false };
+      const dirty = protectUnsavedForms ? await inspectFormState(tab.id) : false;
+      if (dirty !== undefined && dirty !== cached.hasUnsavedForm) {
+        sample = { ...cached, hasUnsavedForm: dirty };
       }
     } else {
-      sample = await sampleSingleTab(tab.id, now);
+      sample = await sampleSingleTab(tab.id, now, protectUnsavedForms);
     }
     if (!sample) return;
     weights.set(tab.id, sample);
@@ -84,71 +80,8 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
   return weights;
 }
 
-function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
-  const detectUnsavedForm = (): boolean => {
-    const isVisibleEditable = (el: HTMLElement): boolean => {
-      if (el.hidden) return false;
-      if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
-      if (el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) === false) return false;
-      if (el.closest("[inert], [aria-hidden='true'], header, nav, [role='toolbar'], [role='search'], [role='menubar']")) return false;
-      const role = (el.getAttribute("role") || "").toLowerCase();
-      if (role === "searchbox" || role === "combobox") return false;
-      return true;
-    };
-
-    const textareas = document.querySelectorAll("textarea");
-    for (const ta of textareas) {
-      if (ta.disabled || ta.readOnly || !isVisibleEditable(ta)) continue;
-      if (ta.value !== ta.defaultValue) {
-        return true;
-      }
-    }
-
-    const skipTypes = new Set([
-      "hidden",
-      "password",
-      "submit",
-      "button",
-      "reset",
-      "image",
-      "search",
-    ]);
-    const inputs = document.querySelectorAll("input");
-    for (const input of inputs) {
-      const type = (input.type || "text").toLowerCase();
-      if (skipTypes.has(type) || input.disabled || input.readOnly || !isVisibleEditable(input)) continue;
-      if (type === "checkbox" || type === "radio") {
-        if (input.form && input.checked !== input.defaultChecked) return true;
-      } else if (input.value !== input.defaultValue) {
-        if (type !== "range" && type !== "color") return true;
-        // The browser supplies a value even when the markup omits one.
-        const pristine = input.cloneNode(false) as HTMLInputElement;
-        pristine.value = input.defaultValue;
-        if (input.value !== pristine.value) return true;
-      }
-    }
-    const selects = document.querySelectorAll("select");
-    for (const select of selects) {
-      if (!select.form || select.disabled || !isVisibleEditable(select)) continue;
-      const options = Array.from(select.options);
-      if (select.multiple) {
-        if (options.some((opt) => opt.selected !== opt.defaultSelected)) return true;
-      } else {
-        let initialIndex = -1;
-        for (let i = 0; i < options.length; i++) {
-          if (options[i]!.defaultSelected) initialIndex = i;
-        }
-        if (initialIndex === -1 && select.size <= 1) {
-          initialIndex = options.findIndex((opt) => !opt.disabled && !opt.closest("optgroup[disabled]"));
-        }
-        if (select.selectedIndex !== initialIndex) return true;
-      }
-    }
-
-    return false;
-  };
-
-  const hasUnsavedForm = detectUnsavedForm();
+function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): RawPageMetrics | boolean {
+  const hasUnsavedForm = protectUnsavedForms && window.tabReaperFormObserver?.dirty === true;
   if (!includeMetrics) return hasUnsavedForm;
   if (window !== window.top) {
     return { jsHeapBytes: 0, domNodes: 0, mediaNodes: 0, hasUnsavedForm };
@@ -166,7 +99,10 @@ function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
 export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
   if (!chrome.scripting?.executeScript) return false;
   if (!(await hasHostAccessPermission())) return false;
-  return (await inspectFormState(tabId)) ?? false;
+  const dirty = await inspectFormState(tabId);
+  if (dirty !== undefined) return dirty;
+  const cached = (await loadSampleCache())[String(tabId)];
+  return cached?.hasUnsavedForm === true && Date.now() - cached.sampledAt < SAMPLE_TTL_MS;
 }
 
 async function inspectFormState(tabId: number): Promise<boolean | undefined> {
@@ -183,13 +119,13 @@ async function inspectFormState(tabId: number): Promise<boolean | undefined> {
   }
 }
 
-async function sampleSingleTab(tabId: number, now: number): Promise<TabWeightSample | null> {
+async function sampleSingleTab(tabId: number, now: number, protectUnsavedForms: boolean): Promise<TabWeightSample | null> {
   if (!chrome.scripting?.executeScript) return null;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       func: inspectPageInTab,
-      args: [true],
+      args: [true, protectUnsavedForms],
     });
     const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
     const metrics = topFrame?.result as RawPageMetrics | undefined;

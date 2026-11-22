@@ -1,67 +1,6 @@
 import { expect, test } from "bun:test";
 import { checkTabHasUnsavedForm, loadCachedWeights, sampleTabWeights } from "../src/background/sampler.ts";
 
-test("live discard inspection recognizes external form controls and native default values", async () => {
-  const globals = ["chrome", "location", "document"] as const;
-  const previous = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key));
-  const visible = { checkVisibility: () => true, offsetHeight: 16, offsetWidth: 100, closest: () => null, getAttribute: () => null };
-  const input = (type: string, value: string, defaultValue: string, pristine = defaultValue) => ({
-    ...visible, tagName: "INPUT", type, value, defaultValue, cloneNode: () => ({
-      get value() { return pristine; }, set value(_v: string) {},
-    }),
-  });
-  const options = [{ selected: true, defaultSelected: false, disabled: false, closest: () => null }];
-  const select = { ...visible, form: null as object | null, tagName: "SELECT", selectedIndex: 0, options, size: 3 };
-  type Control = ReturnType<typeof input> | typeof select;
-  let controls: Control[] = [];
-  const form = { get elements() { return controls; }, querySelectorAll: (tag: string) =>
-    controls.filter(c => c.tagName === tag.toUpperCase() && !("external" in c)) };
-  try {
-    Object.assign(globalThis, {
-      location: { hostname: "editor.test" },
-      document: { querySelectorAll: (tag: string) => tag === "form" ? [form] :
-        controls.filter(c => tag.split(/,\s*/).includes(c.tagName.toLowerCase())) },
-      chrome: { permissions: { contains: async () => true }, scripting: {
-        executeScript: async ({ func, args }: { func: (metrics: boolean) => boolean; args: [boolean] }) =>
-          [{ frameId: 0, result: func(...args) }],
-      } },
-    });
-    controls = [Object.assign(input("text", "draft", ""), { external: true, form })];
-    expect(await checkTabHasUnsavedForm(1)).toBe(true);
-    controls = [select];
-    expect(await checkTabHasUnsavedForm(1)).toBe(false);
-    select.form = form;
-    expect(await checkTabHasUnsavedForm(1)).toBe(true);
-    select.selectedIndex = -1;
-    expect(await checkTabHasUnsavedForm(1)).toBe(false);
-    for (const type of ["checkbox", "radio"]) {
-      const toggle = { ...input(type, "on", ""), checked: true, defaultChecked: false, form: null as object | null };
-      controls = [toggle];
-      expect(await checkTabHasUnsavedForm(1)).toBe(false);
-      toggle.form = form;
-      expect(await checkTabHasUnsavedForm(1)).toBe(true);
-    }
-    for (const hostname of ["docs.google.com", "editor.test"]) {
-      Object.assign(globalThis, { location: { hostname } });
-      controls = [input("text", "draft", "")];
-      expect(await checkTabHasUnsavedForm(1)).toBe(true);
-      controls = [{ ...input("text", "draft", ""), checkVisibility: () => false }];
-      expect(await checkTabHasUnsavedForm(1)).toBe(false);
-      controls = [];
-      expect(await checkTabHasUnsavedForm(1)).toBe(false);
-    }
-    controls = [input("range", "50", "", "50"), input("color", "#000000", "", "#000000")];
-    expect(await checkTabHasUnsavedForm(1)).toBe(false);
-    controls[0] = input("range", "75", "", "50");
-    expect(await checkTabHasUnsavedForm(1)).toBe(true);
-  } finally {
-    globals.forEach((key, i) => {
-      if (previous[i]) Object.defineProperty(globalThis, key, previous[i]!);
-      else Reflect.deleteProperty(globalThis, key);
-    });
-  }
-});
-
 test("cached form protection follows live frame results while weight metrics keep their timestamp", async () => {
   const previous = globalThis.chrome;
   const tab = { id: 1, url: "https://editor.test/", title: "", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
@@ -97,7 +36,29 @@ test("cached form protection follows live frame results while weight metrics kee
     dirty = false;
     expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false });
     expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false });
-    expect(inspections).toEqual([1, 1, 1]);
+    dirty = true;
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true });
+    expect(inspections).toEqual([1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
+    inspections.length = 0;
+    expect((await sampleTabWeights([tab], 1100, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
+    expect(inspections).toEqual([]);
+  } finally {
+    Object.assign(globalThis, { chrome: previous });
+  }
+});
+
+test("an unavailable live check preserves a recent observed edit before discard", async () => {
+  const previous = globalThis.chrome;
+  try {
+    const sample = { sampledAt: Date.now(), hasUnsavedForm: true };
+    Object.assign(globalThis, { chrome: {
+      scripting: { executeScript: async () => { throw new Error("Frame unavailable"); } },
+      permissions: { contains: async () => true },
+      storage: { session: { get: async () => ({ "tabReaper.weightSamples": { 1: sample } }) } },
+    } });
+    expect(await checkTabHasUnsavedForm(1)).toBe(true);
+    sample.sampledAt -= 121_000;
+    expect(await checkTabHasUnsavedForm(1)).toBe(false);
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }

@@ -1,6 +1,6 @@
 # Privacy Policy — Tab Reaper
 
-**Last updated:** 2026-11-21
+**Last updated:** 2026-11-22
 
 Tab Reaper runs entirely on your device. It does not collect, transmit, sell, or share any personal data, browsing history, or telemetry with any server.
 
@@ -12,7 +12,7 @@ By default, all data used by Tab Reaper stays inside your browser profile:
 - **Tab activity timestamps** (`chrome.storage.local`): last-active timestamps and URLs used to rank tabs by recent activity across browser restarts.
 - **Local session snapshot cache** (`chrome.storage.local`, key `tabReaper.sessionSnapshots`): active only when Folder Sync is configured. Stores up to 5 recent auto snapshots (plus pending manual snapshots, capped at 1 MB total) of open `http(s)` tabs (URL, title, order, pinned/kept state, window state, and tab group metadata) captured on your configured interval (`1` to `1440` minutes, default `5`), before restores, on window close, and on manual save. Snapshots never sync via Chrome Sync and can be cleared at any time in Settings.
 - **Window recovery cache** (`chrome.storage.session`): active only when Folder Sync and automatic snapshots are enabled. Keeps open tabs' URLs, titles, and window metadata in session storage to capture a closing window after the extension worker restarts.
-- **Transient weight cache** (`chrome.storage.session`): short-lived numeric metrics (JS heap size, DOM node count, media element count) cleared when Chrome closes.
+- **Transient weight cache** (`chrome.storage.session`): short-lived numeric metrics (JS heap size, DOM node count, media element count) and the last observed edit flag cleared when Chrome closes.
 
 ## Optional Folder Sync (Off by Default)
 
@@ -37,7 +37,7 @@ Tab Reaper itself makes zero network requests. If you choose a folder managed by
 ### Optional Permissions (Off by Default)
 
 - `nativeMessaging`: connects only to the local `com.tabreaper.host` binary if you choose to install it, to read exact numeric Chrome process memory totals and, only if you explicitly select a sync folder for this profile, read and write Tab Reaper backup files strictly inside that folder.
-- `scripting` and `<all_urls>`: used only when you opt into Weighted Eviction to read numeric `performance.memory.usedJSHeapSize`, DOM element count, `iframe`/`canvas`/`video` counts, and a local boolean indicating whether visible non-password form inputs have unsaved edits. Password inputs (`type="password"`), cookies, and page text are never read, and no field values are ever stored or transmitted.
+- `scripting` and `<all_urls>` let Weighted Eviction measure heap size and count DOM and media elements. When form protection is also enabled, an isolated script in each accessible frame compares edits with the field's value before editing. It keeps a fingerprint or selection state in that document's memory and reports only whether an edit is pending. Password inputs are excluded. Field contents and fingerprints never leave the document. Disabling protection or revoking page access stops observation.
 
 ## Incognito Mode
 
