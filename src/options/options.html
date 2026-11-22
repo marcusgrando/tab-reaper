@@ -22,6 +22,62 @@
     <main class="container">
       <h1>Settings</h1>
 
+      <section id="setup-card" class="setup-card hidden" aria-labelledby="setup-heading">
+        <div class="section-head">
+          <h2 id="setup-heading">Quick setup</h2>
+          <button id="btn-setup-dismiss" type="button" class="secondary small">Done</button>
+        </div>
+        <p class="hint">
+          Tab Reaper is active. Complete these optional steps to unlock exact Chrome RAM tracking, weighted sleep, and automatic tab backups.
+        </p>
+
+        <ol class="setup-steps">
+          <li id="setup-step-native" class="setup-step">
+            <span class="setup-badge" aria-hidden="true">1</span>
+            <div class="setup-step-body">
+              <strong>Connect Local Companion</strong>
+              <p class="hint">
+                Measures Chrome’s exact RAM and enables Folder Sync. Already pre-registered if you used the Quick Install command.
+              </p>
+              <div id="setup-native-status" class="status-text" role="status"></div>
+            </div>
+            <div class="cap-buttons">
+              <button id="btn-setup-native" type="button" class="small">Connect</button>
+            </div>
+          </li>
+
+          <li id="setup-step-host" class="setup-step">
+            <span class="setup-badge" aria-hidden="true">2</span>
+            <div class="setup-step-body">
+              <strong>Weighted Eviction &amp; form protection</strong>
+              <p class="hint">
+                Puts the heaviest tabs to sleep first at the size threshold and protects tabs with unsaved form edits.
+              </p>
+              <div id="setup-host-status" class="status-text" role="status"></div>
+            </div>
+            <div class="cap-buttons">
+              <button id="btn-setup-host" type="button" class="small">Enable</button>
+            </div>
+          </li>
+
+          <li id="setup-step-sync" class="setup-step">
+            <span class="setup-badge" aria-hidden="true">3</span>
+            <div class="setup-step-body">
+              <strong>Back up tabs to a cloud folder</strong>
+              <p class="hint">
+                Save automatic snapshots to iCloud Drive, Google Drive, OneDrive, or Dropbox.
+              </p>
+              <div id="setup-sync-status" class="status-text" role="status"></div>
+              <div id="setup-sync-actions" class="sync-candidates"></div>
+            </div>
+          </li>
+        </ol>
+
+        <p class="setup-tip">
+          Tip: Pin Tab Reaper from Chrome’s puzzle menu and press <kbd id="setup-shortcut">Alt+Shift+K</kbd> anytime to search and manage open tabs.
+        </p>
+      </section>
+
       <form id="settings-form">
         <section id="memory">
           <h2>Memory</h2>

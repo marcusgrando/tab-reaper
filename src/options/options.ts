@@ -2,6 +2,7 @@ import {
   DEFAULT_CONFIG,
   MAX_DISCARDS_WITHOUT_RELIEF,
   REOPEN_OPTIONS_KEY,
+  SETUP_PENDING_KEY,
   computeMemoryBudgetBytes,
   sanitizeConfig,
 } from "../shared/config.ts";
@@ -66,6 +67,19 @@ const btnSyncNow = document.getElementById("btn-sync-now") as HTMLButtonElement;
 const btnSyncDisable = document.getElementById("btn-sync-disable") as HTMLButtonElement;
 const deviceNameInput = document.getElementById("device-name-input") as HTMLInputElement;
 const btnDeviceName = document.getElementById("btn-device-name") as HTMLButtonElement;
+
+const setupCardEl = document.getElementById("setup-card") as HTMLElement;
+const btnSetupDismiss = document.getElementById("btn-setup-dismiss") as HTMLButtonElement;
+const setupStepNative = document.getElementById("setup-step-native") as HTMLElement;
+const setupStepHost = document.getElementById("setup-step-host") as HTMLElement;
+const setupStepSync = document.getElementById("setup-step-sync") as HTMLElement;
+const setupNativeStatus = document.getElementById("setup-native-status") as HTMLElement;
+const setupHostStatus = document.getElementById("setup-host-status") as HTMLElement;
+const setupSyncStatus = document.getElementById("setup-sync-status") as HTMLElement;
+const setupSyncActions = document.getElementById("setup-sync-actions") as HTMLElement;
+const btnSetupNative = document.getElementById("btn-setup-native") as HTMLButtonElement;
+const btnSetupHost = document.getElementById("btn-setup-host") as HTMLButtonElement;
+const setupShortcutEl = document.getElementById("setup-shortcut") as HTMLElement;
 
 function syncBudgetVisibility(): void {
   const isFixed = memoryMode.value === "fixed_gb";
@@ -340,11 +354,117 @@ function buildInstallCommand(extensionId: string): string {
   return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/${versionTag}/native-host/install.sh | TAB_REAPER_VERSION=${versionTag} bash -s -- ${extensionId}`;
 }
 
+let setupVisible = false;
+let hasNativePerm = false;
+let hasHostPerm = false;
+let lastSyncStatus: SyncStatus | null = null;
+let lastSyncCandidates: SyncFolderCandidate[] = [];
+let setupNativeError: string | null = null;
+
+function setStepDone(stepEl: HTMLElement, stepNumber: string, done: boolean): void {
+  stepEl.classList.toggle("done", done);
+  const badge = stepEl.querySelector(".setup-badge");
+  if (badge) badge.textContent = done ? "\u2713" : stepNumber;
+}
+
+function renderSetupCard(): void {
+  setupCardEl.classList.toggle("hidden", !setupVisible);
+  if (!setupVisible) return;
+
+  const companionReady = hasNativePerm && Boolean(lastSyncStatus?.hostConnected) && !lastSyncStatus?.hostOutdated;
+  setStepDone(setupStepNative, "1", companionReady);
+  btnSetupNative.classList.toggle("hidden", companionReady);
+  if (companionReady) {
+    const versionPart = lastSyncStatus?.hostVersion ? `v${lastSyncStatus.hostVersion}` : "connected";
+    const ramPart = lastMemory?.source === "native_host" ? ` · Chrome ${formatGb(lastMemory.usedBytes)}` : "";
+    setupNativeStatus.textContent = `Connected (${versionPart}${ramPart}).`;
+    setupNativeStatus.className = "status-text ok";
+  } else if (setupNativeError) {
+    btnSetupNative.textContent = "Retry";
+    setupNativeStatus.textContent = setupNativeError;
+    setupNativeStatus.className = "status-text err";
+  } else if (lastSyncStatus?.hostOutdated) {
+    btnSetupNative.textContent = "Retry";
+    setupNativeStatus.textContent =
+      lastSyncStatus.lastError ?? "Installed companion is outdated. Re-run the install command below to upgrade.";
+    setupNativeStatus.className = "status-text err";
+  } else {
+    btnSetupNative.textContent = hasNativePerm ? "Test connection" : "Connect";
+    setupNativeStatus.textContent = hasNativePerm
+      ? "Permission granted. Click Test connection to verify the companion."
+      : "";
+    setupNativeStatus.className = "status-text";
+  }
+
+  setStepDone(setupStepHost, "2", hasHostPerm);
+  btnSetupHost.classList.toggle("hidden", hasHostPerm);
+  setupHostStatus.textContent = hasHostPerm ? "Enabled." : "";
+  setupHostStatus.className = `status-text ${hasHostPerm ? "ok" : ""}`;
+
+  const syncReady = Boolean(lastSyncStatus?.enabled && lastSyncStatus.writable);
+  setStepDone(setupStepSync, "3", syncReady);
+  setupSyncActions.replaceChildren();
+  if (syncReady) {
+    setupSyncStatus.textContent = `Active: ${lastSyncStatus?.syncDir ?? ""}`;
+    setupSyncStatus.className = "status-text ok";
+  } else if (companionReady) {
+    setupSyncStatus.textContent =
+      lastSyncCandidates.length > 0
+        ? "Pick a detected cloud folder or choose any folder on your computer:"
+        : "Choose a local or cloud-synced folder:";
+    setupSyncStatus.className = "status-text";
+    for (const cand of lastSyncCandidates) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chip-btn";
+      btn.textContent = cand.exists ? `${cand.label} (existing)` : cand.label;
+      btn.title = cand.path;
+      btn.addEventListener("click", () => {
+        syncFolderInput.value = cand.path;
+        void applySyncFolder(cand.path);
+      });
+      setupSyncActions.appendChild(btn);
+    }
+    const pickBtn = document.createElement("button");
+    pickBtn.type = "button";
+    pickBtn.className = "secondary small";
+    pickBtn.textContent = "Choose folder…";
+    pickBtn.addEventListener("click", () => {
+      pickBtn.disabled = true;
+      void pickSyncFolderWithDialog().finally(() => {
+        pickBtn.disabled = false;
+      });
+    });
+    setupSyncActions.appendChild(pickBtn);
+  } else {
+    setupSyncStatus.textContent = "Connect Local Companion in step 1 first.";
+    setupSyncStatus.className = "status-text";
+  }
+}
+
+async function pickSyncFolderWithDialog(): Promise<void> {
+  const res = (await chrome.runtime.sendMessage({ type: "pick_sync_folder" })) as {
+    ok?: boolean;
+    path?: string;
+    cancelled?: boolean;
+    error?: string;
+  };
+  if (res?.ok && res.path) {
+    syncFolderInput.value = res.path;
+    await applySyncFolder(res.path);
+  } else if (res?.error && !res.cancelled) {
+    syncStatusEl.textContent = `Picker error: ${res.error}`;
+    syncStatusEl.className = "status-text err";
+  }
+}
+
 async function refreshPermissionsUI(): Promise<void> {
   const [hasNative, hasHost] = await Promise.all([
     chrome.permissions.contains({ permissions: ["nativeMessaging"] }),
     chrome.permissions.contains(WEIGHTED_EVICTION_PERMS),
   ]);
+  hasNativePerm = hasNative;
+  hasHostPerm = hasHost;
 
   btnNativePerm.textContent = hasNative ? "Revoke" : "Enable";
   nativeStatus.textContent = hasNative ? "Permission granted." : "Permission is off. Tab Reaper uses system RAM.";
@@ -355,6 +475,7 @@ async function refreshPermissionsUI(): Promise<void> {
     ? "On. Heavier tabs sleep first at the size threshold."
     : "Off. The oldest idle tabs sleep first.";
   hostStatus.className = `status-text ${hasHost ? "ok" : ""}`;
+  renderSetupCard();
 }
 
 function formatSnapshotTime(ts: number): string {
@@ -390,8 +511,10 @@ function updateSnapshotsCardVisibility(): void {
 
 async function refreshSyncUI(): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "get_sync_status" })) as SyncStatus;
+  lastSyncStatus = status ?? null;
   currentDeviceId = status?.deviceId ?? null;
   if (!status?.hostConnected) {
+    lastSyncCandidates = [];
     syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
     syncSnapshotsConfigEl.classList.add("hidden");
@@ -400,10 +523,12 @@ async function refreshSyncUI(): Promise<void> {
     btnSyncDisable.classList.add("hidden");
     syncStatusEl.textContent = "Enable and connect Local Companion above to use Folder Sync.";
     syncStatusEl.className = "status-text";
+    renderSetupCard();
     return;
   }
 
   if (status.hostOutdated) {
+    lastSyncCandidates = [];
     syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
     syncSnapshotsConfigEl.classList.add("hidden");
@@ -414,6 +539,7 @@ async function refreshSyncUI(): Promise<void> {
       status.lastError ??
       `Connected host v${status.hostVersion ?? "unknown"} does not support Folder Sync. Re-run the install command above to upgrade.`;
     syncStatusEl.className = "status-text err";
+    renderSetupCard();
     return;
   }
 
@@ -439,13 +565,15 @@ async function refreshSyncUI(): Promise<void> {
   }
 
   const candidates = (await chrome.runtime.sendMessage({ type: "detect_sync_folders" })) as SyncFolderCandidate[];
+  lastSyncCandidates = Array.isArray(candidates) ? candidates : [];
   syncCandidatesEl.replaceChildren();
-  if (!Array.isArray(candidates) || candidates.length === 0) {
+  if (lastSyncCandidates.length === 0) {
     syncCandidatesWrap.classList.add("hidden");
+    renderSetupCard();
     return;
   }
   syncCandidatesWrap.classList.remove("hidden");
-  for (const cand of candidates) {
+  for (const cand of lastSyncCandidates) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `chip-btn${status.syncDir === cand.path ? " active" : ""}`;
@@ -457,6 +585,7 @@ async function refreshSyncUI(): Promise<void> {
     });
     syncCandidatesEl.appendChild(btn);
   }
+  renderSetupCard();
 }
 
 async function runRestore(snap: SnapshotListItem, mode: RestoreMode): Promise<void> {
@@ -607,10 +736,18 @@ async function refreshSnapshotsUI(): Promise<void> {
 
 async function init(): Promise<void> {
   installCmd.textContent = buildInstallCommand(chrome.runtime.id);
-  const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+  setupShortcutEl.textContent = /Mac/i.test(navigator.platform) ? "Option+Shift+K" : "Alt+Shift+K";
+  const [storedSetup, status] = await Promise.all([
+    chrome.storage.local.get(SETUP_PENDING_KEY),
+    chrome.runtime.sendMessage({ type: "get_status" }) as Promise<StatusPayload>,
+  ]);
+  if (storedSetup[SETUP_PENDING_KEY] || new URLSearchParams(location.search).get("setup") === "1") {
+    setupVisible = true;
+  }
   lastMemory = status.memory;
   populateForm(status.config);
   await Promise.all([refreshPermissionsUI(), refreshSyncUI(), refreshSnapshotsUI()]);
+  renderSetupCard();
 }
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
@@ -708,9 +845,10 @@ btnNativeTest.addEventListener("click", async () => {
     return;
   }
   if (resp?.ok) {
+    setupNativeError = null;
     nativeStatus.textContent = `Connected: tab-reaper-host v${resp.version} (${resp.platform})`;
     nativeStatus.className = "status-text ok";
-    await refreshSyncUI();
+    await Promise.all([refreshMemoryMode(), refreshSyncUI()]);
   } else {
     nativeStatus.textContent = `Unavailable: ${resp?.error ?? "unknown error"}`;
     nativeStatus.className = "status-text err";
@@ -719,19 +857,67 @@ btnNativeTest.addEventListener("click", async () => {
 
 btnSyncPick.addEventListener("click", async () => {
   btnSyncPick.disabled = true;
-  const res = (await chrome.runtime.sendMessage({ type: "pick_sync_folder" })) as {
-    ok?: boolean;
-    path?: string;
-    cancelled?: boolean;
-    error?: string;
-  };
+  await pickSyncFolderWithDialog();
   btnSyncPick.disabled = false;
-  if (res?.ok && res.path) {
-    syncFolderInput.value = res.path;
-    await applySyncFolder(res.path);
-  } else if (res?.error && !res.cancelled) {
-    syncStatusEl.textContent = `Picker error: ${res.error}`;
-    syncStatusEl.className = "status-text err";
+});
+
+btnSetupDismiss.addEventListener("click", async () => {
+  setupVisible = false;
+  setupCardEl.classList.add("hidden");
+  await chrome.storage.local.remove(SETUP_PENDING_KEY);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !(SETUP_PENDING_KEY in changes)) return;
+  setupVisible = Boolean(changes[SETUP_PENDING_KEY]?.newValue);
+  renderSetupCard();
+});
+
+btnSetupNative.addEventListener("click", async () => {
+  btnSetupNative.disabled = true;
+  setupNativeError = null;
+  setupNativeStatus.textContent = "Connecting Local Companion...";
+  setupNativeStatus.className = "status-text";
+  try {
+    const alreadyGranted = await chrome.permissions.contains({ permissions: ["nativeMessaging"] });
+    const granted = alreadyGranted || (await chrome.permissions.request({ permissions: ["nativeMessaging"] }));
+    if (!granted) {
+      setupNativeError = "Permission was not granted. You can enable it anytime below.";
+      renderSetupCard();
+      return;
+    }
+    const resp = (await chrome.runtime.sendMessage({ type: "test_native_host" })) as {
+      ok?: boolean;
+      error?: string;
+      needsReload?: boolean;
+    };
+    if (resp?.needsReload) {
+      setupNativeStatus.textContent = "Reloading extension to activate Local Companion...";
+      await reloadToActivatePermission();
+      return;
+    }
+    if (!resp?.ok) {
+      setupNativeError = `Companion not found (${resp?.error ?? "unknown error"}). Run the Quick Install command or the command under Optional capabilities.`;
+    }
+    await Promise.all([refreshMemoryMode(), refreshPermissionsUI(), refreshSyncUI()]);
+  } finally {
+    btnSetupNative.disabled = false;
+  }
+});
+
+btnSetupHost.addEventListener("click", async () => {
+  btnSetupHost.disabled = true;
+  try {
+    const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
+    if (granted && !chrome.scripting?.executeScript) {
+      setupHostStatus.textContent = "Reloading extension to activate Weighted Eviction...";
+      setupHostStatus.className = "status-text";
+      await reloadToActivatePermission();
+      return;
+    }
+    await refreshPermissionsUI();
+  } finally {
+    btnSetupHost.disabled = false;
   }
 });
 

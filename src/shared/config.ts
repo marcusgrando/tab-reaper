@@ -2,6 +2,7 @@ import type { TabReaperConfig } from "./types.ts";
 
 export const CONFIG_STORAGE_KEY = "tabReaper.config";
 export const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
+export const SETUP_PENDING_KEY = "tabReaper.setupPending";
 
 export const DEFAULT_CONFIG: TabReaperConfig = {
   memoryBudgetMode: "fraction",

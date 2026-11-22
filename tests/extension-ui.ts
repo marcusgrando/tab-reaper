@@ -16,6 +16,15 @@ try {
   await options.getByRole("link", { name: "Protections", exact: true }).click();
   assert.equal(new URL(options.url()).hash, "#protections");
 
+  // First install opens Settings with the Quick setup card.
+  await options.locator("#setup-card").waitFor({ state: "visible" });
+  assert.equal(await options.locator("#setup-card .setup-step").count(), 3);
+  await options.setViewportSize({ width: 320, height: 700 });
+  assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await options.setViewportSize({ width: 1024, height: 720 });
+  await options.locator("#btn-setup-dismiss").click();
+  assert.ok(await options.locator("#setup-card").isHidden());
+
   // Without the Local Companion there is no Chrome budget: Settings shows the pressure thresholds instead.
   await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
   assert.ok(await options.locator("#budget-fields").isHidden());
@@ -28,6 +37,7 @@ try {
   await options.locator("#save-status.ok").waitFor();
   await options.reload();
   await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
+  assert.ok(await options.locator("#setup-card").isHidden(), "Dismissed setup card must stay hidden after reload");
   assert.equal(await startupSweep.isChecked(), !startupBefore);
 
   await options.setViewportSize({ width: 320, height: 700 });

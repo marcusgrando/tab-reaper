@@ -126,6 +126,66 @@ code { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: all; font: 1
 .snapshot-row { padding: 12px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .snapshot-list, #snapshot-status:not(:empty), #sync-snapshots-status:not(:empty) { margin-top: 12px; }
 .snapshot-badge { display: inline-block; font-size: 12px; color: var(--accent); background: var(--tint); margin-inline-start: 5px; padding: 1px 5px; border-radius: 4px; }
+.setup-card {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, var(--tint) 0%, var(--surface) 110px);
+}
+.setup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.setup-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.setup-step:last-child { padding-bottom: 6px; }
+.setup-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--tint);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+.setup-step.done .setup-badge {
+  background: var(--action);
+  border-color: var(--action);
+  color: #fff;
+}
+.setup-step-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.setup-step-body strong { font-size: 15px; letter-spacing: -.015em; }
+.setup-step-body .hint { margin: 3px 0 8px; }
+#setup-sync-actions:not(:empty) { margin-top: 8px; }
+.setup-tip {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.setup-tip kbd {
+  font: 12px/1.4 ui-monospace, monospace;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--canvas);
+  color: var(--ink);
+}
 @media (max-width: 800px) {
   body { display: block; }
   .sidebar { position: static; height: auto; padding: 16px 20px; }
@@ -143,4 +203,5 @@ code { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: all; font: 1
   #memory .field:has(select) { grid-template-columns: 1fr; row-gap: 5px; }
   #memory input[type="number"] { width: 65px; }
   .cap-row { flex-direction: column; gap: 8px; }
+  .setup-step { flex-wrap: wrap; gap: 10px; }
 }

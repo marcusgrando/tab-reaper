@@ -5,6 +5,7 @@ import {
   loadConfig,
   MAX_DISCARDS_WITHOUT_RELIEF,
   REOPEN_OPTIONS_KEY,
+  SETUP_PENDING_KEY,
   saveConfig,
 } from "../shared/config.ts";
 import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabReaperConfig, TabSummary } from "../shared/types.ts";
@@ -386,11 +387,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (before !== after) return reconcileFormObserver(true);
 });
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
+  const isFreshInstall = details?.reason === "install";
+  if (isFreshInstall) {
+    await chrome.storage.local.set({ [SETUP_PENDING_KEY]: true });
+  }
   await Promise.all([ensureAlarm(), reconcileFormObserver(await hasHostAccessPermission())]);
   const tabs = await queryAllTabs();
   const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
   await saveActivityState(activity);
+  if (isFreshInstall) {
+    await chrome.runtime.openOptionsPage();
+  }
 });
 
 chrome.runtime.onStartup.addListener(async () => {

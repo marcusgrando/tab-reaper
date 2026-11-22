@@ -1,11 +1,40 @@
 param(
     [switch]$Uninstall,
     [switch]$Test,
+    [switch]$Yes,
     [string]$Version = "latest",
     [string]$Repo = "marcusgrando/tab-reaper"
 )
 
 $ErrorActionPreference = "Stop"
+
+$Interactive = $false
+if (-not $Yes -and [Environment]::UserInteractive) {
+    try {
+        $null = $Host.UI.RawUI
+        $Interactive = $true
+    } catch {}
+}
+
+function Write-Step([string]$Num, [string]$Message) {
+    Write-Host "[$Num] " -ForegroundColor Cyan -NoNewline
+    Write-Host $Message
+}
+
+function Write-Ok([string]$Message) {
+    Write-Host "  OK " -ForegroundColor Green -NoNewline
+    Write-Host $Message
+}
+
+function Write-Note([string]$Message) {
+    Write-Host "  Note: " -ForegroundColor Yellow -NoNewline
+    Write-Host $Message
+}
+
+function Confirm-YesNo([string]$Question) {
+    $Reply = Read-Host "$Question [Y/n]"
+    return ($Reply -eq "" -or $Reply -match '^(y|yes|s|sim)$')
+}
 
 $AppDir = Join-Path $env:LOCALAPPDATA "TabReaper"
 $ExtDir = Join-Path $AppDir "extension"
@@ -27,8 +56,9 @@ if ($Uninstall) {
     if (Test-Path $AppDir) {
         Remove-Item -Path $AppDir -Recurse -Force
     }
-    Write-Host "Tab Reaper removed from $AppDir and registry entries cleaned up."
-    Write-Host "If still listed in chrome://extensions, click Remove there."
+    Write-Host "Tab Reaper removed." -ForegroundColor Green
+    Write-Host "Removed $AppDir and registry entries."
+    Write-Host "If Tab Reaper is still listed in chrome://extensions, click Remove there."
     exit 0
 }
 
@@ -77,6 +107,32 @@ function Get-ChromeExtensionId([string]$FolderPath) {
     return -join $Chars
 }
 
+function Find-ChromiumBrowser {
+    $Candidates = @(
+        @{ Name = "Google Chrome"; Paths = @(
+            (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+            (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+        )},
+        @{ Name = "Brave"; Paths = @(
+            (Join-Path $env:ProgramFiles "BraveSoftware\Brave-Browser\Application\brave.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "BraveSoftware\Brave-Browser\Application\brave.exe"),
+            (Join-Path $env:LOCALAPPDATA "BraveSoftware\Brave-Browser\Application\brave.exe")
+        )},
+        @{ Name = "Chromium"; Paths = @(
+            (Join-Path $env:LOCALAPPDATA "Chromium\Application\chrome.exe")
+        )}
+    )
+    foreach ($Entry in $Candidates) {
+        foreach ($P in $Entry.Paths) {
+            if ($P -and (Test-Path $P)) {
+                return @{ Name = $Entry.Name; Path = $P }
+            }
+        }
+    }
+    return $null
+}
+
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
@@ -99,16 +155,22 @@ function Test-AssetChecksum([string]$SumsPath, [string]$AssetName, [string]$File
     }
 }
 
+$IsUpdate = Test-Path (Join-Path $ExtDir "manifest.json")
+$WinArch = Get-WindowsArch
+
+Write-Host ""
+Write-Host ("Tab Reaper " + $(if ($IsUpdate) { "Updater" } else { "Installer" })) -ForegroundColor White
+Write-Host "Platform: windows ($WinArch) | Release: $Version" -ForegroundColor DarkGray
+Write-Host ""
+
 try {
     $SumsPath = Join-Path $TmpDir "SHA256SUMS.txt"
     $ZipPath = Join-Path $TmpDir "tab-reaper-extension.zip"
     $HostTmpPath = Join-Path $TmpDir "tab-reaper-host.exe"
     $ExtractDir = Join-Path $TmpDir "extracted"
 
-    Write-Host "Downloading release checksums..."
+    Write-Step "1/4" "Downloading extension and verifying checksum..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl "SHA256SUMS.txt") -OutFile $SumsPath -UseBasicParsing
-
-    Write-Host "Downloading Tab Reaper extension..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-extension.zip") -OutFile $ZipPath -UseBasicParsing
     Test-AssetChecksum $SumsPath "tab-reaper-extension.zip" $ZipPath
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
@@ -120,13 +182,16 @@ try {
     Move-Item -Path $ExtractDir -Destination $ExtDir
 
     $ExtId = Get-ChromeExtensionId $ExtDir
+    Write-Ok "Extension installed to $ExtDir"
 
-    $HostAsset = "tab-reaper-host-windows-$(Get-WindowsArch).exe"
-    Write-Host "Downloading native memory host ($HostAsset)..."
+    $HostAsset = "tab-reaper-host-windows-$WinArch.exe"
+    Write-Step "2/4" "Installing Local Companion ($HostAsset)..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl $HostAsset) -OutFile $HostTmpPath -UseBasicParsing
     Test-AssetChecksum $SumsPath $HostAsset $HostTmpPath
     Move-Item -Path $HostTmpPath -Destination $BinPath -Force
+    Write-Ok "Local Companion installed to $BinPath"
 
+    Write-Step "3/4" "Registering Local Companion with browsers..."
     $Manifest = @{
         name            = "com.tabreaper.host"
         description     = "Tab Reaper exact Chrome memory reporter"
@@ -141,29 +206,77 @@ try {
         New-Item -Path $Key -Force | Out-Null
         Set-ItemProperty -Path $Key -Name "(default)" -Value $ManifestPath
     }
+    Write-Ok "Registered for Chrome, Chromium, Brave (Extension ID: $ExtId)"
 
-    if ($Test) {
-        Write-Host "Self-test (--once):"
-        & $BinPath --once
+    Write-Step "4/4" "Verifying Local Companion..."
+    $SelfTestOutput = $null
+    $SelfTestOk = $false
+    try {
+        $SelfTestOutput = & $BinPath --once 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $SelfTestOk = $true
+        }
+    } catch {}
+    if ($SelfTestOk) {
+        Write-Ok "Companion self-test passed."
+        if ($Test -and $SelfTestOutput) {
+            Write-Host $SelfTestOutput
+        }
+    } else {
+        Write-Note "Companion binary installed. Memory reporting activates once Chrome is running."
+        if ($Test -and $SelfTestOutput) {
+            Write-Host $SelfTestOutput
+        }
     }
 
     $CopiedNote = ""
     try {
         Set-Clipboard -Value $ExtDir
-        $CopiedNote = " (already copied to your clipboard)"
+        $CopiedNote = " (already copied to clipboard)"
     } catch {}
 
+    $Browser = Find-ChromiumBrowser
     Write-Host ""
-    Write-Host "Tab Reaper installed to: $ExtDir"
-    Write-Host "Pre-registered native host for Extension ID: $ExtId"
+
+    if ($IsUpdate) {
+        Write-Host "Update complete." -ForegroundColor Green
+        Write-Host "  1. Open chrome://extensions"
+        Write-Host "  2. Click the Reload icon on the Tab Reaper card."
+        if ($Interactive -and $Browser) {
+            Write-Host ""
+            if (Confirm-YesNo "Open $($Browser.Name) at chrome://extensions now?") {
+                Start-Process -FilePath $Browser.Path -ArgumentList "chrome://extensions"
+            }
+        }
+    } else {
+        Write-Host "Final step in Chrome (one-time):" -ForegroundColor White
+        Write-Host "  1. Open chrome://extensions and turn on Developer mode (top right)."
+        Write-Host "  2. Drag the 'extension' folder onto the chrome://extensions page"
+        Write-Host "     or click 'Load unpacked' and select:"
+        Write-Host "     $ExtDir$CopiedNote"
+        Write-Host "  3. Tab Reaper Settings will open automatically to finish setup in 1 click."
+
+        if ($Interactive) {
+            Write-Host ""
+            if ($Browser) {
+                if (Confirm-YesNo "Open $($Browser.Name) (chrome://extensions) and the extension folder now?") {
+                    Start-Process -FilePath $Browser.Path -ArgumentList "chrome://extensions"
+                    Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$ExtDir`""
+                    Write-Host ""
+                    Write-Ok "Opened $($Browser.Name) and Explorer. Drag 'extension' onto chrome://extensions."
+                }
+            } else {
+                if (Confirm-YesNo "Open the extension folder in Explorer now?") {
+                    Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$ExtDir`""
+                    Write-Host ""
+                    Write-Ok "Opened Explorer. Drag 'extension' onto chrome://extensions."
+                }
+            }
+        }
+    }
+
     Write-Host ""
-    Write-Host "Final step in Chrome (required once for extensions outside the Web Store):"
-    Write-Host "  1. Open chrome://extensions and enable Developer mode (top right)"
-    Write-Host "  2. Click 'Load unpacked' and select:"
-    Write-Host "     $ExtDir$CopiedNote"
-    Write-Host "  3. (Optional) Open Tab Reaper Settings -> click Enable & Test on Exact Chrome RAM"
-    Write-Host ""
-    Write-Host "To uninstall later:"
+    Write-Host "To uninstall later:" -ForegroundColor DarkGray
     Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/$Repo/main/install.ps1))) -Uninstall"
 } finally {
     Remove-Item -Path $TmpDir -Recurse -Force -ErrorAction SilentlyContinue

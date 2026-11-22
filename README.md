@@ -1,8 +1,79 @@
-# Tab Reaper
+<p align="center">
+  <img src="assets/icons/icon128.png" width="72" height="72" alt="Tab Reaper logo" />
+</p>
 
-Keep Chrome fast and bounded in RAM. Tab Reaper enforces a memory-banded RAM budget (`RAM / 2` by default), discards background tabs on startup, provides a keyboard-first open-tabs palette, and backs up sessions via optional Folder Sync.
+<h1 align="center">Tab Reaper</h1>
 
-Everything runs locally on your machine. No accounts, no telemetry, no external servers. See [PRIVACY.md](PRIVACY.md).
+<p align="center">
+  Keep Chrome fast and bounded in RAM. Tab Reaper enforces a memory-banded RAM budget (<code>RAM / 2</code> by default), discards background tabs on startup, provides a keyboard-first open-tabs palette, and backs up sessions via optional Folder Sync.
+</p>
+
+<p align="center">
+  Everything runs locally on your machine. No accounts, no telemetry, no external servers. See <a href="PRIVACY.md">PRIVACY.md</a>.
+</p>
+
+## Preview
+
+<table>
+  <tr>
+    <td width="38%" valign="top">
+      <img src="assets/screenshot-popup.png" alt="Tab Reaper tab palette showing Chrome RAM usage, loaded tabs, and sleeping tabs" />
+    </td>
+    <td width="62%" valign="top">
+      <img src="assets/screenshot-settings.png" alt="Tab Reaper Settings showing Local Companion memory budget controls and protections" />
+    </td>
+  </tr>
+</table>
+
+## Install
+
+Tab Reaper is installed with a guided one-command installer that sets up both the Chrome extension and the Local Companion in a permanent app folder (never `Downloads` or `/tmp`), verifies SHA-256 checksums, registers your Extension ID automatically, copies the folder path to your clipboard, and offers to open Chrome and the extension folder for you.
+
+### 1. Run the installer
+
+- **macOS / Linux (Terminal):**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash
+  ```
+- **Windows (PowerShell):**
+  ```powershell
+  irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex
+  ```
+
+Pass `--yes` (`-Yes` on Windows) to run without interactive prompts.
+
+### 2. Load the extension in Chrome (one-time)
+
+When the installer finishes, press **Enter** to open Chrome at `chrome://extensions` and the folder containing `extension`:
+
+1. Turn on **Developer mode** (top right of `chrome://extensions`).
+2. Drag the `extension` folder onto the `chrome://extensions` page, or click **Load unpacked** and paste the path already copied to your clipboard (`Cmd+Shift+G` then `Cmd+V` on macOS, `Ctrl+V` on Windows/Linux).
+3. Tab Reaper Settings opens automatically with a **Quick setup** card. Click **Connect** to enable the pre-registered Local Companion, optionally enable **Weighted Eviction**, and pick a cloud folder for **Folder Sync** in one click.
+
+### Update and Uninstall
+
+- **Update:** Re-run the same install command above, then click the **Reload** icon on the Tab Reaper card in `chrome://extensions`.
+- **Uninstall (macOS / Linux):**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash -s -- --uninstall
+  ```
+- **Uninstall (Windows PowerShell):**
+  ```powershell
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1))) -Uninstall
+  ```
+  Then click **Remove** on the Tab Reaper card in `chrome://extensions`.
+- **Manual ZIP (extension only, no Local Companion):** Download `tab-reaper-extension.zip` from the [latest GitHub Release](https://github.com/marcusgrando/tab-reaper/releases/latest), unzip to a permanent folder, and load via `chrome://extensions` -> **Developer mode** -> **Load unpacked**.
+
+### Why not the Chrome Web Store?
+
+The Chrome Web Store installs only the extension package. Chrome does not allow an extension to install, register, or execute a local binary on its own.
+
+Two core parts of Tab Reaper require the Local Companion (`tab-reaper-host`):
+
+- **Exact Chrome RAM:** Chrome extensions have no API to read Chrome's own memory usage. They can only see system-wide free RAM. The Local Companion reads Chrome's actual process memory (`phys_footprint` on macOS, PSS/RSS on Linux, Working Set on Windows).
+- **Automatic Folder Sync:** Chrome revokes background write access for browser-picked folders after a restart. The Local Companion writes conflict-free session snapshots directly to your iCloud Drive, Google Drive, OneDrive, Dropbox, or Syncthing folder in the background without an external server or cloud account.
+
+Installing from the Chrome Web Store would still require running a separate terminal command afterwards to install and register the companion. Installing with the guided script keeps both pieces in a single step and pre-registers the Extension ID automatically. The trade-off is that Developer mode must stay enabled in Chrome and updates require re-running the installer and clicking Reload.
 
 ## How Memory-Banded Eviction Works
 
@@ -32,44 +103,10 @@ Each check still puts at most two tabs to sleep. When other apps hold the memory
 
 Tab Reaper protects active, audible, pinned, kept, and allowlisted tabs by default. With Weighted Eviction page access and form protection enabled, the palette shows `Form` after an observed edit. A title or filter filled in by the page leaves the tab eligible for sleep. Protection clears when the field returns to its value before the edit, whether you undo the change or the app empties the field after sending, as chat and e-mail apps do. An app that saves silently or replaces the edited field can keep the tab protected until reload.
 
-## Quick Install (macOS, Linux, Windows)
-
-One command downloads the extension into a permanent app folder (never `Downloads` or `/tmp`), pre-installs the optional native companion with your Extension ID already registered, and copies the extension folder path to your clipboard:
-
-- **macOS / Linux (Terminal):**
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash
-  ```
-- **Windows (PowerShell):**
-  ```powershell
-  irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex
-  ```
-
-Then do the one-time Chrome step:
-1. Open `chrome://extensions` and turn on **Developer mode** (top right).
-2. Click **Load unpacked** and paste the path already copied to your clipboard (`Cmd+Shift+G` then `Cmd+V` on macOS).
-3. *(Optional)* Open Tab Reaper **Settings** -> **Optional Capabilities** -> click **Enable** and **Test** next to **Exact Chrome RAM** (no extra command needed).
-
-### Uninstall
-
-- **macOS / Linux:**
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash -s -- --uninstall
-  ```
-- **Windows (PowerShell):**
-  ```powershell
-  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1))) -Uninstall
-  ```
-
-### Alternative: Chrome Web Store / Manual ZIP
-
-- **Chrome Web Store:** Coming soon (`tab-reaper-extension.zip` is ready for submission).
-- **Manual ZIP (extension only, no native host):** Download `tab-reaper-extension.zip` from the [latest GitHub Release](https://github.com/marcusgrando/tab-reaper/releases/latest), unzip to a permanent folder, and load via `chrome://extensions` -> **Developer mode** -> **Load unpacked**.
-
 ## Optional Capabilities
 
-- **Exact Chrome RAM:** Measures exact Chrome process memory (PSS/RSS on Linux, `phys_footprint` on macOS, Working Set on Windows) instead of OS-wide RAM. Pre-installed by the Quick Install command above. If you installed via manual ZIP or CWS, copy the one-liner shown in Tab Reaper **Settings** -> **Optional Capabilities**.
-- **Weighted Eviction:** In **Settings** -> **Optional Capabilities**, enable **Weighted Eviction** to discard heavier tabs (higher JS heap, DOM size, or media elements) first when memory reaches your size threshold (default `100%`). Memory measurements run on demand. Form protection uses the same permission and works without the Local Companion.
+- **Exact Chrome RAM:** Measures exact Chrome process memory (PSS/RSS on Linux, `phys_footprint` on macOS, Working Set on Windows) instead of OS-wide RAM. Pre-installed by the installer above. If you installed via manual ZIP, copy the one-liner shown in Tab Reaper **Settings** -> **Optional capabilities**.
+- **Weighted Eviction:** In **Settings** -> **Optional capabilities**, enable **Weighted Eviction** to discard heavier tabs (higher JS heap, DOM size, or media elements) first when memory reaches your size threshold (default `100%`). Memory measurements run on demand. Form protection uses the same permission and works without the Local Companion.
 - **Folder Sync & Session Snapshots:** Choose any local or cloud-synced directory (iCloud Drive, Google Drive, OneDrive, Dropbox, Syncthing) in **Settings** -> **Folder Sync** to sync session snapshots (`snapshots/`, `index.json`, `index-parts/`) and settings (`config-v2.json`). The budget type and the fixed GB budget stay on each computer. Session snapshots (automatic periodic captures, window-close recovery, pre-restore safety snapshots, and manual saves) are active only when Folder Sync is configured. The automatic snapshot interval is configurable from `1` to `1440` minutes (default `5` minutes). Your device name defaults to and follows the computer's hostname automatically, and can be overridden in Settings.
 
 ## Shortcuts
