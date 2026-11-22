@@ -74,7 +74,20 @@ input[type="number"], input[type="text"], select, textarea {
   padding: 8px 10px;
 }
 input[type="number"] { font-variant-numeric: tabular-nums; }
-select { cursor: pointer; }
+.select-wrap { position: relative; }
+.select-wrap select { display: block; appearance: none; padding-inline-end: 34px; cursor: pointer; }
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 14px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
 textarea { display: block; resize: vertical; }
 .checkbox-row { border-top: 1px solid var(--line); min-height: 45px; padding: 6px 0; }
 #protections h2 { margin-bottom: 16px; }
