@@ -1,5 +1,6 @@
 body {
-  width: 460px;
+  width: 580px;
+  max-width: 100%;
   max-height: 600px;
   display: flex;
   flex-direction: column;
@@ -58,10 +59,21 @@ header { background: var(--navy); color: var(--on-navy); }
   cursor: pointer;
 }
 .tab-item:hover { background: var(--canvas); }
+.sleeping-group { border-radius: 6px; background: var(--canvas); }
+.sleeping:hover { background: var(--tint); }
 .tab-item.selected { border-inline-start-color: var(--accent); background: var(--tint); }
 .item-main { min-width: 0; flex: 1; }
-.item-title, .item-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.item-title { font-weight: 600; }
+.item-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.sleeping .item-title { color: var(--muted); font-weight: 450; }
+.item-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-meta .icon { display: inline-block; width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
 .item-meta, .pill, .shortcuts, .section-divider, .empty { font-size: 12px; color: var(--muted); }
 .item-right { display: flex; align-items: center; gap: 5px; }
 .item-action, .item-close { font-size: 12px; padding: 4px 7px; }
@@ -69,7 +81,15 @@ header { background: var(--navy); color: var(--on-navy); }
 .item-close { background: transparent; color: var(--muted); width: 26px; height: 26px; padding: 5px; }
 .item-close:hover { background: var(--canvas); color: var(--danger); }
 .item-close svg { width: 14px; height: 14px; }
-.section-divider { padding: 8px 12px 3px; font-weight: 650; }
+.section-divider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 12px 3px;
+  font-weight: 650;
+}
+.section-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+[role="group"] + [role="group"] { margin-top: 6px; }
 .empty { padding: 22px 12px; text-align: center; }
 .recovery-banner, .action-status { padding: 8px 14px; background: var(--tint); }
 .recovery-banner { gap: 8px; flex-wrap: wrap; justify-content: space-between; }

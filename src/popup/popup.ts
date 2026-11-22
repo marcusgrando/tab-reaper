@@ -133,16 +133,20 @@ function renderOpenTabs(): void {
     return;
   }
 
-  const sleepingCount = items.filter((t) => t.discarded).length;
-  let renderedSleepingHeader = false;
-
+  let group: HTMLDivElement;
   items.forEach((tab, index) => {
-    if (tab.discarded && !renderedSleepingHeader) {
-      renderedSleepingHeader = true;
-      const divider = document.createElement("div");
-      divider.className = "section-divider";
-      divider.textContent = `Sleeping (${sleepingCount})`;
-      listEl.appendChild(divider);
+    if (items[index - 1]?.discarded !== tab.discarded) {
+      const label = tab.discarded ? "Sleeping" : "Loaded";
+      const heading = document.createElement("div");
+      heading.className = "section-divider";
+      heading.id = tab.discarded ? "sleeping-heading" : "loaded-heading";
+      heading.textContent = label;
+      group = document.createElement("div");
+      if (tab.discarded) group.className = "sleeping-group";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-labelledby", heading.id);
+      group.appendChild(heading);
+      listEl.appendChild(group);
     }
 
     const row = document.createElement("div");
@@ -158,6 +162,7 @@ function renderOpenTabs(): void {
     const title = document.createElement("div");
     title.className = "item-title";
     title.textContent = tab.title || tab.url;
+    title.title = title.textContent;
 
     const metaParts: string[] = [];
     if (tab.isPwa) {
@@ -172,6 +177,9 @@ function renderOpenTabs(): void {
     const meta = document.createElement("div");
     meta.className = "item-meta";
     meta.textContent = metaParts.join(" · ");
+    if (tab.discarded) {
+      meta.insertAdjacentHTML("afterbegin", '<svg class="icon" aria-hidden="true"><use href="ui.svg#moon"/></svg>');
+    }
 
     main.append(title, meta);
 
@@ -238,7 +246,7 @@ function renderOpenTabs(): void {
     }
 
     row.append(main, right);
-    listEl.appendChild(row);
+    group.appendChild(row);
   });
 }
 
