@@ -228,16 +228,29 @@ pub struct DestinationGuard {
 }
 
 impl DestinationGuard {
-    pub fn write(&self, rel_path: &str, content: &str) -> Result<usize, String> {
-        write_in_root(&self.device_id, &self.root, rel_path, content)
+    pub fn write(
+        &self,
+        rel_path: &str,
+        content: &str,
+        target_device_id: Option<&str>,
+    ) -> Result<usize, String> {
+        write_in_root(&self.device_id, &self.root, rel_path, content, target_device_id)
     }
 
     pub fn read(&self, rel_path: &str) -> Result<Option<String>, String> {
         read_in_root(&self.root, rel_path)
     }
 
-    pub fn delete(&self, rel_path: &str) -> Result<bool, String> {
-        delete_in_root(&self.device_id, &self.root, rel_path)
+    pub fn delete(
+        &self,
+        rel_path: &str,
+        target_device_id: Option<&str>,
+    ) -> Result<bool, String> {
+        delete_in_root(&self.device_id, &self.root, rel_path, target_device_id)
+    }
+
+    pub fn delete_device(&self, target_device_id: &str) -> Result<bool, String> {
+        delete_device_in_root(&self.device_id, &self.root, target_device_id)
     }
 
     pub fn list(
@@ -721,6 +734,35 @@ fn require_owned_rel_path(device_id: &str, rel_path: &str) -> Result<Vec<String>
     Ok(parts)
 }
 
+fn require_writable_rel_path(
+    device_id: &str,
+    rel_path: &str,
+    target_device_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let Some(raw_target) = target_device_id else {
+        return require_owned_rel_path(device_id, rel_path);
+    };
+    let target = validate_device_id(raw_target)?;
+    if target == device_id {
+        return require_owned_rel_path(device_id, rel_path);
+    }
+    // Cross-device writes and deletes are limited strictly to snapshot data and its index.
+    // Another device's settings (config-v2.json) and identity (meta.json) remain single-writer.
+    let parts = validate_rel_path(rel_path, false)?;
+    if parts.get(1).map(String::as_str) != Some(target.as_str()) {
+        return Err("relPath must match targetDeviceId".to_string());
+    }
+    let allowed = (parts.len() == 3 && parts[2] == "index.json")
+        || (parts.len() == 4 && matches!(parts[2].as_str(), "snapshots" | "index-parts"));
+    if !allowed {
+        return Err(
+            "cross-device changes are restricted to snapshot files and snapshot indexes"
+                .to_string(),
+        );
+    }
+    Ok(parts)
+}
+
 // The configured path was canonicalized when the user approved it. Open each
 // component relative to its parent so a later redirection cannot change the destination.
 fn open_root(path: &Path) -> io::Result<Dir> {
@@ -770,13 +812,19 @@ fn optional<T>(result: io::Result<T>) -> Result<Option<T>, String> {
     }
 }
 
-fn write_in_root(device_id: &str, root: &Path, rel_path: &str, content: &str) -> Result<usize, String> {
+fn write_in_root(
+    device_id: &str,
+    root: &Path,
+    rel_path: &str,
+    content: &str,
+    target_device_id: Option<&str>,
+) -> Result<usize, String> {
     if content.len() > MAX_SYNC_FILE_BYTES {
         return Err(format!(
             "file exceeds max size ({MAX_SYNC_FILE_BYTES} bytes)"
         ));
     }
-    let parts = require_owned_rel_path(device_id, rel_path)?;
+    let parts = require_writable_rel_path(device_id, rel_path, target_device_id)?;
     let (name, parents) = parts.split_last().ok_or("empty path")?;
     let dir = open_subdir(open_root(root).map_err(|e| e.to_string())?, parents, true)
         .map_err(|e| format!("open sync directory: {e}"))?;
@@ -830,14 +878,44 @@ fn read_in_root(root: &Path, rel_path: &str) -> Result<Option<String>, String> {
     Ok(Some(result))
 }
 
-fn delete_in_root(device_id: &str, root: &Path, rel_path: &str) -> Result<bool, String> {
-    let parts = require_owned_rel_path(device_id, rel_path)?;
+fn delete_in_root(
+    device_id: &str,
+    root: &Path,
+    rel_path: &str,
+    target_device_id: Option<&str>,
+) -> Result<bool, String> {
+    let parts = require_writable_rel_path(device_id, rel_path, target_device_id)?;
     let (name, parents) = parts.split_last().ok_or("empty path")?;
     let root = open_root(root).map_err(|e| format!("open sync folder: {e}"))?;
     let Some(dir) = optional(open_subdir(root, parents, false))? else {
         return Ok(false);
     };
     Ok(optional(dir.remove_file(name))?.is_some())
+}
+
+fn delete_device_in_root(
+    device_id: &str,
+    root: &Path,
+    target_device_id: &str,
+) -> Result<bool, String> {
+    let target = validate_device_id(target_device_id)?;
+    if target == device_id {
+        return Err("cannot remove the current device's folder".to_string());
+    }
+    let root = open_root(root).map_err(|e| format!("open sync folder: {e}"))?;
+    let Some(devices_dir) = optional(open_subdir(root, &["devices".to_string()], false))? else {
+        return Ok(false);
+    };
+    let Some(meta) = optional(devices_dir.symlink_metadata(&target))? else {
+        return Ok(false);
+    };
+    if !meta.is_dir() {
+        return Err("expected regular directory".to_string());
+    }
+    devices_dir
+        .remove_dir_all(&target)
+        .map_err(|e| format!("remove device folder: {e}"))?;
+    Ok(true)
 }
 
 fn list_in_root(
@@ -872,7 +950,7 @@ fn list_in_root(
 #[cfg(test)]
 pub fn sync_write(device_id: &str, rel_path: &str, content: &str) -> Result<usize, String> {
     let (dev, root) = require_sync_root_path(device_id)?;
-    write_in_root(&dev, &root, rel_path, content)
+    write_in_root(&dev, &root, rel_path, content, None)
 }
 
 #[cfg(test)]
@@ -884,7 +962,7 @@ pub fn sync_read(device_id: &str, rel_path: &str) -> Result<Option<String>, Stri
 #[cfg(test)]
 pub fn sync_delete(device_id: &str, rel_path: &str) -> Result<bool, String> {
     let (dev, root) = require_sync_root_path(device_id)?;
-    delete_in_root(&dev, &root, rel_path)
+    delete_in_root(&dev, &root, rel_path, None)
 }
 
 #[cfg(test)]
@@ -1187,6 +1265,113 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert!(!has_file_provider_domain_id(&active));
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn supports_explicit_cross_device_snapshot_management_and_device_removal() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = env::temp_dir().join(format!(
+            "tab-reaper-device-mgmt-{}-{}",
+            std::process::id(),
+            temp_nanos()
+        ));
+        let cfg_file = base.join("host.json");
+        let sync_dir = base.join("sync-root");
+        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+
+        let status1 = set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
+        let expected_dir = status1.sync_dir.unwrap();
+        set_sync_folder("dev2", Some(&expected_dir)).unwrap();
+        sync_write("dev2", "devices/dev2/meta.json", r#"{"deviceName":"Old"}"#).unwrap();
+        sync_write("dev2", "devices/dev2/config-v2.json", r#"{"updatedAt":1}"#).unwrap();
+        sync_write("dev2", "devices/dev2/index.json", r#"{"snapshots":[{"id":"s1"}]}"#).unwrap();
+        sync_write("dev2", "devices/dev2/snapshots/s1.json", r#"{"id":"s1"}"#).unwrap();
+        sync_write("dev2", "devices/dev2/index-parts/g-p1.json", r#"{"snapshots":[]}"#).unwrap();
+
+        // Cross-device snapshot delete and index update succeed when targetDeviceId is explicit.
+        let del_snap = serde_json::json!({
+            "cmd": "sync_delete", "deviceId": "dev1", "targetDeviceId": "dev2",
+            "expectedDir": expected_dir, "relPath": "devices/dev2/snapshots/s1.json"
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&crate::handle_request(&del_snap.to_string())).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["deleted"], true);
+
+        let update_idx = serde_json::json!({
+            "cmd": "sync_write", "deviceId": "dev1", "targetDeviceId": "dev2",
+            "expectedDir": expected_dir, "relPath": "devices/dev2/index.json",
+            "content": r#"{"snapshots":[]}"#
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&crate::handle_request(&update_idx.to_string())).unwrap();
+        assert_eq!(reply["ok"], true);
+
+        // Cross-device writes/deletes to config-v2.json or meta.json remain forbidden.
+        for forbidden in ["devices/dev2/config-v2.json", "devices/dev2/meta.json"] {
+            let write_req = serde_json::json!({
+                "cmd": "sync_write", "deviceId": "dev1", "targetDeviceId": "dev2",
+                "expectedDir": expected_dir, "relPath": forbidden, "content": "{}"
+            });
+            let reply: serde_json::Value =
+                serde_json::from_str(&crate::handle_request(&write_req.to_string())).unwrap();
+            assert_eq!(reply["ok"], false, "write to {forbidden} must fail");
+
+            let del_req = serde_json::json!({
+                "cmd": "sync_delete", "deviceId": "dev1", "targetDeviceId": "dev2",
+                "expectedDir": expected_dir, "relPath": forbidden
+            });
+            let reply: serde_json::Value =
+                serde_json::from_str(&crate::handle_request(&del_req.to_string())).unwrap();
+            assert_eq!(reply["ok"], false, "delete of {forbidden} must fail");
+        }
+
+        // Cannot remove own device folder.
+        let self_del = serde_json::json!({
+            "cmd": "sync_delete_device", "deviceId": "dev1", "targetDeviceId": "dev1",
+            "expectedDir": expected_dir
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&crate::handle_request(&self_del.to_string())).unwrap();
+        assert_eq!(reply["ok"], false);
+
+        // Removing another device's folder removes the entire subtree cleanly.
+        let dev_del = serde_json::json!({
+            "cmd": "sync_delete_device", "deviceId": "dev1", "targetDeviceId": "dev2",
+            "expectedDir": expected_dir
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&crate::handle_request(&dev_del.to_string())).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["deleted"], true);
+        assert!(!sync_dir.join("devices/dev2").exists());
+
+        // Removing an already-absent device succeeds with deleted: false.
+        let reply: serde_json::Value =
+            serde_json::from_str(&crate::handle_request(&dev_del.to_string())).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["deleted"], false);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = base.join("outside-keep");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("keep.txt"), "safe").unwrap();
+            symlink(&outside, sync_dir.join("devices/dev3")).unwrap();
+
+            let sym_del = serde_json::json!({
+                "cmd": "sync_delete_device", "deviceId": "dev1", "targetDeviceId": "dev3",
+                "expectedDir": expected_dir
+            });
+            let reply: serde_json::Value =
+                serde_json::from_str(&crate::handle_request(&sym_del.to_string())).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert!(outside.join("keep.txt").exists());
+        }
+
+        env::remove_var("TAB_REAPER_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 }

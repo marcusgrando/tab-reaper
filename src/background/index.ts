@@ -36,11 +36,13 @@ import {
 } from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
+  adoptDeviceHistory,
   captureSessionSnapshot,
   clearSnapshots,
   setSyncFolder,
   deleteSnapshot,
   findRecoverableSnapshot,
+  getSnapshotDetails,
   isRestoreInFlight,
   listAllSnapshots,
   loadSnapshots,
@@ -53,9 +55,11 @@ import {
   getSyncStatus,
   getLocalConfigVersion,
   isFolderSyncOptedIn,
+  listSyncedDevices,
   loadDeviceIdentity,
   pickSyncFolder,
   pullConfigFromSync,
+  removeSyncedDevice,
   setDeviceName,
   setLocalConfigVersion,
   syncPendingLocalSnapshots,
@@ -775,6 +779,10 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     }
     case "get_snapshots":
       return listAllSnapshots();
+    case "get_snapshot_details": {
+      const snapshot = await getSnapshotDetails(message.id, message.relPath);
+      return snapshot ? { ok: true, snapshot } : { ok: false, error: "Snapshot unavailable." };
+    }
     case "capture_snapshot_now": {
       if (!(await isFolderSyncOptedIn())) {
         return { ok: false, error: "Configure a sync folder first to save session snapshots." };
@@ -793,7 +801,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: true };
     }
     case "delete_snapshot": {
-      const ok = await deleteSnapshot(message.id, message.syncDir);
+      const ok = await deleteSnapshot(message.id, message.syncDir, message.ownerDeviceId);
       return { ok };
     }
     case "restore_snapshot": {
@@ -808,6 +816,12 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return pingNativeHost();
     case "get_sync_status":
       return getSyncStatus();
+    case "get_synced_devices":
+      return listSyncedDevices();
+    case "remove_synced_device":
+      return removeSyncedDevice(message.targetDeviceId);
+    case "adopt_synced_device":
+      return adoptDeviceHistory(message.targetDeviceId);
     case "detect_sync_folders":
       return detectSyncFolders();
     case "pick_sync_folder":

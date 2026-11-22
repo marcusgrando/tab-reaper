@@ -3,11 +3,13 @@ import {
   GFS_RECENT_LIMIT,
   deleteSyncedSnapshot,
   getSyncStatus,
+  listSyncedDevices,
   listSyncedSnapshots,
   pruneSnapshotsGfs,
   pullConfigFromSync,
   pushSnapshotToSync,
   readSyncedSnapshot,
+  removeSyncedDevice,
   resolveLatestConfig,
   setDeviceName,
   setLocalConfigVersion,
@@ -15,7 +17,16 @@ import {
   utf8ByteLength,
   type SyncedConfigEnvelope,
 } from "../src/background/sync.ts";
-import { setSyncFolder, captureSessionSnapshot, deleteSnapshot, listAllSnapshots, findRecoverableSnapshot, loadSnapshots } from "../src/background/session.ts";
+import {
+  adoptDeviceHistory,
+  setSyncFolder,
+  captureSessionSnapshot,
+  deleteSnapshot,
+  getSnapshotDetails,
+  listAllSnapshots,
+  findRecoverableSnapshot,
+  loadSnapshots,
+} from "../src/background/session.ts";
 import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/shared/config.ts";
 import type { SessionSnapshot, TabReaperConfig } from "../src/shared/types.ts";
 
@@ -81,9 +92,11 @@ describe("multi-device single-writer folder sync integration", () => {
   let writable: boolean;
   let hostOnline: boolean;
   let hostOutdated: boolean;
+  let hostSupportsDeviceManagement: boolean;
   let failNextIndexWrite: boolean;
   let failNextIndexRead: boolean;
   let loseIndexReply: boolean;
+  let approvedFolders: Map<string, string>;
 
   let activeSyncDir: string;
   let hostHostname: string;
@@ -102,9 +115,11 @@ describe("multi-device single-writer folder sync integration", () => {
     writable = true;
     hostOnline = true;
     hostOutdated = false;
+    hostSupportsDeviceManagement = true;
     failNextIndexWrite = false;
     failNextIndexRead = false;
     loseIndexReply = false;
+    approvedFolders = new Map<string, string>([["dev-mac", activeSyncDir]]);
 
     (globalThis as unknown as { chrome: unknown }).chrome = {
       permissions: {
@@ -127,18 +142,36 @@ describe("multi-device single-writer folder sync integration", () => {
         sendNativeMessage: async (_host: string, payload: Record<string, unknown>) => {
           if (!hostOnline) return null;
           const cmd = payload.cmd as string;
+          const capabilities = hostOutdated
+            ? []
+            : hostSupportsDeviceManagement
+              ? ["expected_dir", "manage_devices"]
+              : ["expected_dir"];
           if (cmd === "sync_set_folder") {
-            return { ok: true, enabled: Boolean(payload.path), syncDir: payload.path, writable };
+            const dev = payload.deviceId as string;
+            if (payload.path) approvedFolders.set(dev, payload.path as string);
+            else approvedFolders.delete(dev);
+            return { ok: true, enabled: Boolean(payload.path), syncDir: payload.path, writable, capabilities, hostname: hostHostname };
           }
           if (cmd === "sync_get_status") {
-            return { ok: true, enabled: true, capabilities: hostOutdated ? [] : ["expected_dir"], syncDir: activeSyncDir, writable, hostname: hostHostname };
+            return { ok: true, enabled: true, capabilities, syncDir: activeSyncDir, writable, hostname: hostHostname };
           }
-          if (["sync_write", "sync_read", "sync_list", "sync_delete"].includes(cmd) && payload.expectedDir !== activeSyncDir) return { ok: false, error: "sync folder changed" };
+          if (["sync_write", "sync_read", "sync_list", "sync_delete", "sync_delete_device"].includes(cmd) && payload.expectedDir !== activeSyncDir) {
+            return { ok: false, error: "sync folder changed" };
+          }
           if (cmd === "sync_write") {
             const dev = payload.deviceId as string;
+            const targetDev = (payload.targetDeviceId as string | undefined) ?? dev;
             const relPath = payload.relPath as string;
-            if (!relPath.startsWith(`devices/${dev}/`)) {
-              return { ok: false, error: "not owned" };
+            if (targetDev === dev) {
+              if (!relPath.startsWith(`devices/${dev}/`)) return { ok: false, error: "not owned" };
+            } else {
+              if (!hostSupportsDeviceManagement) return { ok: false, error: "unsupported" };
+              const allowed =
+                relPath === `devices/${targetDev}/index.json` ||
+                relPath.startsWith(`devices/${targetDev}/snapshots/`) ||
+                relPath.startsWith(`devices/${targetDev}/index-parts/`);
+              if (!allowed) return { ok: false, error: "not allowed cross-device" };
             }
             const content = payload.content as string;
             if (utf8ByteLength(content) > 800 * 1024) return { ok: false, error: "file exceeds limit" };
@@ -165,11 +198,34 @@ describe("multi-device single-writer folder sync integration", () => {
           }
           if (cmd === "sync_delete") {
             const dev = payload.deviceId as string;
+            const targetDev = (payload.targetDeviceId as string | undefined) ?? dev;
             const relPath = payload.relPath as string;
-            if (!relPath.startsWith(`devices/${dev}/`)) {
-              return { ok: false, error: "not owned" };
+            if (targetDev === dev) {
+              if (!relPath.startsWith(`devices/${dev}/`)) return { ok: false, error: "not owned" };
+            } else {
+              if (!hostSupportsDeviceManagement) return { ok: false, error: "unsupported" };
+              const allowed =
+                relPath === `devices/${targetDev}/index.json` ||
+                relPath.startsWith(`devices/${targetDev}/snapshots/`) ||
+                relPath.startsWith(`devices/${targetDev}/index-parts/`);
+              if (!allowed) return { ok: false, error: "not allowed cross-device" };
             }
             return { ok: true, deleted: virtualFs.delete(relPath) };
+          }
+          if (cmd === "sync_delete_device") {
+            if (!hostSupportsDeviceManagement) return { ok: false, error: "unsupported" };
+            const dev = payload.deviceId as string;
+            const targetDev = payload.targetDeviceId as string;
+            if (!targetDev || targetDev === dev) return { ok: false, error: "cannot remove self" };
+            const prefix = `devices/${targetDev}/`;
+            let deleted = false;
+            for (const key of Array.from(virtualFs.keys())) {
+              if (key.startsWith(prefix)) {
+                virtualFs.delete(key);
+                deleted = true;
+              }
+            }
+            return { ok: true, deleted };
           }
           if (cmd === "sync_list") {
             const prefix = (payload.relPrefix as string) || "";
@@ -742,5 +798,230 @@ describe("multi-device single-writer folder sync integration", () => {
     await setDeviceName("Custom Laptop");
     hostHostname = "Renamed-Host";
     expect((await getSyncStatus()).deviceName).toBe("Custom Laptop");
+  });
+
+  test("lists synced devices, flags same computer installs, and inspects snapshot tabs", async () => {
+    const now = 1_700_000_000_000;
+    hostHostname = "mnag-note";
+    storageData["tabReaper.deviceIdentity"] = {
+      deviceId: "dev-new",
+      deviceName: "mnag-note",
+      hostname: "mnag-note",
+      deviceNameSource: "hostname",
+    };
+
+    // Current device snapshot
+    const ownSnap: SessionSnapshot = {
+      id: "own-1",
+      complete: true,
+      capturedAt: now + 2000,
+      tabCount: 1,
+      windowCount: 1,
+      trigger: "manual",
+      tabs: [{ url: "https://own.test/a", title: "Own Tab", pinned: false, kept: false, windowId: 1, index: 0 }],
+    };
+    expect(await pushSnapshotToSync(ownSnap, now + 2000)).toBe(true);
+
+    // Earlier install on the SAME computer (legacy meta.json without hostname, same deviceName)
+    virtualFs.set("devices/dev-old-same/meta.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-old-same",
+      deviceName: "mnag-note",
+      lastSeenAt: now + 1000,
+    }));
+    virtualFs.set("devices/dev-old-same/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-old-same",
+      deviceName: "mnag-note",
+      updatedAt: now + 1000,
+      snapshots: [{
+        id: "old-1",
+        complete: true,
+        capturedAt: now + 1000,
+        tabCount: 2,
+        windowCount: 1,
+        trigger: "auto",
+        relPath: "devices/dev-old-same/snapshots/s1.json",
+      }],
+    }));
+    virtualFs.set("devices/dev-old-same/snapshots/s1.json", JSON.stringify({
+      id: "old-1",
+      complete: true,
+      capturedAt: now + 1000,
+      tabCount: 2,
+      windowCount: 1,
+      trigger: "auto",
+      tabs: [
+        { url: "https://old.test/1", title: "Old 1", pinned: true, kept: false, windowId: 1, index: 0 },
+        { url: "https://old.test/2", title: "Old 2", pinned: false, kept: true, windowId: 1, index: 1 },
+      ],
+    }));
+
+    // Different computer with same custom deviceName but DIFFERENT hostname must NOT be flagged as same computer
+    virtualFs.set("devices/dev-other-host/meta.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-other-host",
+      deviceName: "mnag-note",
+      hostname: "work-linux",
+      lastSeenAt: now + 500,
+    }));
+    virtualFs.set("devices/dev-other-host/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-other-host",
+      deviceName: "mnag-note",
+      updatedAt: now + 500,
+      snapshots: [],
+    }));
+
+    const devices = await listSyncedDevices();
+    expect(devices.map((d) => d.deviceId)).toEqual(["dev-new", "dev-old-same", "dev-other-host"]);
+    expect(devices[0]!.isCurrent).toBe(true);
+    expect(devices[0]!.isSameComputer).toBe(true);
+    expect(devices[0]!.snapshotCount).toBe(1);
+    expect(devices[1]!.isCurrent).toBe(false);
+    expect(devices[1]!.isSameComputer).toBe(true);
+    expect(devices[1]!.snapshotCount).toBe(1);
+    expect(devices[2]!.isCurrent).toBe(false);
+    expect(devices[2]!.isSameComputer).toBe(false);
+
+    // Inspect tabs on demand for another device's synced snapshot
+    const details = await getSnapshotDetails("old-1", "devices/dev-old-same/snapshots/s1.json");
+    expect(details?.tabs.map((t) => t.title)).toEqual(["Old 1", "Old 2"]);
+  });
+
+  test("deletes individual snapshots on another device and removes unused device folders", async () => {
+    const now = 1_700_000_000_000;
+    virtualFs.set("devices/dev-other/meta.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-other",
+      deviceName: "Work Desktop",
+      hostname: "work-pc",
+      lastSeenAt: now,
+    }));
+    virtualFs.set("devices/dev-other/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-other",
+      deviceName: "Work Desktop",
+      updatedAt: now,
+      snapshots: [
+        {
+          id: "other-s1",
+          complete: true,
+          capturedAt: now,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "auto",
+          relPath: "devices/dev-other/snapshots/s1.json",
+        },
+        {
+          id: "other-s2",
+          complete: true,
+          capturedAt: now - 60_000,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "auto",
+          relPath: "devices/dev-other/snapshots/s2.json",
+        },
+      ],
+    }));
+    virtualFs.set("devices/dev-other/snapshots/s1.json", JSON.stringify({ id: "other-s1", tabs: [] }));
+    virtualFs.set("devices/dev-other/snapshots/s2.json", JSON.stringify({ id: "other-s2", tabs: [] }));
+
+    // Delete a single snapshot belonging to dev-other
+    expect(await deleteSnapshot("other-s1", activeSyncDir, "dev-other")).toBe(true);
+    expect(virtualFs.has("devices/dev-other/snapshots/s1.json")).toBe(false);
+    expect(virtualFs.has("devices/dev-other/snapshots/s2.json")).toBe(true);
+    const remaining = await listSyncedSnapshots();
+    expect(remaining.map((s) => s.id)).toEqual(["other-s2"]);
+
+    // Reject removing own device
+    expect((await removeSyncedDevice("dev-mac")).ok).toBe(false);
+
+    // Reject management when Local Companion lacks manage_devices capability
+    hostSupportsDeviceManagement = false;
+    expect((await removeSyncedDevice("dev-other")).ok).toBe(false);
+    expect(await deleteSnapshot("other-s2", activeSyncDir, "dev-other")).toBe(false);
+    hostSupportsDeviceManagement = true;
+
+    // Remove the other device folder cleanly
+    expect((await removeSyncedDevice("dev-other")).ok).toBe(true);
+    expect(Array.from(virtualFs.keys()).some((k) => k.startsWith("devices/dev-other/"))).toBe(false);
+  });
+
+  test("adopting an earlier device merges new snapshots and removes the temporary device folder", async () => {
+    const now = 1_700_000_000_000;
+    hostHostname = "mnag-note";
+    storageData["tabReaper.deviceIdentity"] = {
+      deviceId: "dev-temp",
+      deviceName: "mnag-note",
+      hostname: "mnag-note",
+      deviceNameSource: "hostname",
+    };
+    approvedFolders.set("dev-temp", activeSyncDir);
+
+    // Earlier install history on the same computer
+    virtualFs.set("devices/dev-original/meta.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-original",
+      deviceName: "mnag-note",
+      hostname: "mnag-note",
+      lastSeenAt: now - 300_000,
+    }));
+    virtualFs.set("devices/dev-original/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-original",
+      deviceName: "mnag-note",
+      updatedAt: now - 300_000,
+      snapshots: [{
+        id: "orig-1",
+        complete: true,
+        capturedAt: now - 300_000,
+        tabCount: 1,
+        windowCount: 1,
+        trigger: "auto",
+        relPath: "devices/dev-original/snapshots/orig1.json",
+      }],
+    }));
+    virtualFs.set("devices/dev-original/snapshots/orig1.json", JSON.stringify({
+      id: "orig-1",
+      complete: true,
+      capturedAt: now - 300_000,
+      tabCount: 1,
+      windowCount: 1,
+      trigger: "auto",
+      tabs: [{ url: "https://orig.test/1", title: "Orig", pinned: false, kept: false, windowId: 1, index: 0 }],
+    }));
+
+    // Temporary new install captured 1 snapshot locally + synced
+    const tempSnap: SessionSnapshot = {
+      id: "temp-1",
+      complete: true,
+      capturedAt: now,
+      tabCount: 1,
+      windowCount: 1,
+      trigger: "auto",
+      deviceId: "dev-temp",
+      deviceName: "mnag-note",
+      tabs: [{ url: "https://temp.test/1", title: "Temp", pinned: false, kept: false, windowId: 1, index: 0 }],
+    };
+    storageData["tabReaper.sessionSnapshots"] = [tempSnap];
+    expect(await pushSnapshotToSync(tempSnap, now)).toBe(true);
+
+    const res = await adoptDeviceHistory("dev-original");
+    expect(res.ok).toBe(true);
+    expect(res.migrated).toBe(1);
+
+    // Active deviceId is now dev-original, approved in host, temp device removed & unapproved
+    const status = await getSyncStatus();
+    expect(status.deviceId).toBe("dev-original");
+    expect(approvedFolders.get("dev-original")).toBe(activeSyncDir);
+    expect(approvedFolders.has("dev-temp")).toBe(false);
+    expect(Array.from(virtualFs.keys()).some((k) => k.startsWith("devices/dev-temp/"))).toBe(false);
+
+    // Both snapshots now belong to dev-original
+    const listed = await listAllSnapshots();
+    expect(listed.map((s) => s.id)).toEqual(["temp-1", "orig-1"]);
+    expect(listed.every((s) => s.deviceId === "dev-original")).toBe(true);
+    expect((await loadSnapshots())[0]?.deviceId).toBe("dev-original");
   });
 });

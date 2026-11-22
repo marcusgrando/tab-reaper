@@ -188,18 +188,31 @@ export interface SyncStatus {
   hostConnected: boolean;
   hostOutdated?: boolean;
   hostVersion?: string | null;
+  supportsDeviceManagement?: boolean;
   enabled: boolean;
   syncDir: string | null;
   writable: boolean;
   deviceId: string;
   deviceName: string;
+  hostname?: string | null;
   lastSyncAt: number | null;
   lastError?: string | null;
+}
+
+export interface SyncedDeviceInfo {
+  deviceId: string;
+  deviceName: string;
+  hostname?: string;
+  lastSeenAt: number | null;
+  snapshotCount: number;
+  isCurrent: boolean;
+  isSameComputer: boolean;
 }
 
 export interface DeviceIdentity {
   deviceId: string;
   deviceName: string;
+  hostname?: string;
 }
 
 export interface StatusPayload {
@@ -226,13 +239,17 @@ export type BackgroundMessage =
   | { type: "close_tab"; tabId: number }
   | { type: "discard_idle_now" }
   | { type: "get_snapshots" }
+  | { type: "get_snapshot_details"; id: string; relPath?: string }
   | { type: "capture_snapshot_now"; label?: string }
   | { type: "clear_snapshots" }
-  | { type: "delete_snapshot"; id: string; syncDir?: string | null }
+  | { type: "delete_snapshot"; id: string; syncDir?: string | null; ownerDeviceId?: string }
   | { type: "restore_snapshot"; id: string; targetWindowId?: number; mode?: RestoreMode; relPath?: string }
   | { type: "save_config"; config: Partial<TabReaperConfig> }
   | { type: "test_native_host" }
   | { type: "get_sync_status" }
+  | { type: "get_synced_devices" }
+  | { type: "remove_synced_device"; targetDeviceId: string }
+  | { type: "adopt_synced_device"; targetDeviceId: string }
   | { type: "detect_sync_folders" }
   | { type: "pick_sync_folder" }
   | { type: "set_sync_folder"; path: string | null }

@@ -5,6 +5,7 @@ import {
   SETUP_PENDING_KEY,
   buildQuickUpdateCommand,
   computeMemoryBudgetBytes,
+  isHttpUrl,
   sanitizeConfig,
 } from "../shared/config.ts";
 import type {
@@ -13,9 +14,11 @@ import type {
   RestoreMode,
   SessionSnapshot,
   SnapshotListItem,
+  SnapshotTab,
   StatusPayload,
   SyncFolderCandidate,
   SyncStatus,
+  SyncedDeviceInfo,
   TabReaperConfig,
 } from "../shared/types.ts";
 
@@ -71,6 +74,9 @@ const btnSyncNow = document.getElementById("btn-sync-now") as HTMLButtonElement;
 const btnSyncDisable = document.getElementById("btn-sync-disable") as HTMLButtonElement;
 const deviceNameInput = document.getElementById("device-name-input") as HTMLInputElement;
 const btnDeviceName = document.getElementById("btn-device-name") as HTMLButtonElement;
+const syncDevicesWrap = document.getElementById("sync-devices-wrap") as HTMLElement;
+const syncDevicesList = document.getElementById("sync-devices-list") as HTMLElement;
+const syncDevicesStatus = document.getElementById("sync-devices-status") as HTMLElement;
 
 const setupCardEl = document.getElementById("setup-card") as HTMLElement;
 const btnSetupDismiss = document.getElementById("btn-setup-dismiss") as HTMLButtonElement;
@@ -495,7 +501,7 @@ async function applySyncFolder(path: string | null): Promise<void> {
     error?: string;
   };
   if (res?.ok) {
-    await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
+    await refreshSyncAndSnapshotsUI();
     if (path) {
       const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
       populateForm(status.config);
@@ -507,22 +513,231 @@ async function applySyncFolder(path: string | null): Promise<void> {
 }
 
 let currentDeviceId: string | null = null;
+let supportsDeviceManagement = false;
+let syncedDevices: SyncedDeviceInfo[] = [];
 let syncEnabledState = false;
 let hasStoredSnapshots = false;
 
+function shortDeviceTag(deviceId: string): string {
+  const cleaned = deviceId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toLowerCase();
+  return cleaned ? `#${cleaned}` : "";
+}
+
+function getDuplicateDeviceNames(items: Array<{ deviceId?: string; deviceName?: string }>): Set<string> {
+  const idsByName = new Map<string, Set<string>>();
+  for (const item of items) {
+    if (!item.deviceId || !item.deviceName) continue;
+    const key = item.deviceName.trim().toLowerCase();
+    let set = idsByName.get(key);
+    if (!set) {
+      set = new Set();
+      idsByName.set(key, set);
+    }
+    set.add(item.deviceId);
+  }
+  const dupes = new Set<string>();
+  for (const [key, ids] of idsByName.entries()) {
+    if (ids.size > 1) dupes.add(key);
+  }
+  return dupes;
+}
+
+function formatDeviceDisplayName(deviceId: string, deviceName: string, duplicateNames: Set<string>): string {
+  const key = deviceName.trim().toLowerCase();
+  if (!duplicateNames.has(key)) return deviceName;
+  const tag = shortDeviceTag(deviceId);
+  return tag ? `${deviceName} · ${tag}` : deviceName;
+}
+
+function formatTabUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = `${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+    const combined = `${parsed.hostname}${path}`;
+    return combined.length > 72 ? `${combined.slice(0, 71)}…` : combined;
+  } catch {
+    return url.length > 72 ? `${url.slice(0, 71)}…` : url;
+  }
+}
+
 function updateSnapshotsCardVisibility(): void {
   snapshotsCardEl.classList.toggle("hidden", !syncEnabledState && !hasStoredSnapshots);
+}
+
+function renderSyncedDevicesUI(): void {
+  syncDevicesList.replaceChildren();
+  if (!syncEnabledState) {
+    syncDevicesStatus.textContent = "";
+    syncDevicesWrap.classList.add("hidden");
+    return;
+  }
+  if (syncedDevices.length <= 1) {
+    syncDevicesWrap.classList.add("hidden");
+    return;
+  }
+
+  syncDevicesWrap.classList.remove("hidden");
+  const duplicateNames = getDuplicateDeviceNames(syncedDevices);
+
+  for (const dev of syncedDevices) {
+    const row = document.createElement("div");
+    row.className = "device-row";
+
+    const info = document.createElement("div");
+    const nameEl = document.createElement("strong");
+    nameEl.textContent = formatDeviceDisplayName(dev.deviceId, dev.deviceName, duplicateNames);
+    info.appendChild(nameEl);
+
+    if (dev.isCurrent) {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge";
+      badge.textContent = "this browser";
+      info.appendChild(badge);
+    } else if (dev.isSameComputer) {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge muted";
+      badge.textContent = "same computer";
+      info.appendChild(badge);
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "device-meta";
+    const lastPart = dev.lastSeenAt ? `Last active ${formatSnapshotTime(dev.lastSeenAt)}` : "No activity recorded";
+    const snapPart = `${dev.snapshotCount} snapshot${dev.snapshotCount === 1 ? "" : "s"}`;
+    const hintPart = !dev.isCurrent && dev.isSameComputer ? " · Earlier install or other profile" : "";
+    meta.textContent = `${lastPart} · ${snapPart}${hintPart}`;
+    info.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "device-actions";
+
+    if (!dev.isCurrent && supportsDeviceManagement) {
+      const renderDefaultDeviceActions = () => {
+        actions.replaceChildren();
+        if (dev.isSameComputer) {
+          const adoptBtn = document.createElement("button");
+          adoptBtn.type = "button";
+          adoptBtn.className = "secondary small";
+          adoptBtn.textContent = "Use this history";
+          adoptBtn.addEventListener("click", () => {
+            actions.replaceChildren();
+            const prompt = document.createElement("div");
+            prompt.className = "confirm-prompt";
+
+            const confirmBtn = document.createElement("button");
+            confirmBtn.type = "button";
+            confirmBtn.className = "small";
+            confirmBtn.textContent = "Confirm";
+            confirmBtn.addEventListener("click", async () => {
+              confirmBtn.disabled = true;
+              syncDevicesStatus.textContent = "Merging history...";
+              syncDevicesStatus.className = "status-text";
+              const res = (await chrome.runtime.sendMessage({
+                type: "adopt_synced_device",
+                targetDeviceId: dev.deviceId,
+              })) as { ok?: boolean; migrated?: number; error?: string };
+              if (res?.ok) {
+                const moved = res.migrated ? ` Merged ${res.migrated} recent snapshot(s).` : "";
+                syncDevicesStatus.textContent = `Switched to ${dev.deviceName}'s history.${moved}`;
+                syncDevicesStatus.className = "status-text ok";
+                await refreshSyncAndSnapshotsUI();
+              } else {
+                syncDevicesStatus.textContent = res?.error ?? "Could not switch device history.";
+                syncDevicesStatus.className = "status-text err";
+                renderDefaultDeviceActions();
+              }
+            });
+
+            const cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.className = "secondary small";
+            cancelBtn.textContent = "Cancel";
+            cancelBtn.addEventListener("click", renderDefaultDeviceActions);
+
+            const note = document.createElement("span");
+            note.className = "confirm-note";
+            note.textContent = "Use only if that earlier install is no longer running.";
+
+            prompt.append(confirmBtn, cancelBtn, note);
+            actions.appendChild(prompt);
+          });
+          actions.appendChild(adoptBtn);
+        }
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "secondary small";
+        removeBtn.textContent = "Remove";
+        removeBtn.addEventListener("click", () => {
+          actions.replaceChildren();
+          const prompt = document.createElement("div");
+          prompt.className = "confirm-prompt";
+
+          const confirmBtn = document.createElement("button");
+          confirmBtn.type = "button";
+          confirmBtn.className = "small";
+          confirmBtn.textContent = "Remove device";
+          confirmBtn.addEventListener("click", async () => {
+            confirmBtn.disabled = true;
+            syncDevicesStatus.textContent = "Removing device...";
+            syncDevicesStatus.className = "status-text";
+            const res = (await chrome.runtime.sendMessage({
+              type: "remove_synced_device",
+              targetDeviceId: dev.deviceId,
+            })) as { ok?: boolean; error?: string };
+            if (res?.ok) {
+              syncDevicesStatus.textContent = `Removed ${dev.deviceName} from this sync folder.`;
+              syncDevicesStatus.className = "status-text ok";
+              await refreshSyncAndSnapshotsUI();
+            } else {
+              syncDevicesStatus.textContent = res?.error ?? "Could not remove device.";
+              syncDevicesStatus.className = "status-text err";
+              renderDefaultDeviceActions();
+            }
+          });
+
+          const cancelBtn = document.createElement("button");
+          cancelBtn.type = "button";
+          cancelBtn.className = "secondary small";
+          cancelBtn.textContent = "Cancel";
+          cancelBtn.addEventListener("click", renderDefaultDeviceActions);
+
+          prompt.append(confirmBtn, cancelBtn);
+          actions.appendChild(prompt);
+        });
+        actions.appendChild(removeBtn);
+      };
+
+      renderDefaultDeviceActions();
+    }
+
+    row.append(info, actions);
+    syncDevicesList.appendChild(row);
+  }
+
+  if (!supportsDeviceManagement) {
+    syncDevicesStatus.textContent = "Update the Local Companion to remove or merge other devices from here.";
+    syncDevicesStatus.className = "status-text";
+  }
+}
+
+async function refreshSyncAndSnapshotsUI(): Promise<void> {
+  await refreshSyncUI();
+  await refreshSnapshotsUI();
 }
 
 async function refreshSyncUI(): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "get_sync_status" })) as SyncStatus;
   lastSyncStatus = status ?? null;
   currentDeviceId = status?.deviceId ?? null;
+  supportsDeviceManagement = Boolean(status?.supportsDeviceManagement);
   if (!status?.hostConnected) {
     lastSyncCandidates = [];
+    syncedDevices = [];
     syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
     syncSnapshotsConfigEl.classList.add("hidden");
+    renderSyncedDevicesUI();
     updateSnapshotsCardVisibility();
     btnSyncNow.classList.add("hidden");
     btnSyncDisable.classList.add("hidden");
@@ -534,9 +749,11 @@ async function refreshSyncUI(): Promise<void> {
 
   if (status.hostOutdated) {
     lastSyncCandidates = [];
+    syncedDevices = [];
     syncEnabledState = false;
     syncControlsEl.classList.add("hidden");
     syncSnapshotsConfigEl.classList.add("hidden");
+    renderSyncedDevicesUI();
     updateSnapshotsCardVisibility();
     btnSyncNow.classList.add("hidden");
     btnSyncDisable.classList.add("hidden");
@@ -569,7 +786,14 @@ async function refreshSyncUI(): Promise<void> {
     syncStatusEl.className = "status-text";
   }
 
-  const candidates = (await chrome.runtime.sendMessage({ type: "detect_sync_folders" })) as SyncFolderCandidate[];
+  const [candidates, devices] = await Promise.all([
+    chrome.runtime.sendMessage({ type: "detect_sync_folders" }) as Promise<SyncFolderCandidate[]>,
+    syncEnabledState
+      ? (chrome.runtime.sendMessage({ type: "get_synced_devices" }) as Promise<SyncedDeviceInfo[]>)
+      : Promise.resolve([]),
+  ]);
+  syncedDevices = Array.isArray(devices) ? devices : [];
+  renderSyncedDevicesUI();
   lastSyncCandidates = Array.isArray(candidates) ? candidates : [];
   syncCandidatesEl.replaceChildren();
   if (lastSyncCandidates.length === 0) {
@@ -618,7 +842,251 @@ async function runRestore(snap: SnapshotListItem, mode: RestoreMode): Promise<vo
   const skipped = res?.skippedExisting ? `, ${res.skippedExisting} already open` : "";
   snapshotStatus.textContent = `Restored ${res?.restored ?? 0} tab(s)${winPart}${skipped}.`;
   snapshotStatus.className = "status-text ok";
-  await refreshSnapshotsUI();
+  await refreshSyncAndSnapshotsUI();
+}
+
+function renderSnapshotTabsPanel(panel: HTMLElement, snapshot: SessionSnapshot): void {
+  panel.replaceChildren();
+  if (!snapshot.tabs.length) {
+    const empty = document.createElement("div");
+    empty.className = "snapshot-meta";
+    empty.textContent = "No tabs recorded in this snapshot.";
+    panel.appendChild(empty);
+    return;
+  }
+
+  const byWindow = new Map<number, SnapshotTab[]>();
+  for (const tab of snapshot.tabs) {
+    const list = byWindow.get(tab.windowId) ?? [];
+    list.push(tab);
+    byWindow.set(tab.windowId, list);
+  }
+
+  const multiWindow = byWindow.size > 1;
+  let winIdx = 0;
+  for (const tabs of byWindow.values()) {
+    winIdx++;
+    const winWrap = document.createElement("div");
+    winWrap.className = "snapshot-tabs-window";
+    if (multiWindow) {
+      const heading = document.createElement("div");
+      heading.className = "snapshot-tabs-window-title";
+      heading.textContent = `Window ${winIdx} (${tabs.length} tabs)`;
+      winWrap.appendChild(heading);
+    }
+
+    const list = document.createElement("ul");
+    list.className = "snapshot-tab-list";
+    const ordered = [...tabs].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    for (const tab of ordered) {
+      const li = document.createElement("li");
+      li.className = "snapshot-tab-entry";
+
+      if (tab.groupTitle) {
+        const grp = document.createElement("span");
+        grp.className = "snapshot-badge muted";
+        grp.textContent = tab.groupTitle;
+        li.appendChild(grp);
+      }
+      if (tab.pinned) {
+        const pin = document.createElement("span");
+        pin.className = "snapshot-badge muted";
+        pin.textContent = "pinned";
+        li.appendChild(pin);
+      }
+      if (tab.kept) {
+        const kept = document.createElement("span");
+        kept.className = "snapshot-badge";
+        kept.textContent = "kept";
+        li.appendChild(kept);
+      }
+
+      if (isHttpUrl(tab.url)) {
+        const link = document.createElement("a");
+        link.className = "snapshot-tab-link";
+        link.href = tab.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = tab.title || tab.url;
+        link.title = tab.url;
+        li.appendChild(link);
+      } else {
+        const titleEl = document.createElement("span");
+        titleEl.className = "snapshot-tab-link";
+        titleEl.textContent = tab.title || tab.url;
+        li.appendChild(titleEl);
+      }
+
+      const urlEl = document.createElement("span");
+      urlEl.className = "snapshot-tab-url";
+      urlEl.textContent = formatTabUrl(tab.url);
+      li.appendChild(urlEl);
+
+      list.appendChild(li);
+    }
+    winWrap.appendChild(list);
+    panel.appendChild(winWrap);
+  }
+}
+
+function buildSnapshotItemEl(
+  snap: SnapshotListItem,
+  options: { showDeviceInRow: boolean; isOwn: boolean; detailsCache: Map<string, SessionSnapshot> },
+): HTMLElement {
+  const item = document.createElement("div");
+  item.className = "snapshot-item";
+
+  const row = document.createElement("div");
+  row.className = "snapshot-row";
+
+  const info = document.createElement("div");
+  const count = document.createElement("strong");
+  const winLabel = snap.windowCount > 1 ? ` · ${snap.windowCount} windows` : "";
+  count.textContent = snap.label
+    ? `${snap.label} (${snap.tabCount} tabs${winLabel})`
+    : `${snap.tabCount} tabs${winLabel}`;
+
+  const meta = document.createElement("span");
+  meta.className = "snapshot-meta";
+  const devicePart = options.showDeviceInRow && snap.deviceName ? ` · ${snap.deviceName}` : "";
+  meta.textContent = ` · ${formatSnapshotTime(snap.capturedAt)}${devicePart}`;
+  info.append(count, meta);
+
+  if (snap.trigger === "manual") {
+    const badge = document.createElement("span");
+    badge.className = "snapshot-badge manual";
+    badge.textContent = "manual";
+    info.appendChild(badge);
+  } else if (snap.trigger === "pre_restore") {
+    const badge = document.createElement("span");
+    badge.className = "snapshot-badge";
+    badge.textContent = "pre-restore";
+    info.appendChild(badge);
+  }
+
+  if (snap.source === "sync") {
+    const badge = document.createElement("span");
+    badge.className = "snapshot-badge sync";
+    badge.textContent = "synced";
+    info.appendChild(badge);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "snapshot-actions";
+
+  const tabsPanel = document.createElement("div");
+  tabsPanel.className = "snapshot-tabs-panel hidden";
+
+  const tabsBtn = document.createElement("button");
+  tabsBtn.type = "button";
+  tabsBtn.className = "secondary small";
+  tabsBtn.textContent = "Tabs";
+  tabsBtn.setAttribute("aria-expanded", "false");
+  tabsBtn.addEventListener("click", async () => {
+    const opening = tabsPanel.classList.contains("hidden");
+    if (!opening) {
+      tabsPanel.classList.add("hidden");
+      tabsBtn.textContent = "Tabs";
+      tabsBtn.setAttribute("aria-expanded", "false");
+      return;
+    }
+    tabsPanel.classList.remove("hidden");
+    tabsBtn.textContent = "Hide tabs";
+    tabsBtn.setAttribute("aria-expanded", "true");
+
+    const cached = options.detailsCache.get(snap.id);
+    if (cached) {
+      renderSnapshotTabsPanel(tabsPanel, cached);
+      return;
+    }
+    tabsPanel.textContent = "Loading tabs...";
+    const res = (await chrome.runtime.sendMessage({
+      type: "get_snapshot_details",
+      id: snap.id,
+      relPath: snap.relPath,
+    })) as { ok?: boolean; snapshot?: SessionSnapshot; error?: string };
+    if (res?.ok && res.snapshot) {
+      options.detailsCache.set(snap.id, res.snapshot);
+      renderSnapshotTabsPanel(tabsPanel, res.snapshot);
+    } else {
+      tabsPanel.textContent = res?.error ?? "Could not load tabs for this snapshot.";
+    }
+  });
+
+  const restoreBtn = document.createElement("button");
+  restoreBtn.type = "button";
+  restoreBtn.className = "secondary small";
+  restoreBtn.textContent = "Restore";
+
+  const canDelete = options.isOwn || supportsDeviceManagement;
+  const delBtn = canDelete ? document.createElement("button") : null;
+  if (delBtn) {
+    delBtn.type = "button";
+    delBtn.className = "secondary small";
+    delBtn.textContent = "Delete";
+    delBtn.addEventListener("click", async () => {
+      delBtn.disabled = true;
+      const res = (await chrome.runtime.sendMessage({
+        type: "delete_snapshot",
+        id: snap.id,
+        syncDir: snap.syncDir,
+        ownerDeviceId: snap.deviceId,
+      })) as { ok?: boolean };
+      if (!res?.ok && !options.isOwn) {
+        snapshotStatus.textContent = "Could not delete snapshot. Check folder permissions and try again.";
+        snapshotStatus.className = "status-text err";
+        delBtn.disabled = false;
+        return;
+      }
+      await refreshSyncAndSnapshotsUI();
+    });
+  }
+
+  const renderDefaultActions = () => {
+    if (delBtn) {
+      actions.replaceChildren(tabsBtn, restoreBtn, delBtn);
+    } else {
+      actions.replaceChildren(tabsBtn, restoreBtn);
+    }
+  };
+
+  restoreBtn.addEventListener("click", () => {
+    actions.replaceChildren();
+    const prompt = document.createElement("div");
+    prompt.className = "restore-prompt";
+
+    const winBtn = document.createElement("button");
+    winBtn.type = "button";
+    winBtn.className = "small";
+    winBtn.textContent = snap.windowCount > 1 ? `Restore ${snap.windowCount} windows` : "New window";
+    winBtn.addEventListener("click", async () => {
+      winBtn.disabled = true;
+      await runRestore(snap, "windows");
+    });
+
+    const curBtn = document.createElement("button");
+    curBtn.type = "button";
+    curBtn.className = "secondary small";
+    curBtn.textContent = "Current window";
+    curBtn.addEventListener("click", async () => {
+      curBtn.disabled = true;
+      await runRestore(snap, "current_window");
+    });
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "secondary small";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", renderDefaultActions);
+
+    prompt.append(winBtn, curBtn, cancelBtn);
+    actions.appendChild(prompt);
+  });
+
+  renderDefaultActions();
+  row.append(info, actions);
+  item.append(row, tabsPanel);
+  return item;
 }
 
 async function refreshSnapshotsUI(): Promise<void> {
@@ -634,108 +1102,104 @@ async function refreshSnapshotsUI(): Promise<void> {
     return;
   }
 
-  for (const snap of snapshots) {
-    const row = document.createElement("div");
-    row.className = "snapshot-row";
+  const detailsCache = new Map<string, SessionSnapshot>();
+  const deviceInfoById = new Map(syncedDevices.map((d) => [d.deviceId, d]));
+  const ownSnapshots: SnapshotListItem[] = [];
+  const otherGroups = new Map<string, SnapshotListItem[]>();
 
-    const info = document.createElement("div");
-    const count = document.createElement("strong");
-    const winLabel = snap.windowCount > 1 ? ` · ${snap.windowCount} windows` : "";
-    count.textContent = snap.label
-      ? `${snap.label} (${snap.tabCount} tabs${winLabel})`
-      : `${snap.tabCount} tabs${winLabel}`;
+  for (const snap of snapshots) {
+    const isOwn = !snap.deviceId || !currentDeviceId || snap.deviceId === currentDeviceId;
+    if (isOwn) {
+      ownSnapshots.push(snap);
+    } else {
+      const list = otherGroups.get(snap.deviceId!) ?? [];
+      list.push(snap);
+      otherGroups.set(snap.deviceId!, list);
+    }
+  }
+
+  // Single-device view stays compact with no redundant group headings.
+  if (otherGroups.size === 0) {
+    for (const snap of ownSnapshots) {
+      snapshotList.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: true, isOwn: true, detailsCache }));
+    }
+    return;
+  }
+
+  const allNamed = [
+    ...syncedDevices,
+    ...snapshots.map((s) => ({ deviceId: s.deviceId, deviceName: s.deviceName })),
+  ];
+  const duplicateNames = getDuplicateDeviceNames(allNamed);
+
+  // Section 1: This browser
+  const ownSection = document.createElement("div");
+  ownSection.className = "snapshot-group";
+  const ownHead = document.createElement("div");
+  ownHead.className = "snapshot-group-head";
+  const ownTitleWrap = document.createElement("div");
+  const ownTitle = document.createElement("span");
+  ownTitle.className = "snapshot-group-title";
+  const ownName = lastSyncStatus?.deviceName ?? ownSnapshots[0]?.deviceName ?? "This browser";
+  ownTitle.textContent = currentDeviceId
+    ? formatDeviceDisplayName(currentDeviceId, ownName, duplicateNames)
+    : ownName;
+  const ownBadge = document.createElement("span");
+  ownBadge.className = "snapshot-badge";
+  ownBadge.textContent = "this browser";
+  ownTitleWrap.append(ownTitle, ownBadge);
+
+  const ownCount = document.createElement("span");
+  ownCount.className = "snapshot-meta";
+  ownCount.textContent = `${ownSnapshots.length} snapshot${ownSnapshots.length === 1 ? "" : "s"}`;
+  ownHead.append(ownTitleWrap, ownCount);
+  ownSection.appendChild(ownHead);
+
+  if (ownSnapshots.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "snapshot-meta snapshot-group-empty";
+    empty.textContent = "No snapshots saved from this browser yet.";
+    ownSection.appendChild(empty);
+  } else {
+    for (const snap of ownSnapshots) {
+      ownSection.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: false, isOwn: true, detailsCache }));
+    }
+  }
+  snapshotList.appendChild(ownSection);
+
+  // Section 2+: Each other device/profile in its own section
+  for (const [devId, groupSnaps] of otherGroups.entries()) {
+    const devInfo = deviceInfoById.get(devId);
+    const section = document.createElement("div");
+    section.className = "snapshot-group";
+
+    const head = document.createElement("div");
+    head.className = "snapshot-group-head";
+    const titleWrap = document.createElement("div");
+    const title = document.createElement("span");
+    title.className = "snapshot-group-title";
+    const rawName = devInfo?.deviceName ?? groupSnaps[0]?.deviceName ?? devId;
+    title.textContent = formatDeviceDisplayName(devId, rawName, duplicateNames);
+    titleWrap.appendChild(title);
+
+    if (devInfo?.isSameComputer) {
+      const badge = document.createElement("span");
+      badge.className = "snapshot-badge muted";
+      badge.textContent = "same computer";
+      titleWrap.appendChild(badge);
+    }
 
     const meta = document.createElement("span");
     meta.className = "snapshot-meta";
-    const devicePart = snap.deviceName ? ` · ${snap.deviceName}` : "";
-    meta.textContent = ` · ${formatSnapshotTime(snap.capturedAt)}${devicePart}`;
-    info.append(count, meta);
+    const lastActive = devInfo?.lastSeenAt ? `Last active ${formatSnapshotTime(devInfo.lastSeenAt)} · ` : "";
+    meta.textContent = `${lastActive}${groupSnaps.length} snapshot${groupSnaps.length === 1 ? "" : "s"}`;
+    head.append(titleWrap, meta);
+    section.appendChild(head);
 
-    if (snap.trigger === "manual") {
-      const badge = document.createElement("span");
-      badge.className = "snapshot-badge manual";
-      badge.textContent = "manual";
-      info.appendChild(badge);
-    } else if (snap.trigger === "pre_restore") {
-      const badge = document.createElement("span");
-      badge.className = "snapshot-badge";
-      badge.textContent = "pre-restore";
-      info.appendChild(badge);
+    for (const snap of groupSnaps) {
+      section.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: false, isOwn: false, detailsCache }));
     }
-
-    if (snap.source === "sync") {
-      const badge = document.createElement("span");
-      badge.className = "snapshot-badge sync";
-      badge.textContent = "synced";
-      info.appendChild(badge);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "snapshot-actions";
-
-    const isOwnSnapshot = !snap.deviceId || !currentDeviceId || snap.deviceId === currentDeviceId;
-
-    const restoreBtn = document.createElement("button");
-    restoreBtn.type = "button";
-    restoreBtn.className = "secondary small";
-    restoreBtn.textContent = "Restore";
-
-    const delBtn = isOwnSnapshot ? document.createElement("button") : null;
-    if (delBtn) {
-      delBtn.type = "button";
-      delBtn.className = "secondary small";
-      delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", async () => {
-        delBtn.disabled = true;
-        await chrome.runtime.sendMessage({ type: "delete_snapshot", id: snap.id, syncDir: snap.syncDir });
-        await refreshSnapshotsUI();
-      });
-    }
-
-    const renderDefaultActions = () => {
-      if (delBtn) {
-        actions.replaceChildren(restoreBtn, delBtn);
-      } else {
-        actions.replaceChildren(restoreBtn);
-      }
-    };
-
-    restoreBtn.addEventListener("click", () => {
-      actions.replaceChildren();
-      const prompt = document.createElement("div");
-      prompt.className = "restore-prompt";
-
-      const winBtn = document.createElement("button");
-      winBtn.type = "button";
-      winBtn.className = "small";
-      winBtn.textContent = snap.windowCount > 1 ? `Restore ${snap.windowCount} windows` : "New window";
-      winBtn.addEventListener("click", async () => {
-        winBtn.disabled = true;
-        await runRestore(snap, "windows");
-      });
-
-      const curBtn = document.createElement("button");
-      curBtn.type = "button";
-      curBtn.className = "secondary small";
-      curBtn.textContent = "Current window";
-      curBtn.addEventListener("click", async () => {
-        curBtn.disabled = true;
-        await runRestore(snap, "current_window");
-      });
-
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.className = "secondary small";
-      cancelBtn.textContent = "Cancel";
-      cancelBtn.addEventListener("click", renderDefaultActions);
-
-      prompt.append(winBtn, curBtn, cancelBtn);
-      actions.appendChild(prompt);
-    });
-
-    renderDefaultActions();
-    row.append(info, actions);
-    snapshotList.appendChild(row);
+    snapshotList.appendChild(section);
   }
 }
 
@@ -752,7 +1216,9 @@ async function init(): Promise<void> {
   lastMemory = status.memory;
   populateForm(status.config);
   renderUpdateCheckStatus(status);
-  await Promise.all([refreshPermissionsUI(), refreshSyncUI(), refreshSnapshotsUI()]);
+  // Load sync status and device identity before rendering snapshots so ownership and grouping are accurate.
+  await Promise.all([refreshPermissionsUI(), refreshSyncUI()]);
+  await refreshSnapshotsUI();
   renderSetupCard();
 }
 
@@ -902,7 +1368,7 @@ btnNativeTest.addEventListener("click", async () => {
     setupNativeError = null;
     nativeStatus.textContent = `Connected: tab-reaper-host v${resp.version} (${resp.platform})`;
     nativeStatus.className = "status-text ok";
-    await Promise.all([refreshMemoryMode(), refreshSyncUI()]);
+    await Promise.all([refreshMemoryMode(), refreshSyncAndSnapshotsUI()]);
   } else {
     nativeStatus.textContent = `Unavailable: ${resp?.error ?? "unknown error"}`;
     nativeStatus.className = "status-text err";
@@ -953,7 +1419,7 @@ btnSetupNative.addEventListener("click", async () => {
     if (!resp?.ok) {
       setupNativeError = `Companion not found (${resp?.error ?? "unknown error"}). Run the Quick Install command or the command under Optional capabilities.`;
     }
-    await Promise.all([refreshMemoryMode(), refreshPermissionsUI(), refreshSyncUI()]);
+    await Promise.all([refreshMemoryMode(), refreshPermissionsUI(), refreshSyncAndSnapshotsUI()]);
   } finally {
     btnSetupNative.disabled = false;
   }
@@ -997,7 +1463,7 @@ btnSyncNow.addEventListener("click", async () => {
     ok?: boolean;
     configUpdated?: boolean;
   };
-  await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
+  await refreshSyncAndSnapshotsUI();
   if (!res?.ok) {
     syncStatusEl.textContent = "Sync failed. Check folder connection, permissions, or disk space and try again.";
     syncStatusEl.className = "status-text err";
@@ -1014,7 +1480,7 @@ btnDeviceName.addEventListener("click", async () => {
   if (!name) return;
   btnDeviceName.disabled = true;
   await chrome.runtime.sendMessage({ type: "set_device_name", deviceName: name });
-  await refreshSyncUI();
+  await refreshSyncAndSnapshotsUI();
   btnDeviceName.disabled = false;
 });
 
@@ -1051,7 +1517,7 @@ btnSaveSnapshot.addEventListener("click", async () => {
     snapshotStatus.textContent = res?.error ?? "No http(s) tabs open to snapshot.";
     snapshotStatus.className = res?.error ? "status-text err" : "status-text";
   }
-  await refreshSnapshotsUI();
+  await refreshSyncAndSnapshotsUI();
   btnSaveSnapshot.disabled = false;
 });
 
@@ -1060,7 +1526,7 @@ btnClearSnapshots.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "clear_snapshots" });
   snapshotStatus.textContent = "Cleared saved snapshots.";
   snapshotStatus.className = "status-text ok";
-  await refreshSnapshotsUI();
+  await refreshSyncAndSnapshotsUI();
   btnClearSnapshots.disabled = false;
 });
 

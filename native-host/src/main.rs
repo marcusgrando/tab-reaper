@@ -18,6 +18,8 @@ struct NativeRequest {
     cmd: String,
     #[serde(default, rename = "deviceId")]
     device_id: Option<String>,
+    #[serde(default, rename = "targetDeviceId")]
+    target_device_id: Option<String>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default, rename = "expectedDir")]
@@ -92,7 +94,7 @@ fn dispatch_request(req: NativeRequest) -> Result<serde_json::Value, String> {
                 "ok": true,
                 "version": HOST_VERSION,
                 "platform": env::consts::OS,
-                "capabilities": ["chrome_memory", "folder_sync", "expected_dir"],
+                "capabilities": ["chrome_memory", "folder_sync", "expected_dir", "manage_devices"],
                 "syncEnabled": status.enabled,
                 "syncDir": status.sync_dir,
                 "hostname": status.hostname,
@@ -121,7 +123,7 @@ fn dispatch_request(req: NativeRequest) -> Result<serde_json::Value, String> {
             let rel_path = req.rel_path.as_deref().ok_or("missing relPath")?;
             let content = req.content.as_deref().ok_or("missing content")?;
             let dest = sync::lock_destination(device_id, req.expected_dir.as_deref())?;
-            let bytes = dest.write(rel_path, content)?;
+            let bytes = dest.write(rel_path, content, req.target_device_id.as_deref())?;
             Ok(json!({ "ok": true, "bytesWritten": bytes }))
         }
         "sync_read" => {
@@ -137,7 +139,17 @@ fn dispatch_request(req: NativeRequest) -> Result<serde_json::Value, String> {
             let device_id = req.device_id.as_deref().ok_or("missing deviceId")?;
             let rel_path = req.rel_path.as_deref().ok_or("missing relPath")?;
             let dest = sync::lock_destination(device_id, req.expected_dir.as_deref())?;
-            let deleted = dest.delete(rel_path)?;
+            let deleted = dest.delete(rel_path, req.target_device_id.as_deref())?;
+            Ok(json!({ "ok": true, "deleted": deleted }))
+        }
+        "sync_delete_device" => {
+            let device_id = req.device_id.as_deref().ok_or("missing deviceId")?;
+            let target_device_id = req
+                .target_device_id
+                .as_deref()
+                .ok_or("missing targetDeviceId")?;
+            let dest = sync::lock_destination(device_id, req.expected_dir.as_deref())?;
+            let deleted = dest.delete_device(target_device_id)?;
             Ok(json!({ "ok": true, "deleted": deleted }))
         }
         "sync_list" => {
@@ -154,7 +166,7 @@ fn sync_status_json(status: sync::SyncStatus) -> serde_json::Value {
     json!({
         "ok": true,
         "enabled": status.enabled,
-        "capabilities": ["folder_sync", "expected_dir"],
+        "capabilities": ["folder_sync", "expected_dir", "manage_devices"],
         "version": HOST_VERSION,
         "syncDir": status.sync_dir,
         "writable": status.writable,

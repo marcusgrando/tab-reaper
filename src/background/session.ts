@@ -10,6 +10,7 @@ import type {
   TabSummary,
 } from "../shared/types.ts";
 import {
+  adoptSyncedDevice,
   configureSyncFolder,
   getActiveSyncDir,
   deleteSyncedSnapshot,
@@ -146,7 +147,23 @@ export async function listAllSnapshots(): Promise<SnapshotListItem[]> {
   return Array.from(byId.values()).sort((a, b) => b.capturedAt - a.capturedAt);
 }
 
-export async function deleteSnapshot(id: string, folder?: string | null): Promise<boolean> {
+export async function getSnapshotDetails(
+  snapshotId: string,
+  relPath?: string,
+): Promise<SessionSnapshot | null> {
+  const local = await loadSnapshots();
+  let snapshot: SessionSnapshot | null = local.find((s) => s.id === snapshotId) ?? null;
+  if (!snapshot && relPath) {
+    snapshot = await readSyncedSnapshot(relPath);
+  }
+  return snapshot && snapshot.id === snapshotId ? snapshot : null;
+}
+
+export async function deleteSnapshot(
+  id: string,
+  folder?: string | null,
+  ownerDeviceId?: string,
+): Promise<boolean> {
   const syncDir = folder === undefined ? await getActiveSyncDir() : folder;
   const removedLocal = await enqueueLocalSnapshotMutation(async () => {
     const local = await loadSnapshots();
@@ -161,9 +178,31 @@ export async function deleteSnapshot(id: string, folder?: string | null): Promis
     }
     return false;
   });
-  const syncRemoved = await deleteSyncedSnapshot(id, syncDir);
+  const syncRemoved = await deleteSyncedSnapshot(id, syncDir, ownerDeviceId);
   if (removedLocal || syncRemoved) await clearWholeSnapshotCheck();
   return removedLocal || syncRemoved;
+}
+
+export async function adoptDeviceHistory(
+  targetDeviceId: string,
+): Promise<{ ok: boolean; migrated: number; error?: string }> {
+  return enqueueLocalSnapshotMutation(async () => {
+    const res = await adoptSyncedDevice(targetDeviceId, loadSnapshots);
+    if (!res.ok || !res.identity) {
+      return { ok: false, migrated: res.migrated, error: res.error };
+    }
+    const local = await loadSnapshots();
+    if (local.length > 0) {
+      const retagged = local.map((snap) => ({
+        ...snap,
+        deviceId: res.identity!.deviceId,
+        deviceName: res.identity!.deviceName,
+      }));
+      await chrome.storage.local.set({ [SNAPSHOTS_STORAGE_KEY]: retagged });
+    }
+    await clearWholeSnapshotCheck();
+    return { ok: true, migrated: res.migrated };
+  });
 }
 
 function isRecoverable(s: { tabCount: number; capturedAt: number }, now: number): boolean {

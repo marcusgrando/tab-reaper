@@ -43,6 +43,35 @@ try {
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
+  // Session recovery lets the user inspect tabs inside a saved snapshot without overflow.
+  await worker.evaluate(() => chrome.storage.local.set({
+    "tabReaper.sessionSnapshots": [{
+      id: "ui-snap-1",
+      complete: true,
+      capturedAt: Date.now() - 60_000,
+      tabCount: 2,
+      windowCount: 2,
+      trigger: "manual",
+      label: "Before upgrade",
+      deviceId: "dev-ui-1",
+      deviceName: "Test-Mac",
+      tabs: [
+        { url: "https://docs.example.test/guide", title: "Release guide", pinned: true, kept: false, windowId: 1, index: 0 },
+        { url: "https://status.example.test/board", title: "Status board", pinned: false, kept: true, windowId: 2, index: 0, groupId: 1, groupTitle: "Ops" },
+      ],
+    }],
+  }));
+  await options.setViewportSize({ width: 1024, height: 720 });
+  await options.reload();
+  await options.locator("#snapshots-card").waitFor({ state: "visible" });
+  await options.locator("#snapshot-list").getByRole("button", { name: "Tabs", exact: true }).click();
+  await options.locator(".snapshot-tabs-panel").waitFor({ state: "visible" });
+  assert.match(await options.locator(".snapshot-tabs-panel").innerText(), /Release guide/);
+  assert.match(await options.locator(".snapshot-tabs-panel").innerText(), /Status board/);
+  await options.setViewportSize({ width: 320, height: 700 });
+  assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await worker.evaluate(() => chrome.storage.local.remove("tabReaper.sessionSnapshots"));
+
   const longTitle = "Project notes for the November platform planning meeting with the application and infrastructure teams";
   await options.setViewportSize({ width: 1024, height: 720 });
   await worker.evaluate(() => chrome.action.openPopup());

@@ -4,6 +4,7 @@ import type {
   SnapshotListItem,
   SnapshotTab,
   SnapshotTrigger,
+  SyncedDeviceInfo,
 } from "../../shared/types.ts";
 import {
   UUID_PATTERN,
@@ -12,8 +13,12 @@ import {
   getActiveSyncDir,
   getPendingListForDir,
   getReadySyncDir,
+  getSyncStatus,
   loadDeviceIdentity,
+  replaceDeviceIdentity,
+  sendNativeCommand,
   shardByBytes,
+  syncDeleteDeviceFolder,
   syncDeleteFileConfirmed,
   syncListFilesResult,
   syncReadJson,
@@ -21,6 +26,7 @@ import {
   syncWriteJson,
   updatePendingListForDir,
   writeDeviceMeta,
+  type DeviceMeta,
   type SyncReadResult,
 } from "./client.ts";
 
@@ -211,28 +217,41 @@ async function readSnapshotIndex(
   return { status: "ok", value: { ...index, snapshots } };
 }
 
-async function cleanIndexParts(syncDir: string, deviceId: string, generation?: string): Promise<boolean> {
-  const dir = `devices/${deviceId}/index-parts`;
-  const listing = await syncListFilesResult(syncDir, deviceId, dir);
+async function cleanIndexParts(
+  syncDir: string,
+  ownerDeviceId: string,
+  generation?: string,
+  actorDeviceId = ownerDeviceId,
+): Promise<boolean> {
+  const dir = `devices/${ownerDeviceId}/index-parts`;
+  const listing = await syncListFilesResult(syncDir, actorDeviceId, dir);
   if (!listing.ok) return false;
+  const targetDeviceId = ownerDeviceId !== actorDeviceId ? ownerDeviceId : undefined;
   for (const { relPath } of listing.files) {
     const name = relPath.slice(dir.length + 1);
     if (!relPath.startsWith(`${dir}/`) || !INDEX_PART_NAME_RE.test(name)) continue;
     if (generation && name.startsWith(`${generation}-p`)) continue;
-    if (!(await syncDeleteFileConfirmed(syncDir, deviceId, relPath))) return false;
+    if (!(await syncDeleteFileConfirmed(syncDir, actorDeviceId, relPath, targetDeviceId))) return false;
   }
   return true;
 }
 
-async function publishSnapshotIndex(syncDir: string, index: DeviceSnapshotIndex): Promise<boolean> {
+async function publishSnapshotIndex(
+  syncDir: string,
+  index: DeviceSnapshotIndex,
+  actorDeviceId = index.deviceId,
+): Promise<boolean> {
   const { deviceId } = index;
+  const targetDeviceId = deviceId !== actorDeviceId ? deviceId : undefined;
   const base = `devices/${deviceId}`;
   const [first, ...overflow] = shardByBytes(index.snapshots);
   const generation = overflow.length ? crypto.randomUUID() : undefined;
   for (const [position, snapshots] of overflow.entries()) {
     const partIndex = position + 1;
     const path = `${base}/index-parts/${generation}-p${partIndex}.json`;
-    if (!(await syncWriteJson(syncDir, deviceId, path, { generation, partIndex, snapshots }))) return false;
+    if (!(await syncWriteJson(syncDir, actorDeviceId, path, { generation, partIndex, snapshots }, targetDeviceId))) {
+      return false;
+    }
   }
   const manifest: DeviceSnapshotIndex = {
     ...index,
@@ -240,9 +259,9 @@ async function publishSnapshotIndex(syncDir: string, index: DeviceSnapshotIndex)
     generation,
     partCount: generation ? overflow.length + 1 : undefined,
   };
-  if (!(await syncWriteJson(syncDir, deviceId, `${base}/index.json`, manifest))) return false;
+  if (!(await syncWriteJson(syncDir, actorDeviceId, `${base}/index.json`, manifest, targetDeviceId))) return false;
   // The manifest is committed. Rotation still has to prune any expired bodies.
-  if (!(await cleanIndexParts(syncDir, deviceId, generation))) {
+  if (!(await cleanIndexParts(syncDir, deviceId, generation, actorDeviceId))) {
     console.warn("Snapshot index cleanup will retry on the next sync");
   }
   return true;
@@ -255,10 +274,19 @@ function snapshotEntryPaths(entry: { relPath: string; partCount?: number }): str
   return paths;
 }
 
-async function deleteSnapshotPaths(syncDir: string, deviceId: string, paths: string[]): Promise<string[]> {
+async function deleteSnapshotPaths(
+  syncDir: string,
+  ownerDeviceId: string,
+  paths: string[],
+  actorDeviceId = ownerDeviceId,
+): Promise<string[]> {
+  const targetDeviceId = ownerDeviceId !== actorDeviceId ? ownerDeviceId : undefined;
   const failed = [];
   for (const path of paths) {
-    if (isOwnedSnapshotRelPath(deviceId, path) && !(await syncDeleteFileConfirmed(syncDir, deviceId, path))) {
+    if (
+      isOwnedSnapshotRelPath(ownerDeviceId, path) &&
+      !(await syncDeleteFileConfirmed(syncDir, actorDeviceId, path, targetDeviceId))
+    ) {
       failed.push(path);
     }
   }
@@ -360,51 +388,67 @@ async function deleteSyncedSnapshotLocked(
   syncDir: string,
   identity: DeviceIdentity,
   id: string,
+  ownerDeviceId = identity.deviceId,
 ): Promise<"deleted" | "not_found" | "retry"> {
-  const indexRead = await readSnapshotIndex(syncDir, identity.deviceId);
+  const isOwn = ownerDeviceId === identity.deviceId;
+  const indexRead = await readSnapshotIndex(syncDir, identity.deviceId, ownerDeviceId);
   if (indexRead.status === "error") return "retry";
   const entries = indexRead.status === "ok" ? indexRead.value.snapshots : [];
   const target = entries.find((s) => s.id === id);
   if (!target || indexRead.status !== "ok") {
+    if (!isOwn) return "not_found";
     return (await pruneUnpublishedPaths(syncDir, identity.deviceId, entries)) ? "not_found" : "retry";
   }
   const idx = indexRead.value;
-  if (!isOwnedSnapshotRelPath(identity.deviceId, target.relPath)) return "not_found";
+  if (!isOwnedSnapshotRelPath(ownerDeviceId, target.relPath)) return "not_found";
 
-  const failed = await deleteSnapshotPaths(syncDir, identity.deviceId, snapshotEntryPaths(target));
+  const failed = await deleteSnapshotPaths(syncDir, ownerDeviceId, snapshotEntryPaths(target), identity.deviceId);
   if (failed.length > 0) return "retry";
 
   const remaining = idx.snapshots.filter((s) => s.id !== id);
-  const indexWritten = await publishSnapshotIndex(syncDir, {
-    ...idx,
-    updatedAt: Date.now(),
-    snapshots: remaining,
-  });
+  const indexWritten = await publishSnapshotIndex(
+    syncDir,
+    {
+      ...idx,
+      updatedAt: Date.now(),
+      snapshots: remaining,
+    },
+    identity.deviceId,
+  );
   return indexWritten ? "deleted" : "retry";
 }
 
-export async function deleteSyncedSnapshot(id: string, folder?: string | null): Promise<boolean> {
+export async function deleteSyncedSnapshot(
+  id: string,
+  folder?: string | null,
+  ownerDeviceId?: string,
+): Promise<boolean> {
   const targetDir = folder === undefined ? await getActiveSyncDir() : folder;
   if (!targetDir) return false;
   return enqueueSnapshotSync(async () => {
-    if ((await getReadySyncDir()) !== targetDir) {
-      await addPendingSnapshotDelete(targetDir, id);
-      return false;
-    }
-
     const identity = await loadDeviceIdentity();
-    const outcome = await deleteSyncedSnapshotLocked(targetDir, identity, id);
-    if (outcome === "retry") {
-      await addPendingSnapshotDelete(targetDir, id);
+    const owner = ownerDeviceId || identity.deviceId;
+    const isOwn = owner === identity.deviceId;
+
+    if ((await getReadySyncDir()) !== targetDir) {
+      if (isOwn) await addPendingSnapshotDelete(targetDir, id);
       return false;
     }
 
-    const pending = await loadPendingSnapshotDeletes(targetDir);
-    if (pending.includes(id)) {
-      await setPendingSnapshotDeletesForDir(
-        targetDir,
-        pending.filter((x) => x !== id),
-      );
+    const outcome = await deleteSyncedSnapshotLocked(targetDir, identity, id, owner);
+    if (outcome === "retry") {
+      if (isOwn) await addPendingSnapshotDelete(targetDir, id);
+      return false;
+    }
+
+    if (isOwn) {
+      const pending = await loadPendingSnapshotDeletes(targetDir);
+      if (pending.includes(id)) {
+        await setPendingSnapshotDeletesForDir(
+          targetDir,
+          pending.filter((x) => x !== id),
+        );
+      }
     }
     return outcome === "deleted";
   });
@@ -576,6 +620,210 @@ export async function listSyncedSnapshots(): Promise<SnapshotListItem[]> {
 
   results.sort((a, b) => b.capturedAt - a.capturedAt);
   return results;
+}
+
+function isSameComputerDevice(
+  isCurrent: boolean,
+  currentHostname: string | null | undefined,
+  otherHostname: string | undefined,
+  otherDeviceName: string,
+): boolean {
+  if (isCurrent) return true;
+  if (!currentHostname) return false;
+  const normCurrent = currentHostname.trim().toLowerCase();
+  if (!normCurrent) return false;
+  if (otherHostname) {
+    return otherHostname.trim().toLowerCase() === normCurrent;
+  }
+  // Legacy meta.json files did not record hostname; fall back to matching default hostname-based deviceName.
+  return otherDeviceName.trim().toLowerCase() === normCurrent;
+}
+
+export async function listSyncedDevices(): Promise<SyncedDeviceInfo[]> {
+  const status = await getSyncStatus();
+  if (!status.hostConnected || status.hostOutdated || !status.enabled || !status.syncDir) return [];
+  const syncDir = status.syncDir;
+  const [pendingDeletes, listRes] = await Promise.all([
+    loadPendingSnapshotDeletes(syncDir),
+    syncListFilesResult(syncDir, status.deviceId, "devices"),
+  ]);
+  if (!listRes.ok) return [];
+  const pendingSet = new Set(pendingDeletes);
+
+  const deviceIds = new Set<string>([status.deviceId]);
+  for (const file of listRes.files) {
+    const match = /^devices\/([^/]+)\/(meta|index|config-v2)\.json$/.exec(file.relPath);
+    if (match?.[1]) deviceIds.add(match[1]);
+  }
+
+  const devices: SyncedDeviceInfo[] = [];
+  for (const owner of deviceIds) {
+    const isCurrent = owner === status.deviceId;
+    const [meta, index] = await Promise.all([
+      syncReadJson<DeviceMeta>(syncDir, status.deviceId, `devices/${owner}/meta.json`),
+      readSnapshotIndex(syncDir, status.deviceId, owner),
+    ]);
+    const idx = index.status === "ok" ? index.value : null;
+    if (!isCurrent && !meta && !idx) continue;
+
+    const visibleSnapshots = idx
+      ? isCurrent
+        ? idx.snapshots.filter((s) => !pendingSet.has(s.id))
+        : idx.snapshots
+      : [];
+    const newestCapturedAt = visibleSnapshots.reduce((max, s) => Math.max(max, s.capturedAt), 0);
+    const lastSeenAtCandidates = [
+      meta?.lastSeenAt ?? 0,
+      idx?.updatedAt ?? 0,
+      newestCapturedAt,
+    ].filter((n) => n > 0);
+    const lastSeenAt = lastSeenAtCandidates.length > 0 ? Math.max(...lastSeenAtCandidates) : null;
+    const deviceName = (isCurrent ? status.deviceName : undefined) || meta?.deviceName || idx?.deviceName || owner;
+    const hostname = meta?.hostname || (isCurrent ? status.hostname ?? undefined : undefined);
+
+    devices.push({
+      deviceId: owner,
+      deviceName,
+      hostname,
+      lastSeenAt,
+      snapshotCount: visibleSnapshots.length,
+      isCurrent,
+      isSameComputer: isSameComputerDevice(isCurrent, status.hostname, hostname, deviceName),
+    });
+  }
+
+  devices.sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    if (a.isSameComputer !== b.isSameComputer) return a.isSameComputer ? -1 : 1;
+    return (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0) || a.deviceId.localeCompare(b.deviceId);
+  });
+  return devices;
+}
+
+export async function removeSyncedDevice(targetDeviceId: string): Promise<{ ok: boolean; error?: string }> {
+  return enqueueSnapshotSync(async () => {
+    const status = await getSyncStatus();
+    if (!status.hostConnected || status.hostOutdated || !status.enabled || !status.writable || !status.syncDir) {
+      return { ok: false, error: "Sync folder is not ready." };
+    }
+    if (!status.supportsDeviceManagement) {
+      return { ok: false, error: "Update Local Companion to manage other devices." };
+    }
+    if (!targetDeviceId || targetDeviceId === status.deviceId) {
+      return { ok: false, error: "Cannot remove the current browser." };
+    }
+    const ok = await syncDeleteDeviceFolder(status.syncDir, status.deviceId, targetDeviceId);
+    return ok ? { ok: true } : { ok: false, error: "Failed to remove device folder." };
+  });
+}
+
+export async function adoptSyncedDevice(
+  targetDeviceId: string,
+  loadLocalSnapshots: () => Promise<SessionSnapshot[]>,
+  now = Date.now(),
+): Promise<{ ok: boolean; migrated: number; identity?: DeviceIdentity; cleanedOldFolder?: boolean; error?: string }> {
+  return enqueueSnapshotSync(async () => {
+    const status = await getSyncStatus();
+    if (!status.hostConnected || status.hostOutdated || !status.enabled || !status.writable || !status.syncDir) {
+      return { ok: false, migrated: 0, error: "Sync folder is not ready." };
+    }
+    if (!status.supportsDeviceManagement) {
+      return { ok: false, migrated: 0, error: "Update Local Companion to resume another device's history." };
+    }
+    const oldDeviceId = status.deviceId;
+    const syncDir = status.syncDir;
+    if (!targetDeviceId || targetDeviceId === oldDeviceId) {
+      return { ok: false, migrated: 0, error: "Select another device to resume." };
+    }
+
+    const [targetMeta, targetIndexRead] = await Promise.all([
+      syncReadJson<DeviceMeta>(syncDir, oldDeviceId, `devices/${targetDeviceId}/meta.json`),
+      readSnapshotIndex(syncDir, oldDeviceId, targetDeviceId),
+    ]);
+    if (!targetMeta && targetIndexRead.status !== "ok") {
+      return { ok: false, migrated: 0, error: "Target device was not found in the sync folder." };
+    }
+    if (targetIndexRead.status === "error") {
+      return { ok: false, migrated: 0, error: "Target device history is still syncing. Try again in a moment." };
+    }
+
+    // Collect snapshots captured under the temporary deviceId before switching identity.
+    const [oldIndexRead, localSnaps, pendingDeletes] = await Promise.all([
+      readSnapshotIndex(syncDir, oldDeviceId, oldDeviceId),
+      loadLocalSnapshots(),
+      loadPendingSnapshotDeletes(syncDir),
+    ]);
+    if (oldIndexRead.status === "error") {
+      return { ok: false, migrated: 0, error: "Could not read current device snapshots. Try again." };
+    }
+
+    const pendingSet = new Set(pendingDeletes);
+    const toMigrate = new Map<string, SessionSnapshot>();
+    let allReadable = true;
+
+    if (oldIndexRead.status === "ok") {
+      for (const entry of oldIndexRead.value.snapshots) {
+        if (pendingSet.has(entry.id)) continue;
+        const body = await readSnapshotFiles(syncDir, oldDeviceId, entry.relPath);
+        if (body) {
+          toMigrate.set(body.id, body);
+        } else {
+          allReadable = false;
+        }
+      }
+    }
+    for (const snap of localSnaps) {
+      if (pendingSet.has(snap.id) || toMigrate.has(snap.id)) continue;
+      if (!snap.deviceId || snap.deviceId === oldDeviceId) {
+        toMigrate.set(snap.id, snap);
+      }
+    }
+
+    // Step 1: Approve the sync folder for targetDeviceId before mutating local identity.
+    const approve = await sendNativeCommand({ cmd: "sync_set_folder", deviceId: targetDeviceId, path: syncDir });
+    if (!approve?.ok) {
+      return { ok: false, migrated: 0, error: approve?.error ?? "Failed to approve sync folder for target device." };
+    }
+
+    // Step 2: Switch local identity to targetDeviceId.
+    const preferredName = targetMeta?.deviceName || (targetIndexRead.status === "ok" ? targetIndexRead.value.deviceName : undefined);
+    const nextIdentity = await replaceDeviceIdentity(targetDeviceId, preferredName);
+
+    // Step 3: Merge temporary snapshots into targetDeviceId's index (oldest first).
+    const existingTargetIds = new Set(
+      targetIndexRead.status === "ok" ? targetIndexRead.value.snapshots.map((s) => s.id) : [],
+    );
+    const ordered = Array.from(toMigrate.values()).sort((a, b) => a.capturedAt - b.capturedAt);
+    let migrated = 0;
+    let allMigrated = allReadable;
+    for (const snap of ordered) {
+      if (existingTargetIds.has(snap.id)) continue;
+      const ok = await pushSnapshotUnlocked(
+        syncDir,
+        nextIdentity,
+        { ...snap, deviceId: nextIdentity.deviceId, deviceName: nextIdentity.deviceName },
+        now,
+      );
+      if (ok) {
+        migrated++;
+      } else {
+        allMigrated = false;
+      }
+    }
+
+    await writeDeviceMeta(syncDir, nextIdentity, now);
+
+    // Step 4: Remove the temporary device folder only when every temporary snapshot migrated cleanly.
+    let cleanedOldFolder = false;
+    if (allMigrated) {
+      cleanedOldFolder = await syncDeleteDeviceFolder(syncDir, nextIdentity.deviceId, oldDeviceId);
+      await sendNativeCommand({ cmd: "sync_set_folder", deviceId: oldDeviceId, path: null });
+      await setPendingSnapshotDeletesForDir(syncDir, []);
+      await setPendingPrunePaths(syncDir, []);
+    }
+
+    return { ok: true, migrated, identity: nextIdentity, cleanedOldFolder };
+  });
 }
 
 export async function findDeviceSnapshotEntry(

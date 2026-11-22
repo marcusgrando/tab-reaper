@@ -55,6 +55,7 @@ export interface DeviceMeta {
   schemaVersion: 1;
   deviceId: string;
   deviceName: string;
+  hostname?: string;
   lastSeenAt: number;
 }
 
@@ -168,11 +169,17 @@ export async function loadDeviceIdentity(fallbackHostname?: string): Promise<Dev
   const customName = existing?.deviceNameSource === "custom" ? existing.deviceName : undefined;
   const deviceNameSource = customName ? "custom" : "hostname";
   const deviceName = customName || hostName || existing?.deviceName || DEFAULT_DEVICE_NAME;
+  const hostname = hostName || existing?.hostname || undefined;
 
-  if (existing?.deviceId !== deviceId || existing.deviceName !== deviceName || existing.deviceNameSource !== deviceNameSource) {
-    await chrome.storage.local.set({ [DEVICE_IDENTITY_KEY]: { deviceId, deviceName, deviceNameSource } });
+  if (
+    existing?.deviceId !== deviceId ||
+    existing.deviceName !== deviceName ||
+    existing.deviceNameSource !== deviceNameSource ||
+    existing.hostname !== hostname
+  ) {
+    await chrome.storage.local.set({ [DEVICE_IDENTITY_KEY]: { deviceId, deviceName, deviceNameSource, hostname } });
   }
-  return { deviceId, deviceName };
+  return { deviceId, deviceName, hostname };
 }
 
 export async function setDeviceName(rawName: string): Promise<DeviceIdentity> {
@@ -184,10 +191,42 @@ export async function setDeviceName(rawName: string): Promise<DeviceIdentity> {
   const next: StoredDeviceIdentity = {
     deviceId: current.deviceId,
     deviceName: trimmed,
+    hostname: current.hostname,
     deviceNameSource: "custom",
   };
   await chrome.storage.local.set({ [DEVICE_IDENTITY_KEY]: next });
-  return { deviceId: next.deviceId, deviceName: next.deviceName };
+  return { deviceId: next.deviceId, deviceName: next.deviceName, hostname: next.hostname };
+}
+
+export async function replaceDeviceIdentity(rawDeviceId: string, preferredName?: string): Promise<DeviceIdentity> {
+  const stored = await chrome.storage.local.get(DEVICE_IDENTITY_KEY);
+  const existing = stored[DEVICE_IDENTITY_KEY] as Partial<StoredDeviceIdentity> | undefined;
+  const deviceId = sanitizeDeviceId(rawDeviceId);
+  const hostname = existing?.hostname;
+  const customName = existing?.deviceNameSource === "custom" ? existing.deviceName : undefined;
+  const trimmedPreferred = preferredName?.trim().slice(0, 64);
+
+  let deviceNameSource: "hostname" | "custom";
+  let deviceName: string;
+  if (customName) {
+    deviceNameSource = "custom";
+    deviceName = customName;
+  } else if (trimmedPreferred && trimmedPreferred !== hostname) {
+    deviceNameSource = "custom";
+    deviceName = trimmedPreferred;
+  } else {
+    deviceNameSource = "hostname";
+    deviceName = hostname || trimmedPreferred || existing?.deviceName || DEFAULT_DEVICE_NAME;
+  }
+
+  const next: StoredDeviceIdentity = {
+    deviceId,
+    deviceName,
+    hostname,
+    deviceNameSource,
+  };
+  await chrome.storage.local.set({ [DEVICE_IDENTITY_KEY]: next });
+  return { deviceId: next.deviceId, deviceName: next.deviceName, hostname: next.hostname };
 }
 
 export async function isFolderSyncOptedIn(): Promise<boolean> {
@@ -227,11 +266,13 @@ function buildDisabledSyncStatus(
     hostConnected: false,
     hostOutdated: false,
     hostVersion: null,
+    supportsDeviceManagement: false,
     enabled: false,
     syncDir: null,
     writable: false,
     deviceId: identity.deviceId,
     deviceName: identity.deviceName,
+    hostname: identity.hostname ?? null,
     lastSyncAt,
     lastError: null,
     ...overrides,
@@ -253,15 +294,18 @@ export async function getSyncStatus(): Promise<SyncStatus> {
   }
 
   const supportsDestination = resp.capabilities?.includes("expected_dir") === true;
+  const supportsDeviceManagement = resp.capabilities?.includes("manage_devices") === true;
   const refreshedIdentity = await loadDeviceIdentity(resp.hostname);
 
   return buildDisabledSyncStatus(refreshedIdentity, lastSyncAt, {
     hostConnected: true,
     hostOutdated: !supportsDestination,
     hostVersion: resp.version ?? null,
+    supportsDeviceManagement,
     enabled: Boolean(resp.enabled),
     syncDir: resp.syncDir ?? null,
     writable: Boolean(resp.writable),
+    hostname: resp.hostname ?? refreshedIdentity.hostname ?? null,
     lastError: supportsDestination ? null : "Update the Local Companion to sync this folder.",
   });
 }
@@ -313,9 +357,11 @@ export async function configureSyncFolder(path: string | null): Promise<SyncStat
     ...buildDisabledSyncStatus(refreshed, lastSyncAt, {
       hostConnected: true,
       hostVersion: resp.version ?? null,
+      supportsDeviceManagement: resp.capabilities?.includes("manage_devices") === true,
       enabled: Boolean(resp.enabled),
       syncDir: resp.syncDir ?? null,
       writable: Boolean(resp.writable),
+      hostname: resp.hostname ?? refreshed.hostname ?? null,
     }),
   };
 }
@@ -328,9 +374,17 @@ export async function getReadySyncDir(requireWrite = true): Promise<string | nul
   return null;
 }
 
-export async function syncWriteJson(syncDir: string, deviceId: string, relPath: string, data: unknown): Promise<boolean> {
+export async function syncWriteJson(
+  syncDir: string,
+  deviceId: string,
+  relPath: string,
+  data: unknown,
+  targetDeviceId?: string,
+): Promise<boolean> {
   const content = JSON.stringify(data);
-  const resp = await sendNativeCommand({ cmd: "sync_write", expectedDir: syncDir, deviceId, relPath, content });
+  const payload: Record<string, unknown> = { cmd: "sync_write", expectedDir: syncDir, deviceId, relPath, content };
+  if (targetDeviceId && targetDeviceId !== deviceId) payload.targetDeviceId = targetDeviceId;
+  const resp = await sendNativeCommand(payload);
   return Boolean(resp?.ok);
 }
 
@@ -366,8 +420,29 @@ export async function syncListFilesResult(syncDir: string, deviceId: string, rel
   return { ok: true, files: resp.files };
 }
 
-export async function syncDeleteFileConfirmed(syncDir: string, deviceId: string, relPath: string): Promise<boolean> {
-  const resp = await sendNativeCommand({ cmd: "sync_delete", expectedDir: syncDir, deviceId, relPath });
+export async function syncDeleteFileConfirmed(
+  syncDir: string,
+  deviceId: string,
+  relPath: string,
+  targetDeviceId?: string,
+): Promise<boolean> {
+  const payload: Record<string, unknown> = { cmd: "sync_delete", expectedDir: syncDir, deviceId, relPath };
+  if (targetDeviceId && targetDeviceId !== deviceId) payload.targetDeviceId = targetDeviceId;
+  const resp = await sendNativeCommand(payload);
+  return Boolean(resp?.ok);
+}
+
+export async function syncDeleteDeviceFolder(
+  syncDir: string,
+  deviceId: string,
+  targetDeviceId: string,
+): Promise<boolean> {
+  const resp = await sendNativeCommand({
+    cmd: "sync_delete_device",
+    expectedDir: syncDir,
+    deviceId,
+    targetDeviceId,
+  });
   return Boolean(resp?.ok);
 }
 
@@ -376,6 +451,7 @@ export async function writeDeviceMeta(syncDir: string, identity: DeviceIdentity,
     schemaVersion: 1,
     deviceId: identity.deviceId,
     deviceName: identity.deviceName,
+    ...(identity.hostname ? { hostname: identity.hostname } : {}),
     lastSeenAt: now,
   };
   await syncWriteJson(syncDir, identity.deviceId, `devices/${identity.deviceId}/meta.json`, meta);
