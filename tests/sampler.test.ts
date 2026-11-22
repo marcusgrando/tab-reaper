@@ -63,3 +63,25 @@ test("an unavailable live check preserves a recent observed edit before discard"
     Object.assign(globalThis, { chrome: previous });
   }
 });
+
+test("saving samples drops tabs that were closed", async () => {
+  const previous = globalThis.chrome;
+  const metrics = { jsHeapBytes: 2048, domNodes: 38, mediaNodes: 0, weightMultiplier: 1.01, hasUnsavedForm: false, sampledAt: 1000 };
+  const cache: Record<string, Record<string, unknown>> = { "tabReaper.weightSamples": { 1: metrics, 7: metrics, 9: metrics } };
+  const tab = { id: 1, url: "https://editor.test/", title: "", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
+  try {
+    Object.assign(globalThis, { chrome: {
+      permissions: { contains: async () => true },
+      tabs: { query: async () => [{ id: 1 }, { id: 7 }] },
+      storage: { session: {
+        get: async () => structuredClone(cache),
+        set: async (update: typeof cache) => Object.assign(cache, structuredClone(update)),
+      } },
+      scripting: { executeScript: async () => [{ frameId: 0, result: true }] },
+    } });
+    await sampleTabWeights([tab], 1100);
+    expect(Object.keys(cache["tabReaper.weightSamples"]!).sort()).toEqual(["1", "7"]);
+  } finally {
+    Object.assign(globalThis, { chrome: previous });
+  }
+});

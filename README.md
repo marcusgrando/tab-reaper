@@ -15,7 +15,7 @@ Tab Reaper requests a memory check every 30 seconds and checks again when you op
 
 With the extension alone, these percentages compare system-wide memory use with your budget. Other apps can keep usage above the target even after all eligible tabs sleep. The optional Local Companion measures Chrome memory separately.
 
-Tab Reaper protects active, audible, pinned, kept, and allowlisted tabs by default. With Weighted Eviction page access and form protection enabled, the palette shows `Form` after an observed edit. A title or filter filled in by the page leaves the tab eligible for sleep. Undoing the edit in the same field clears its protection. An app that saves silently or replaces the edited field can keep the tab protected until reload.
+Tab Reaper protects active, audible, pinned, kept, and allowlisted tabs by default. With Weighted Eviction page access and form protection enabled, the palette shows `Form` after an observed edit. A title or filter filled in by the page leaves the tab eligible for sleep. Protection clears when the field returns to its value before the edit, whether you undo the change or the app empties the field after sending, as chat and e-mail apps do. An app that saves silently or replaces the edited field can keep the tab protected until reload.
 
 ## Quick Install (macOS, Linux, Windows)
 

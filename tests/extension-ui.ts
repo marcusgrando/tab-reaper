@@ -87,8 +87,18 @@ try {
   assert.equal(await loaded.count(), 0);
   assert.equal(await sleeping.getByRole("option").count(), 1);
   await search.fill("work.example.test");
+  await popup.evaluate(() => {
+    (window as unknown as { rows: Element[] }).rows = [...document.querySelectorAll('[role="option"]')];
+  });
   for (let i = 0; i < 8; i++) await search.press("ArrowDown");
+  assert.ok(await popup.evaluate(() => {
+    const rows = [...document.querySelectorAll('[role="option"]')];
+    const before = (window as unknown as { rows: Element[] }).rows;
+    return rows.length === before.length && rows.every((row, i) => row === before[i]);
+  }), "Arrow navigation should move the selection without rebuilding rows");
   const selected = popup.getByRole("option", { selected: true });
+  assert.equal(await selected.count(), 1);
+  assert.equal(await popup.locator(".tab-item.selected").count(), 1);
   assert.equal(await selected.getAttribute("id"), await sleeper.getAttribute("id"));
   assert.equal(await selected.getAttribute("id"), await search.getAttribute("aria-activedescendant"));
   assert.ok(await selected.evaluate(row => {

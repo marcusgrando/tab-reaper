@@ -20,6 +20,9 @@ const CLOSE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 
 let openTabs: OpenTabInfo[] = [];
+// The tabs and rows of the last render, in display order.
+let visibleTabs: OpenTabInfo[] = [];
+let rows: HTMLElement[] = [];
 let selectedIndex = 0;
 
 function formatGb(bytes: number): string {
@@ -122,6 +125,8 @@ async function refreshStatus(): Promise<StatusPayload> {
 function renderOpenTabs(): void {
   listEl.replaceChildren();
   const items = filteredOpenTabs();
+  visibleTabs = items;
+  rows = [];
   selectedIndex = Math.min(selectedIndex, Math.max(0, items.length - 1));
 
   if (items.length === 0) {
@@ -247,7 +252,22 @@ function renderOpenTabs(): void {
 
     row.append(main, right);
     group.appendChild(row);
+    rows.push(row);
   });
+}
+
+// Arrow keys only move the selection. Rebuilding every row costs tens of milliseconds per key with many tabs.
+function moveSelection(next: number): void {
+  const previous = rows[selectedIndex];
+  previous?.classList.remove("selected");
+  previous?.setAttribute("aria-selected", "false");
+  selectedIndex = next;
+  const row = rows[next];
+  if (!row) return;
+  row.classList.add("selected");
+  row.setAttribute("aria-selected", "true");
+  searchInput.setAttribute("aria-activedescendant", row.id);
+  row.scrollIntoView({ block: "nearest" });
 }
 
 searchInput.addEventListener("input", () => {
@@ -257,19 +277,16 @@ searchInput.addEventListener("input", () => {
 });
 
 searchInput.addEventListener("keydown", async (event) => {
-  const items = filteredOpenTabs();
-  const count = items.length;
+  const count = visibleTabs.length;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     if (count > 0) {
       const step = event.key === "ArrowDown" ? 1 : -1;
-      selectedIndex = (selectedIndex + step + count) % count;
-      renderOpenTabs();
-      listEl.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+      moveSelection((selectedIndex + step + count) % count);
     }
   } else if (event.key === "Enter") {
     event.preventDefault();
-    const target = items[selectedIndex];
+    const target = visibleTabs[selectedIndex];
     if (target) {
       await activateTab(target.id);
     }

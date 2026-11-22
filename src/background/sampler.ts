@@ -64,8 +64,18 @@ export async function sampleTabWeights(
       cacheChanged = true;
     }
   }));
-  if (cacheChanged) await saveSampleCache(cache);
+  if (cacheChanged) await saveSampleCache(await withoutClosedTabs(cache));
   return weights;
+}
+
+// Session storage has a quota. Closed tabs never come back with the same id.
+async function withoutClosedTabs(cache: Record<string, TabWeightSample>): Promise<Record<string, TabWeightSample>> {
+  try {
+    const open = new Set((await chrome.tabs.query({})).map(tab => String(tab.id)));
+    return Object.fromEntries(Object.entries(cache).filter(([id]) => open.has(id)));
+  } catch {
+    return cache;
+  }
 }
 
 export async function loadCachedWeights(now = Date.now()): Promise<Map<number, TabWeightSample>> {

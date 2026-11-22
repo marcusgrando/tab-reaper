@@ -1,20 +1,26 @@
 interface Window {
-  tabReaperFormObserver?: { readonly dirty: boolean; active: boolean };
+  tabReaperFormObserver?: { readonly dirty: boolean; readonly active: boolean };
 }
-
-type FieldState = { original?: string; dirty: boolean };
 
 function installObserver() {
   if (window.tabReaperFormObserver) return;
   const controller = new AbortController();
-  const fields = new WeakMap<HTMLElement, FieldState>();
-  let dirtyCount = 0;
-  const observer = { active: false, get dirty() { return dirtyCount > 0; } };
-  window.tabReaperFormObserver = observer;
+  // Signature of each field before its pending edit. undefined: no comparable signature.
+  const originals = new WeakMap<HTMLElement, string | undefined>();
+  // Edited fields are compared with their originals when the flag is read, never on the keystroke path.
+  const edited = new Set<HTMLElement>();
+  let removedEdit = false;
+  let active = false;
+  let authorizing = false;
+  window.tabReaperFormObserver = {
+    get active() { return active; },
+    get dirty() { return hasPendingEdits(); },
+  };
 
   function stop() {
-    observer.active = false;
+    active = false;
     controller.abort();
+    edited.clear();
     delete window.tabReaperFormObserver;
     chrome.runtime.onMessage.removeListener(onMessage);
   }
@@ -23,8 +29,9 @@ function installObserver() {
   }
   chrome.runtime.onMessage.addListener(onMessage);
 
-  function field(event: Event): HTMLElement | undefined {
-    if (!observer.active || !event.isTrusted || !chrome.runtime.id) return;
+  // Cheap checks only. Edited fields skip the layout checks in eligible() on later keystrokes.
+  function control(event: Event): HTMLElement | undefined {
+    if (!event.isTrusted || !chrome.runtime.id) return;
     const target = event.composedPath()[0];
     const element = target instanceof HTMLLabelElement ? target.control : target;
     if (!(element instanceof HTMLElement)) return;
@@ -40,10 +47,13 @@ function installObserver() {
       if (!el.isContentEditable) return;
       while (el.parentElement?.isContentEditable) el = el.parentElement;
     }
-    const excluded = "[inert], [aria-hidden=true], [aria-readonly=true], header, nav, [role=toolbar], [role=search], [role=navigation], [role=menubar], [role=searchbox], [role=combobox]";
-    if (el.closest(excluded) || el.matches(":disabled") || !el.offsetWidth || !el.offsetHeight) return;
-    if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return;
     return el;
+  }
+
+  function eligible(el: HTMLElement): boolean {
+    const excluded = "[inert], [aria-hidden=true], [aria-readonly=true], header, nav, [role=toolbar], [role=search], [role=navigation], [role=menubar], [role=searchbox], [role=combobox]";
+    if (el.closest(excluded) || el.matches(":disabled") || !el.offsetWidth || !el.offsetHeight) return false;
+    return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
   }
 
   // Only a local fingerprint survives the event. Long edits usually differ in length alone.
@@ -77,60 +87,53 @@ function installObserver() {
       radio instanceof HTMLInputElement && radio.type === "radio" && radio.name === el.name);
   }
 
+  // Records the signature before an edit starts. Pickers and toggles can emit input without beforeinput.
   function remember(event: Event) {
-    const el = field(event);
-    if (!el) return;
-    for (const control of controls(el)) {
-      if (!fields.get(control)?.dirty) fields.set(control, { original: signature(control), dirty: false });
+    const el = control(event);
+    if (!el || edited.has(el) || !eligible(el)) return;
+    if (event.type !== "pointerdown") void authorize();
+    for (const field of controls(el)) {
+      if (!edited.has(field)) originals.set(field, signature(field));
     }
   }
-  function edited(event: Event) {
-    const el = field(event);
-    if (!el) return;
-    for (const control of controls(el)) {
-      const state = fields.get(control) ?? { dirty: false };
-      const dirty = state.original === undefined || state.original !== signature(control, state.original);
-      if (state.dirty !== dirty) dirtyCount += dirty ? 1 : -1;
-      state.dirty = dirty;
-      fields.set(control, state);
-    }
+  function changed(event: Event) {
+    const el = control(event);
+    if (!el || edited.has(el) || !eligible(el)) return;
+    for (const field of controls(el)) edited.add(field);
   }
 
-  function reset(event: Event) {
-    const form = event.target;
-    if (!event.isTrusted || !observer.active || !(form instanceof HTMLFormElement)) return;
-    // Reset is cancelable. Compare after the browser has applied its default action.
-    setTimeout(() => {
-      if (!observer.active || event.defaultPrevented) return;
-      for (const el of form.elements) {
-        if (!(el instanceof HTMLElement)) continue;
-        const state = fields.get(el);
-        if (state?.dirty && state.original !== undefined && signature(el, state.original) === state.original) {
-          state.dirty = false;
-          dirtyCount--;
-        }
+  // Reverting a field, by the user or by the app after sending, clears it.
+  // A removed edited field keeps the document protected because the app can keep the draft while rebuilding its UI.
+  function hasPendingEdits(): boolean {
+    for (const el of edited) {
+      const original = originals.get(el);
+      if (!el.isConnected) {
+        removedEdit = true;
+        edited.delete(el);
+      } else if (original !== undefined && signature(el, original) === original) {
+        edited.delete(el);
       }
-    }, 0);
+    }
+    return removedEdit || edited.size > 0;
+  }
+
+  // Frames ask the worker only after their first eligible interaction, so loading a page sends no messages.
+  async function authorize() {
+    if (active || authorizing) return;
+    authorizing = true;
+    // Chrome can retain a registered script after the user revokes scripting alone.
+    const enabled = await chrome.runtime.sendMessage("tab-reaper-form-access").catch(() => false);
+    authorizing = false;
+    if (controller.signal.aborted) return;
+    if (enabled === true) active = true;
+    else stop();
   }
 
   const capture = { capture: true, signal: controller.signal };
-  async function authorize() {
-    // Chrome can retain a registered script after the user revokes scripting alone.
-    const enabled = await chrome.runtime.sendMessage("tab-reaper-form-access").catch(() => false);
-    if (controller.signal.aborted) return;
-    if (enabled !== true) {
-      stop();
-      return;
-    }
-    observer.active = true;
-    // Pickers and toggles can emit input without beforeinput.
-    for (const name of ["focusin", "pointerdown", "beforeinput"]) window.addEventListener(name, remember, capture);
-    window.addEventListener("input", edited, capture);
-    window.addEventListener("reset", reset, capture);
-  }
-  window.addEventListener("pagehide", () => { observer.active = false; }, capture);
-  window.addEventListener("pageshow", event => { if (event.persisted) void authorize(); }, capture);
-  void authorize();
+  for (const name of ["focusin", "pointerdown", "beforeinput"]) window.addEventListener(name, remember, capture);
+  window.addEventListener("input", changed, capture);
+  // A document restored from the back/forward cache asks again on its next interaction.
+  window.addEventListener("pagehide", () => { active = false; }, capture);
 }
 
 installObserver();
