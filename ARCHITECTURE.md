@@ -52,7 +52,7 @@ Chrome Memory Saver offers three levels with different inactivity periods. Tab R
 
 1. **Exact Chrome RAM (Native Host connected):**
    - Extension calls `chrome.runtime.sendNativeMessage('com.tabreaper.host', { cmd: 'chrome_memory' })`.
-   - Native host sums Chrome memory across all Chrome processes: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set (Windows `K32GetProcessMemoryInfo`), and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
+   - Native host sums the memory of the browser that launched it: its parent process (past the `cmd.exe` Chrome interposes on Windows) and every descendant, excluding the host. Not by process name, because that also counts Canary, Chrome for Testing and other Chromium browsers. When the launching browser cannot be determined it returns `ok: false` and the extension uses the fallback below. Per-process metric: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set (Windows `K32GetProcessMemoryInfo`), and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
    - Budget percentage is `chromeBytes / memoryBudgetBytes`.
 2. **OS Pressure Fallback (Pure Extension):**
    - Extension calls `chrome.system.memory.getInfo()`.

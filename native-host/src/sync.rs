@@ -43,6 +43,8 @@ pub struct SyncStatus {
     pub enabled: bool,
     #[serde(rename = "syncDir")]
     pub sync_dir: Option<String>,
+    /// Proven by a probe write when the user approves the folder. Status polls only check that
+    /// the folder still opens, so a later permission change shows up as a sync_write error.
     pub writable: bool,
     pub hostname: String,
 }
@@ -78,15 +80,56 @@ pub fn get_hostname() -> String {
             return trimmed.to_string();
         }
     }
-    if let Ok(out) = Command::new("hostname").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s.strip_suffix(".local").unwrap_or(&s).to_string();
-            }
+    if let Some(h) = os_hostname() {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed
+                .strip_suffix(".local")
+                .unwrap_or(trimmed)
+                .to_string();
         }
     }
     format!("{}-device", env::consts::OS)
+}
+
+/// The name `hostname(1)` prints, read without spawning it.
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    use std::ffi::{c_char, c_int};
+    extern "C" {
+        fn gethostname(name: *mut c_char, len: usize) -> c_int;
+    }
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf`.
+    if unsafe { gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    // A truncated name may lack the NUL terminator; treat it as unavailable.
+    let end = buf.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+/// The DNS host name, which is what `hostname.exe` prints.
+#[cfg(windows)]
+fn os_hostname() -> Option<String> {
+    const COMPUTER_NAME_DNS_HOSTNAME: i32 = 1;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetComputerNameExW(name_type: i32, buffer: *mut u16, size: *mut u32) -> i32;
+    }
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: `len` holds the capacity of `buf` in UTF-16 units. On success it holds the length
+    // written, excluding the terminator.
+    if unsafe { GetComputerNameExW(COMPUTER_NAME_DNS_HOSTNAME, buf.as_mut_ptr(), &mut len) } == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_hostname() -> Option<String> {
+    None
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -326,8 +369,10 @@ pub fn get_sync_status(device_id: Option<&str>) -> SyncStatus {
     let Some(dir) = cfg.sync_dirs.get(&dev).cloned() else {
         return SyncStatus::disabled(hostname);
     };
-    let path = Path::new(&dir);
-    let writable = path.is_dir() && check_writable(path);
+    // The extension polls this, so it only checks that the approved folder still opens without
+    // following a swapped-in symlink. The create/delete probe runs when the user approves a
+    // folder; later write failures surface from sync_write itself.
+    let writable = open_root(Path::new(&dir)).is_ok();
     SyncStatus {
         enabled: true,
         sync_dir: Some(dir),
@@ -1066,6 +1111,36 @@ mod tests {
         symlink(&outside_dir, &sync_dir).unwrap();
         assert!(!get_sync_status(Some("dev1")).writable);
 
+        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Approval proves the folder writable with a probe file. Status polls must not write to
+    /// the folder, so a folder that turns read-only later fails on sync_write instead.
+    #[cfg(unix)]
+    #[test]
+    fn probes_writability_on_approval_but_not_on_status_polls() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = env::temp_dir().join(format!(
+            "tab-reaper-readonly-test-{}-{}",
+            std::process::id(),
+            temp_nanos()
+        ));
+        let sync_dir = base.join("sync-root");
+        env::set_var("TAB_REAPER_HOST_CONFIG", base.join("host.json"));
+
+        set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
+        fs::set_permissions(&sync_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let status = get_sync_status(Some("dev1"));
+        assert!(status.enabled);
+        assert!(status.writable);
+        assert!(sync_write("dev1", "devices/dev1/config.json", "{}").is_err());
+        assert!(set_sync_folder("dev2", Some(sync_dir.to_str().unwrap())).is_err());
+
+        fs::set_permissions(&sync_dir, fs::Permissions::from_mode(0o755)).unwrap();
         env::remove_var("TAB_REAPER_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }

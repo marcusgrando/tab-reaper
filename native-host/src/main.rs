@@ -2,6 +2,7 @@ mod sync;
 
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::env;
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -207,32 +208,84 @@ fn write_native_message<W: Write>(writer: &mut W, json: &str) -> io::Result<()> 
     writer.flush()
 }
 
+/// One process-table row: enough to walk from this host up to the browser that launched it.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
+#[derive(Debug, Clone, Copy)]
+struct ProcLink {
+    pid: u32,
+    ppid: u32,
+    /// A shell the browser puts between itself and the host (`cmd.exe` on Windows).
+    shell_launcher: bool,
+}
+
+/// Selects the processes of the browser that launched this host: the nearest ancestor that is
+/// not a shell launcher, plus all of its descendants. The host and the launchers between it and
+/// the browser are left out. Selecting by ancestry instead of by process name keeps other
+/// browsers (Canary, Chrome for Testing, Brave) out of the sum. When that ancestor is not in
+/// `rows` this fails instead of guessing, and the extension falls back to `chrome.system.memory`.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
+fn browser_tree_pids(rows: &[ProcLink], self_pid: u32) -> Result<Vec<u32>, String> {
+    let by_pid: HashMap<u32, &ProcLink> = rows.iter().map(|row| (row.pid, row)).collect();
+    let host = by_pid
+        .get(&self_pid)
+        .ok_or("cannot determine the launching browser: host process not found")?;
+
+    let mut excluded = HashSet::from([self_pid]);
+    let mut root = host.ppid;
+    loop {
+        // pid 0 or 1 means the host was orphaned or started by the OS, not by a browser.
+        if root <= 1 {
+            return Err(
+                "cannot determine the launching browser: host has no parent process".to_string(),
+            );
+        }
+        let parent = by_pid.get(&root).ok_or_else(|| {
+            format!("cannot determine the launching browser: parent process {root} not found")
+        })?;
+        if !parent.shell_launcher {
+            break;
+        }
+        if !excluded.insert(root) {
+            return Err("cannot determine the launching browser: parent process loop".to_string());
+        }
+        root = parent.ppid;
+    }
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row in rows {
+        children.entry(row.ppid).or_default().push(row.pid);
+    }
+
+    let mut tree = vec![root];
+    let mut seen = HashSet::from([root]);
+    let mut next = 0;
+    while next < tree.len() {
+        let pid = tree[next];
+        next += 1;
+        for &child in children.get(&pid).into_iter().flatten() {
+            // Skipping an excluded pid also skips its subtree: the host and its launchers.
+            if !excluded.contains(&child) && seen.insert(child) {
+                tree.push(child);
+            }
+        }
+    }
+    Ok(tree)
+}
+
 #[cfg(target_os = "linux")]
 fn collect_memory_report() -> Result<MemoryReport, String> {
     let meminfo = fs::read_to_string("/proc/meminfo")
         .map_err(|e| format!("failed to read /proc/meminfo: {}", e))?;
     let (system_total_bytes, system_available_bytes) = parse_meminfo(&meminfo)?;
+    let pids = browser_tree_pids(&linux_process_table()?, std::process::id())?;
 
     let mut chrome_bytes: u64 = 0;
     let mut process_count: usize = 0;
     let mut used_pss = false;
     let page_size = 4096u64;
 
-    let entries = fs::read_dir("/proc").map_err(|e| format!("failed to read /proc: {}", e))?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid_str) = name.to_str() else {
-            continue;
-        };
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-
-        let proc_dir = entry.path();
-        if !is_chrome_process(&proc_dir) {
-            continue;
-        }
-
+    for pid in pids {
+        let proc_dir = Path::new("/proc").join(pid.to_string());
         if let Some(pss) = read_pss_bytes(&proc_dir) {
             chrome_bytes = chrome_bytes.saturating_add(pss);
             process_count += 1;
@@ -252,70 +305,109 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn linux_process_table() -> Result<Vec<ProcLink>, String> {
+    let entries = fs::read_dir("/proc").map_err(|e| format!("failed to read /proc: {}", e))?;
+    let mut rows = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // A process that exits between listing and reading is skipped.
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some(ppid) = parse_proc_stat_ppid(&stat) {
+            rows.push(ProcLink {
+                pid,
+                ppid,
+                shell_launcher: false,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_stat_ppid(stat: &str) -> Option<u32> {
+    // Field 2 (comm) is parenthesized and may itself contain spaces or ')'.
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
 #[cfg(target_os = "macos")]
 fn collect_memory_report() -> Result<MemoryReport, String> {
-    use std::process::Command;
+    let system_total_bytes = macos::memsize()?;
+    let system_available_bytes = macos::available_bytes().unwrap_or(0);
+    let pids = browser_tree_pids(&macos::process_table()?, std::process::id())?;
 
-    let memsize_out = Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .map_err(|e| format!("failed to run sysctl: {}", e))?;
-    if !memsize_out.status.success() {
-        return Err("sysctl hw.memsize failed".to_string());
-    }
-    let system_total_bytes = String::from_utf8_lossy(&memsize_out.stdout)
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("invalid hw.memsize: {}", e))?;
-
-    let vm_stat_out = Command::new("vm_stat")
-        .output()
-        .map_err(|e| format!("failed to run vm_stat: {}", e))?;
-    let system_available_bytes = if vm_stat_out.status.success() {
-        parse_macos_vm_stat(&String::from_utf8_lossy(&vm_stat_out.stdout)).unwrap_or(0)
-    } else {
-        0
-    };
-
-    let ps_out = Command::new("ps")
-        .args(["-axo", "pid=,rss=,comm="])
-        .output()
-        .map_err(|e| format!("failed to run ps: {}", e))?;
-    if !ps_out.status.success() {
-        return Err("ps command failed".to_string());
-    }
-
-    let procs = parse_macos_ps_chrome(&String::from_utf8_lossy(&ps_out.stdout));
     let mut chrome_bytes: u64 = 0;
-    let mut used_footprint = false;
-
-    for &(pid, rss_bytes) in &procs {
-        // macOS Activity Monitor reports phys_footprint (includes compressed RAM and GPU/IOKit
-        // allocations), which is often 2-3x higher than uncompressed RSS from `ps`.
-        if let Some(fp) = read_macos_phys_footprint(pid) {
-            chrome_bytes = chrome_bytes.saturating_add(fp);
-            used_footprint = true;
-        } else {
-            chrome_bytes = chrome_bytes.saturating_add(rss_bytes);
+    let mut process_count: usize = 0;
+    for pid in pids {
+        // phys_footprint matches Activity Monitor (it includes compressed RAM and GPU/IOKit
+        // allocations) and is often 2-3x the uncompressed RSS. A process that exited is skipped.
+        if let Some(footprint) = macos::phys_footprint(pid) {
+            chrome_bytes = chrome_bytes.saturating_add(footprint);
+            process_count += 1;
         }
     }
 
     Ok(MemoryReport {
         chrome_bytes,
-        process_count: procs.len(),
+        process_count,
         system_total_bytes,
         system_available_bytes,
-        metric: if used_footprint { "phys_footprint" } else { "rss" },
+        metric: "phys_footprint",
     })
 }
 
+/// Direct libSystem calls. The host is spawned once per extension request, so shelling out to
+/// `sysctl`, `vm_stat` and `ps` cost more than the measurement itself.
 #[cfg(target_os = "macos")]
-fn read_macos_phys_footprint(pid: i32) -> Option<u64> {
-    use std::ffi::c_void;
-    use std::mem::zeroed;
+mod macos {
+    use super::ProcLink;
+    use std::ffi::{c_char, c_int, c_void};
+    use std::mem::{size_of, zeroed};
+    use std::ptr::null_mut;
 
-    const RUSAGE_INFO_V2: i32 = 2;
+    const PROC_ALL_PIDS: u32 = 1;
+    const PROC_PIDTBSDINFO: c_int = 3;
+    const RUSAGE_INFO_V2: c_int = 2;
+    const HOST_VM_INFO64: c_int = 4;
+    const KERN_SUCCESS: c_int = 0;
 
+    /// `struct proc_bsdinfo` from <sys/proc_info.h>.
+    #[repr(C)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [c_char; 16],
+        pbi_name: [c_char; 32],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+
+    /// `struct rusage_info_v2` from <sys/resource.h>.
     #[repr(C)]
     struct RusageInfoV2 {
         ri_uuid: [u8; 16],
@@ -339,17 +431,165 @@ fn read_macos_phys_footprint(pid: i32) -> Option<u64> {
         ri_diskio_byteswritten: u64,
     }
 
-    extern "C" {
-        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut c_void) -> i32;
+    /// `struct vm_statistics64` from <mach/vm_statistics.h> (HOST_VM_INFO64_REV1 layout).
+    #[repr(C, align(8))]
+    struct VmStatistics64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+        decompressions: u64,
+        compressions: u64,
+        swapins: u64,
+        swapouts: u64,
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
     }
 
-    unsafe {
-        let mut info: RusageInfoV2 = zeroed();
-        let ret = proc_pid_rusage(pid, RUSAGE_INFO_V2, (&mut info as *mut RusageInfoV2).cast());
-        if ret == 0 {
-            Some(info.ri_phys_footprint)
-        } else {
-            None
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
+        fn mach_host_self() -> u32;
+        fn host_page_size(host: u32, page_size: *mut usize) -> c_int;
+        fn host_statistics64(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
+        fn proc_listpids(kind: u32, typeinfo: u32, buffer: *mut c_void, buffersize: c_int)
+            -> c_int;
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
+        fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
+    }
+
+    pub fn memsize() -> Result<u64, String> {
+        let mut value: u64 = 0;
+        let mut len = size_of::<u64>();
+        // SAFETY: the name is NUL-terminated and `len` is the size of the buffer `value`.
+        let ret = unsafe {
+            sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&mut value as *mut u64).cast(),
+                &mut len,
+                null_mut(),
+                0,
+            )
+        };
+        if ret != 0 || len != size_of::<u64>() {
+            return Err("sysctl hw.memsize failed".to_string());
+        }
+        Ok(value)
+    }
+
+    /// Free plus inactive pages, the same "available" figure `vm_stat` reported (its "Pages free"
+    /// excludes speculative pages and lists them separately; the kernel's free_count includes them).
+    pub fn available_bytes() -> Option<u64> {
+        // SAFETY: `stats` is a vm_statistics64 and `count` is its size in integer_t units, as
+        // host_statistics64 requires. host_page_size writes one vm_size_t.
+        unsafe {
+            let host = mach_host_self();
+            let mut page_size: usize = 0;
+            if host_page_size(host, &mut page_size) != KERN_SUCCESS {
+                return None;
+            }
+            let mut stats: VmStatistics64 = zeroed();
+            let mut count = (size_of::<VmStatistics64>() / size_of::<c_int>()) as u32;
+            let ret = host_statistics64(
+                host,
+                HOST_VM_INFO64,
+                (&mut stats as *mut VmStatistics64).cast(),
+                &mut count,
+            );
+            if ret != KERN_SUCCESS {
+                return None;
+            }
+            let pages = u64::from(stats.free_count) + u64::from(stats.inactive_count);
+            Some(pages.saturating_mul(page_size as u64))
+        }
+    }
+
+    pub fn process_table() -> Result<Vec<ProcLink>, String> {
+        let pid_size = size_of::<c_int>();
+        // SAFETY: a null buffer asks only for the required size. The second call writes at most
+        // `buffersize` bytes into `pids`, and its return value is the number of bytes written.
+        let pids = unsafe {
+            let needed = proc_listpids(PROC_ALL_PIDS, 0, null_mut(), 0);
+            if needed <= 0 {
+                return Err("proc_listpids failed".to_string());
+            }
+            // Headroom for processes started between the two calls.
+            let capacity = needed as usize / pid_size + 64;
+            let mut pids: Vec<c_int> = vec![0; capacity];
+            let written = proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                pids.as_mut_ptr().cast(),
+                (capacity * pid_size) as c_int,
+            );
+            if written <= 0 {
+                return Err("proc_listpids failed".to_string());
+            }
+            pids.truncate(written as usize / pid_size);
+            pids
+        };
+
+        let info_size = size_of::<ProcBsdInfo>() as c_int;
+        let mut rows = Vec::with_capacity(pids.len());
+        for pid in pids.into_iter().filter(|&pid| pid > 0) {
+            // SAFETY: `info` is a proc_bsdinfo and `info_size` is its size.
+            let mut info: ProcBsdInfo = unsafe { zeroed() };
+            let written = unsafe {
+                proc_pidinfo(
+                    pid,
+                    PROC_PIDTBSDINFO,
+                    0,
+                    (&mut info as *mut ProcBsdInfo).cast(),
+                    info_size,
+                )
+            };
+            // A process that exited or that we may not inspect is skipped.
+            if written == info_size {
+                rows.push(ProcLink {
+                    pid: pid as u32,
+                    ppid: info.pbi_ppid,
+                    shell_launcher: false,
+                });
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn phys_footprint(pid: u32) -> Option<u64> {
+        let pid = c_int::try_from(pid).ok()?;
+        // SAFETY: `info` is a rusage_info_v2, the struct RUSAGE_INFO_V2 asks the kernel to fill.
+        unsafe {
+            let mut info: RusageInfoV2 = zeroed();
+            if proc_pid_rusage(pid, RUSAGE_INFO_V2, (&mut info as *mut RusageInfoV2).cast()) == 0 {
+                Some(info.ri_phys_footprint)
+            } else {
+                None
+            }
         }
     }
 }
@@ -410,7 +650,11 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
         fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
         fn Process32FirstW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
         fn Process32NextW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
-        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> *mut c_void;
+        fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> *mut c_void;
         fn CloseHandle(h_object: *mut c_void) -> i32;
         fn K32GetProcessMemoryInfo(
             process: *mut c_void,
@@ -433,10 +677,7 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
 
         let mut entry: ProcessEntry32W = zeroed();
         entry.dw_size = size_of::<ProcessEntry32W>() as u32;
-
-        let mut chrome_bytes: u64 = 0;
-        let mut process_count: usize = 0;
-
+        let mut rows = Vec::new();
         if Process32FirstW(snapshot, &mut entry) != 0 {
             loop {
                 let nul_pos = entry
@@ -445,29 +686,36 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
                     .position(|&c| c == 0)
                     .unwrap_or(entry.sz_exe_file.len());
                 let exe_name = String::from_utf16_lossy(&entry.sz_exe_file[..nul_pos]);
-
-                if is_windows_chrome_exe(&exe_name) {
-                    let proc_handle =
-                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32_process_id);
-                    if !proc_handle.is_null() {
-                        let mut counters: ProcessMemoryCounters = zeroed();
-                        counters.cb = size_of::<ProcessMemoryCounters>() as u32;
-                        if K32GetProcessMemoryInfo(proc_handle, &mut counters, counters.cb) != 0 {
-                            chrome_bytes =
-                                chrome_bytes.saturating_add(counters.working_set_size as u64);
-                            process_count += 1;
-                        }
-                        CloseHandle(proc_handle);
-                    }
-                }
-
+                rows.push(ProcLink {
+                    pid: entry.th32_process_id,
+                    ppid: entry.th32_parent_process_id,
+                    // Chrome starts native hosts through `cmd.exe /d /s /c` to wire up stdio.
+                    shell_launcher: exe_name.eq_ignore_ascii_case("cmd.exe"),
+                });
                 if Process32NextW(snapshot, &mut entry) == 0 {
                     break;
                 }
             }
         }
-
         CloseHandle(snapshot);
+
+        let pids = browser_tree_pids(&rows, std::process::id())?;
+        let mut chrome_bytes: u64 = 0;
+        let mut process_count: usize = 0;
+        for pid in pids {
+            // A process that exited or that we may not open is skipped.
+            let proc_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if proc_handle.is_null() {
+                continue;
+            }
+            let mut counters: ProcessMemoryCounters = zeroed();
+            counters.cb = size_of::<ProcessMemoryCounters>() as u32;
+            if K32GetProcessMemoryInfo(proc_handle, &mut counters, counters.cb) != 0 {
+                chrome_bytes = chrome_bytes.saturating_add(counters.working_set_size as u64);
+                process_count += 1;
+            }
+            CloseHandle(proc_handle);
+        }
 
         Ok(MemoryReport {
             chrome_bytes,
@@ -479,104 +727,9 @@ fn collect_memory_report() -> Result<MemoryReport, String> {
     }
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn is_windows_chrome_exe(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(lower.as_str(), "chrome.exe" | "chromium.exe" | "brave.exe")
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn collect_memory_report() -> Result<MemoryReport, String> {
     Err(format!("unsupported platform: {}", env::consts::OS))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn parse_macos_vm_stat(output: &str) -> Option<u64> {
-    let mut page_size: u64 = 4096;
-    let mut available_pages: u64 = 0;
-
-    for line in output.lines() {
-        if let Some(idx) = line.find("page size of ") {
-            let rest = &line[idx + "page size of ".len()..];
-            if let Some(num) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
-                page_size = num;
-            }
-            continue;
-        }
-        for prefix in ["Pages free:", "Pages inactive:", "Pages speculative:"] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let cleaned = rest.trim().trim_end_matches('.');
-                if let Ok(pages) = cleaned.parse::<u64>() {
-                    available_pages = available_pages.saturating_add(pages);
-                }
-            }
-        }
-    }
-
-    Some(available_pages.saturating_mul(page_size))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn parse_macos_ps_chrome(output: &str) -> Vec<(i32, u64)> {
-    let mut procs = Vec::new();
-
-    for line in output.lines() {
-        let trimmed = line.trim_start();
-        let Some((pid_str, after_pid)) = trimmed.split_once(char::is_whitespace) else {
-            continue;
-        };
-        let Some((rss_str, after_rss)) = after_pid.trim_start().split_once(char::is_whitespace) else {
-            continue;
-        };
-        let comm = after_rss.trim();
-        let Ok(pid) = pid_str.parse::<i32>() else {
-            continue;
-        };
-        let Ok(rss_kb) = rss_str.parse::<u64>() else {
-            continue;
-        };
-
-        let lower = comm.to_ascii_lowercase();
-        if lower.contains("tab-reaper-host") {
-            continue;
-        }
-        let is_chrome = lower.contains("google chrome")
-            || lower.contains("chromium")
-            || lower.contains("brave browser")
-            || lower.contains("chrome apps.localized");
-        if is_chrome {
-            procs.push((pid, rss_kb.saturating_mul(1024)));
-        }
-    }
-
-    procs
-}
-
-#[cfg(target_os = "linux")]
-fn is_chrome_process(proc_dir: &Path) -> bool {
-    let Ok(cmdline_bytes) = fs::read(proc_dir.join("cmdline")) else {
-        return false;
-    };
-    if cmdline_bytes.is_empty() {
-        return false;
-    }
-
-    let first_arg = cmdline_bytes
-        .split(|&b| b == 0)
-        .next()
-        .and_then(|s| std::str::from_utf8(s).ok())
-        .unwrap_or("");
-
-    let exe_name = Path::new(first_arg)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    matches!(
-        exe_name.as_str(),
-        "chrome" | "google-chrome" | "chromium" | "chromium-browser" | "brave"
-    )
 }
 
 #[cfg(target_os = "linux")]
@@ -662,29 +815,108 @@ mod tests {
         assert!(resp.contains(HOST_VERSION));
     }
 
-    #[test]
-    fn parses_macos_vm_stat_and_ps() {
-        let vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               1000.\nPages active:                             5000.\nPages inactive:                           2000.\nPages speculative:                         500.\n";
-        assert_eq!(parse_macos_vm_stat(vm), Some(3500 * 16384));
+    fn row(pid: u32, ppid: u32) -> ProcLink {
+        ProcLink {
+            pid,
+            ppid,
+            shell_launcher: false,
+        }
+    }
 
-        let ps = "\
- 5061 250000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
- 5284 180000 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/130/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)\n\
- 9999  12000 /Users/dev/.local/bin/tab-reaper-host\n\
- 1234  90000 /usr/bin/vim\n";
+    fn sorted(mut pids: Vec<u32>) -> Vec<u32> {
+        pids.sort_unstable();
+        pids
+    }
+
+    #[test]
+    fn browser_tree_is_the_host_parent_and_its_descendants() {
+        let rows = [
+            row(1, 0),
+            row(100, 1), // browser that launched the host
+            row(101, 100),
+            row(102, 100), // zygote
+            row(103, 102),
+            row(104, 103), // renderer under the zygote
+            row(500, 100), // this host
+            row(300, 1),   // another browser (Canary, Brave, Playwright)
+            row(301, 300),
+        ];
         assert_eq!(
-            parse_macos_ps_chrome(ps),
-            vec![(5061, 250_000 * 1024), (5284, 180_000 * 1024)]
+            sorted(browser_tree_pids(&rows, 500).unwrap()),
+            vec![100, 101, 102, 103, 104]
         );
     }
 
     #[test]
-    fn matches_windows_chrome_executables() {
-        assert!(is_windows_chrome_exe("chrome.exe"));
-        assert!(is_windows_chrome_exe("Chrome.EXE"));
-        assert!(is_windows_chrome_exe("brave.exe"));
-        assert!(is_windows_chrome_exe("chromium.exe"));
-        assert!(!is_windows_chrome_exe("tab-reaper-host.exe"));
-        assert!(!is_windows_chrome_exe("notepad.exe"));
+    fn browser_tree_excludes_the_host_and_its_children() {
+        let rows = [row(100, 1), row(500, 100), row(501, 500)];
+        assert_eq!(browser_tree_pids(&rows, 500).unwrap(), vec![100]);
+    }
+
+    #[test]
+    fn browser_tree_walks_past_the_windows_cmd_launcher() {
+        let rows = [
+            row(10, 4),
+            row(11, 10),
+            ProcLink {
+                pid: 20,
+                ppid: 10,
+                shell_launcher: true,
+            },
+            row(30, 20),
+            row(40, 4),
+        ];
+        assert_eq!(sorted(browser_tree_pids(&rows, 30).unwrap()), vec![10, 11]);
+    }
+
+    #[test]
+    fn browser_tree_fails_when_the_launcher_is_unknown() {
+        let missing_parent = [row(500, 999), row(100, 1)];
+        assert!(browser_tree_pids(&missing_parent, 500).is_err());
+
+        let orphaned = [row(1, 0), row(500, 1), row(100, 1)];
+        assert!(browser_tree_pids(&orphaned, 500).is_err());
+
+        let host_missing = [row(100, 1)];
+        assert!(browser_tree_pids(&host_missing, 500).is_err());
+
+        let launcher_loop = [
+            ProcLink {
+                pid: 20,
+                ppid: 21,
+                shell_launcher: true,
+            },
+            ProcLink {
+                pid: 21,
+                ppid: 20,
+                shell_launcher: true,
+            },
+            row(500, 20),
+        ];
+        assert!(browser_tree_pids(&launcher_loop, 500).is_err());
+    }
+
+    #[test]
+    fn parses_ppid_from_proc_stat() {
+        assert_eq!(
+            parse_proc_stat_ppid("4242 (chrome) S 4100 4242 4242 0 -1"),
+            Some(4100)
+        );
+        assert_eq!(
+            parse_proc_stat_ppid("4243 (Web Content) (x)) R 7 4243 4243 0 -1"),
+            Some(7)
+        );
+        assert_eq!(parse_proc_stat_ppid("garbage"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reports_memory_from_system_calls() {
+        assert!(macos::memsize().unwrap() > 0);
+        assert!(macos::available_bytes().unwrap() > 0);
+        let table = macos::process_table().unwrap();
+        let me = table.iter().find(|r| r.pid == std::process::id()).unwrap();
+        assert_eq!(me.ppid, std::os::unix::process::parent_id());
+        assert!(macos::phys_footprint(std::process::id()).unwrap() > 0);
     }
 }
