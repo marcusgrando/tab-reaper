@@ -71,6 +71,8 @@ import {
   recordTabVisit,
   removeKeptTabId,
   removeTrackedTab,
+  replaceKeptTabId,
+  replaceTrackedTab,
   saveActivityState,
   syncActiveTabs,
   toggleKeptTabId,
@@ -91,8 +93,29 @@ const SWEEP_ALARM = "tabReaper.sweep";
 const SWEEP_PERIOD_MINUTES = 0.5;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let sweepInFlight = false;
+let sweepPromise: Promise<{ discarded: number }> | null = null;
 const privateStorage = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
 const LAST_SYNC_ATTEMPT_KEY = "tabReaper.lastSyncAttempt";
+const STARTUP_RECONCILED_KEY = "tabReaper.startupReconciled";
+let startupReconciled = false;
+
+async function isStartupReconciled(): Promise<boolean> {
+  if (startupReconciled) return true;
+  if (!chrome.storage?.session?.get) return true;
+  const stored = await chrome.storage.session.get(STARTUP_RECONCILED_KEY);
+  if (stored[STARTUP_RECONCILED_KEY]) {
+    startupReconciled = true;
+    return true;
+  }
+  return false;
+}
+
+async function markStartupReconciled(): Promise<void> {
+  startupReconciled = true;
+  if (chrome.storage?.session?.set) {
+    await chrome.storage.session.set({ [STARTUP_RECONCILED_KEY]: true });
+  }
+}
 
 function syncConfig() {
   return pullConfigFromSync(loadConfig, async remote => {
@@ -179,7 +202,14 @@ async function discardTabSafely(
       const state = await loadActivityState({ includeUrlHistory: false });
       if (getTabLastActiveAt(state, live, 0) !== plannedLastActiveAt) return false;
     }
-    await chrome.tabs.discard(tabId);
+    const discardedTab = await chrome.tabs.discard(tabId);
+    const nextTabId = discardedTab?.id;
+    if (typeof nextTabId === "number" && nextTabId !== tabId) {
+      const state = await loadActivityState({ includeUrlHistory: false });
+      const replaced = replaceTrackedTab(state, tabId, nextTabId);
+      if (replaced !== state) await saveActivityState(replaced, state);
+      await replaceKeptTabId(tabId, nextTabId);
+    }
     return true;
   });
 }
@@ -239,10 +269,14 @@ async function runSweep(
   mode: "sweep" | "startup" = "sweep",
   options: { periodic?: boolean } = {},
 ): Promise<{ discarded: number }> {
+  if (mode === "startup" && sweepPromise) {
+    await sweepPromise;
+  }
   if (sweepInFlight || isRestoreInFlight()) return { discarded: 0 };
   sweepInFlight = true;
   const periodic = options.periodic ?? true;
 
+  const task = (async (): Promise<{ discarded: number }> => {
   try {
     const now = Date.now();
     const config = await loadConfig();
@@ -329,7 +363,11 @@ async function runSweep(
     return { discarded };
   } finally {
     sweepInFlight = false;
+    sweepPromise = null;
   }
+  })();
+  sweepPromise = task;
+  return task;
 }
 
 async function buildStatus(includeTabs = true): Promise<StatusPayload> {
@@ -376,11 +414,13 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
     };
   }
 
-  const [windows, activity, snapshots] = await Promise.all([
+  const [windows, initialActivity, snapshots] = await Promise.all([
     chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
     loadActivityState({ includeUrlHistory: false }),
     loadSnapshots(),
   ]);
+  const hasUntrackedTab = tabs.some((t) => !t.active && !(String(t.id) in initialActivity.byTabId));
+  const activity = hasUntrackedTab ? await loadActivityState({ includeUrlHistory: true }) : initialActivity;
 
   const windowById = new Map<number, chrome.windows.Window>();
   for (const win of windows) {
@@ -494,6 +534,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const tabs = await queryAllTabs();
   const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
   await saveActivityState(activity);
+  await markStartupReconciled();
   if (isFreshInstall) {
     await chrome.runtime.openOptionsPage();
   }
@@ -511,6 +552,7 @@ chrome.runtime.onStartup.addListener(async () => {
     const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
     await saveActivityState(activity);
   }
+  await markStartupReconciled();
   void runPeriodicSync(true);
   void maybeCheckForUpdate().then(() => refreshActionBadge()).catch(() => {});
 });
@@ -537,14 +579,27 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const tabId = tab.id;
   const url = tab.url ?? tab.pendingUrl;
   const activeWindowId = tab.active ? tab.windowId : undefined;
+  const preferHistory = !tab.active && (Boolean(tab.discarded) || tab.status === "unloaded" || !(await isStartupReconciled()));
   await enqueueActivityUpdate(async () => {
-    const [activity, keptIds] = await Promise.all([loadActivityState({ includeUrlHistory: false }), loadKeptTabIds()]);
-    const state = recordTabVisit(activity, tabId, url, Date.now(), activeWindowId);
+    const [activity, keptIds] = await Promise.all([
+      loadActivityState({ includeUrlHistory: preferHistory }),
+      loadKeptTabIds(),
+    ]);
+    const state = recordTabVisit(activity, tabId, url, Date.now(), activeWindowId, preferHistory);
     await saveActivityState(state, activity);
     const summary = toTabSummary(tab, keptIds);
     if (summary) await cacheWindowTabs([summary], true);
   });
   await maybeRunEventSweep();
+});
+
+chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+  void enqueueActivityUpdate(async () => {
+    const state = await loadActivityState({ includeUrlHistory: false });
+    const replaced = replaceTrackedTab(state, removedTabId, addedTabId);
+    if (replaced !== state) await saveActivityState(replaced, state);
+    await replaceKeptTabId(removedTabId, addedTabId);
+  });
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {

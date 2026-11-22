@@ -34,6 +34,7 @@ export function recordTabVisit(
   url: string | undefined,
   now: number,
   windowId?: number,
+  preferHistory = false,
 ): ActivityState {
   const nextByTabId = { ...state.byTabId };
   const nextActiveByWindow = { ...(state.activeByWindow ?? {}) };
@@ -51,7 +52,58 @@ export function recordTabVisit(
     nextActiveByWindow[winKey] = tabId;
   }
 
-  nextByTabId[String(tabId)] = { url: trackedUrl(url), lastActiveAt: now };
+  const normalized = trackedUrl(url);
+  let historical: number | undefined;
+  if (preferHistory && typeof windowId !== "number" && isRestorableUrl(normalized)) {
+    if (typeof state.byUrl[normalized] === "number") {
+      historical = state.byUrl[normalized];
+    }
+    // Chrome can quit without onRemoved, leaving the prior session's recency only in byTabId.
+    for (const record of Object.values(state.byTabId)) {
+      if (record.url === normalized && (historical === undefined || record.lastActiveAt > historical)) {
+        historical = record.lastActiveAt;
+      }
+    }
+  }
+  const lastActiveAt = typeof historical === "number" ? historical : now;
+
+  nextByTabId[String(tabId)] = { url: normalized, lastActiveAt };
+  return { byTabId: nextByTabId, byUrl: state.byUrl, activeByWindow: nextActiveByWindow };
+}
+
+/**
+ * Migrates per-tab activity when Chrome replaces a tab ID (most commonly on
+ * chrome.tabs.discard(), which assigns a fresh tabId to the sleeping tab).
+ */
+export function replaceTrackedTab(state: ActivityState, oldTabId: number, newTabId: number): ActivityState {
+  if (oldTabId === newTabId) return state;
+  const oldKey = String(oldTabId);
+  const newKey = String(newTabId);
+  const record = state.byTabId[oldKey];
+  const activeByWindow = state.activeByWindow ?? {};
+  const matchingWindows = Object.entries(activeByWindow)
+    .filter(([, activeId]) => activeId === oldTabId)
+    .map(([winKey]) => winKey);
+
+  if (!record && matchingWindows.length === 0) return state;
+
+  let nextByTabId = state.byTabId;
+  if (record) {
+    nextByTabId = { ...state.byTabId };
+    delete nextByTabId[oldKey];
+    if (!(newKey in nextByTabId)) {
+      nextByTabId[newKey] = record;
+    }
+  }
+
+  let nextActiveByWindow = activeByWindow;
+  if (matchingWindows.length > 0) {
+    nextActiveByWindow = { ...activeByWindow };
+    for (const winKey of matchingWindows) {
+      nextActiveByWindow[winKey] = newTabId;
+    }
+  }
+
   return { byTabId: nextByTabId, byUrl: state.byUrl, activeByWindow: nextActiveByWindow };
 }
 
@@ -283,6 +335,15 @@ export async function removeKeptTabId(tabId: number): Promise<void> {
   }
 }
 
+export async function replaceKeptTabId(oldTabId: number, newTabId: number): Promise<void> {
+  if (oldTabId === newTabId) return;
+  const ids = await loadKeptTabIds();
+  if (ids.delete(oldTabId)) {
+    ids.add(newTabId);
+    await saveKeptTabIds(ids);
+  }
+}
+
 export async function clearKeptTabIds(): Promise<void> {
   await chrome.storage.local.remove(KEPT_TABS_STORAGE_KEY);
 }
@@ -296,7 +357,9 @@ export function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>
     active: Boolean(tab.active),
     audible: Boolean(tab.audible),
     pinned: Boolean(tab.pinned),
-    discarded: Boolean(tab.discarded),
+    // Chrome's lazy session restore leaves background tabs with status="unloaded" and discarded=false
+    // (no renderer process is running until focused), so treat them as sleeping.
+    discarded: Boolean(tab.discarded || tab.status === "unloaded"),
     kept: keptIds?.has(tab.id) ?? false,
     status: tab.status,
     windowId: tab.windowId,

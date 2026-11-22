@@ -9,8 +9,10 @@ import {
   reconcileActivityOnStartup,
   recordTabVisit,
   removeTrackedTab,
+  replaceTrackedTab,
   saveActivityState,
   syncActiveTabs,
+  toTabSummary,
 } from "../src/background/tracker.ts";
 import { sanitizeConfig } from "../src/shared/config.ts";
 import type { MemorySnapshot, TabSummary } from "../src/shared/types.ts";
@@ -268,5 +270,66 @@ describe("activity persistence", () => {
     } finally {
       storage.restore();
     }
+  });
+
+  test("toTabSummary treats Chrome lazy-restored unloaded tabs as sleeping", () => {
+    const unloaded = toTabSummary({
+      id: 10,
+      url: "https://a.example.com/",
+      title: "A",
+      active: false,
+      audible: false,
+      pinned: false,
+      discarded: false,
+      status: "unloaded",
+      windowId: 1,
+      index: 0,
+      highlighted: false,
+      incognito: false,
+      selected: false,
+      autoDiscardable: true,
+      groupId: -1,
+    });
+    expect(unloaded?.discarded).toBe(true);
+
+    const loading = toTabSummary({
+      id: 11,
+      url: "https://b.example.com/",
+      title: "B",
+      active: false,
+      audible: false,
+      pinned: false,
+      discarded: false,
+      status: "loading",
+      windowId: 1,
+      index: 1,
+      highlighted: false,
+      incognito: false,
+      selected: false,
+      autoDiscardable: true,
+      groupId: -1,
+    });
+    expect(loading?.discarded).toBe(false);
+  });
+
+  test("replaceTrackedTab preserves idle timestamp when chrome.tabs.discard assigns a new tabId", () => {
+    const visited = recordTabVisit(createEmptyActivityState(), 10, "https://a.example.com/", t0, 1);
+    const replaced = replaceTrackedTab(visited, 10, 42);
+    expect(replaced.byTabId["10"]).toBeUndefined();
+    expect(replaced.byTabId["42"]).toEqual({ url: "https://a.example.com", lastActiveAt: t0 });
+    expect(replaced.activeByWindow?.["1"]).toBe(42);
+    expect(replaceTrackedTab(replaced, 10, 42)).toBe(replaced);
+  });
+
+  test("preferHistory inherits prior session recency from byTabId and byUrl on startup-restored tabs", () => {
+    // Simulates macOS Cmd+Q (no onRemoved): recency for tab A exists only in prior session's byTabId.
+    let state = recordTabVisit(createEmptyActivityState(), 5, "https://a.example.com/page", t0, 1);
+    state = { ...state, byUrl: { "https://b.example.com/page": t0 - 60_000 } };
+
+    const afterRestart = t0 + 3 * 60 * 60_000;
+    const restoredA = recordTabVisit(state, 105, "https://a.example.com/page", afterRestart, undefined, true);
+    const restoredB = recordTabVisit(restoredA, 106, "https://b.example.com/page", afterRestart, undefined, true);
+    expect(restoredB.byTabId["105"]?.lastActiveAt).toBe(t0);
+    expect(restoredB.byTabId["106"]?.lastActiveAt).toBe(t0 - 60_000);
   });
 });
