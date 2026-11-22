@@ -46,31 +46,29 @@ export async function sampleTabWeights(
   if (!hostAccess) return weights;
 
   const cache = await loadSampleCache();
-  const staleTabs: TabSummary[] = [];
-
-  for (const tab of tabs) {
-    if (tab.discarded || isInternalUrl(tab.url)) continue;
-    const cached = cache[String(tab.id)];
+  let cacheChanged = false;
+  await Promise.all(tabs.map(async (tab) => {
+    if (tab.discarded || isInternalUrl(tab.url)) return;
+    const key = String(tab.id);
+    const cached = cache[key];
+    let sample: TabWeightSample | null;
     if (cached && now - cached.sampledAt < SAMPLE_TTL_MS) {
-      weights.set(tab.id, cached);
-    } else {
-      staleTabs.push(tab);
-    }
-  }
-
-  if (staleTabs.length === 0) return weights;
-
-  await Promise.all(
-    staleTabs.map(async (tab) => {
-      const sample = await sampleSingleTab(tab.id, now);
-      if (sample) {
-        weights.set(tab.id, sample);
-        cache[String(tab.id)] = sample;
+      sample = cached;
+      // A saved draft or a new document can reuse the same tab and memory sample.
+      if (cached.hasUnsavedForm && (await inspectFormState(tab.id)) === false) {
+        sample = { ...cached, hasUnsavedForm: false };
       }
-    }),
-  );
-
-  await saveSampleCache(cache);
+    } else {
+      sample = await sampleSingleTab(tab.id, now);
+    }
+    if (!sample) return;
+    weights.set(tab.id, sample);
+    if (sample !== cached) {
+      cache[key] = sample;
+      cacheChanged = true;
+    }
+  }));
+  if (cacheChanged) await saveSampleCache(cache);
   return weights;
 }
 
@@ -80,7 +78,7 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
   for (const [idStr, sample] of Object.entries(cache)) {
     const id = Number(idStr);
     if (Number.isFinite(id) && sample && now - sample.sampledAt < SAMPLE_TTL_MS) {
-      weights.set(id, sample);
+      weights.set(id, { ...sample, hasUnsavedForm: false });
     }
   }
   return weights;
@@ -88,26 +86,11 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
 
 function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
   const detectUnsavedForm = (): boolean => {
-    const host = location.hostname.toLowerCase();
-    // Auto-saving cloud editors continuously persist changes and use hidden/JS-populated inputs.
-    const autoSaveHosts = [
-      "docs.google.com",
-      "notion.so",
-      "www.notion.so",
-      "figma.com",
-      "www.figma.com",
-      "miro.com",
-      "coda.io",
-      "airtable.com",
-    ];
-    if (autoSaveHosts.some((h) => host === h || host.endsWith(`.${h}`))) {
-      return false;
-    }
-
     const isVisibleEditable = (el: HTMLElement): boolean => {
-      if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
+      if (el.hidden) return false;
       if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
-      if (el.closest("header, nav, [role='toolbar'], [role='search'], [role='menubar']")) return false;
+      if (el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) === false) return false;
+      if (el.closest("[inert], [aria-hidden='true'], header, nav, [role='toolbar'], [role='search'], [role='menubar']")) return false;
       const role = (el.getAttribute("role") || "").toLowerCase();
       if (role === "searchbox" || role === "combobox") return false;
       return true;
@@ -135,7 +118,7 @@ function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
       const type = (input.type || "text").toLowerCase();
       if (skipTypes.has(type) || input.disabled || input.readOnly || !isVisibleEditable(input)) continue;
       if (type === "checkbox" || type === "radio") {
-        if (input.checked !== input.defaultChecked) return true;
+        if (input.form && input.checked !== input.defaultChecked) return true;
       } else if (input.value !== input.defaultValue) {
         if (type !== "range" && type !== "color") return true;
         // The browser supplies a value even when the markup omits one.
@@ -146,7 +129,7 @@ function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
     }
     const selects = document.querySelectorAll("select");
     for (const select of selects) {
-      if (select.disabled || !isVisibleEditable(select)) continue;
+      if (!select.form || select.disabled || !isVisibleEditable(select)) continue;
       const options = Array.from(select.options);
       if (select.multiple) {
         if (options.some((opt) => opt.selected !== opt.defaultSelected)) return true;
@@ -182,17 +165,21 @@ function inspectPageInTab(includeMetrics: boolean): RawPageMetrics | boolean {
 
 export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
   if (!chrome.scripting?.executeScript) return false;
-  const hostAccess = await hasHostAccessPermission();
-  if (!hostAccess) return false;
+  if (!(await hasHostAccessPermission())) return false;
+  return (await inspectFormState(tabId)) ?? false;
+}
+
+async function inspectFormState(tabId: number): Promise<boolean | undefined> {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       func: inspectPageInTab,
       args: [false],
     });
-    return results.some((frame) => Boolean(frame?.result));
+    if (results.some(frame => frame.result === true)) return true;
+    if (results.length > 0 && results.every(frame => frame.result === false)) return false;
   } catch {
-    return false;
+    // Keep a previously observed draft protected until a successful recheck or cache expiry.
   }
 }
 

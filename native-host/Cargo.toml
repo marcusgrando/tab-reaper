@@ -1,6 +1,6 @@
 [package]
 name = "tab-reaper-host"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Lightweight Chrome Native Messaging companion that reports exact Chrome process memory and syncs local backups to a user-chosen folder."
 

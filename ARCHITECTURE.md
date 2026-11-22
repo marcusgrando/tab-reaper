@@ -67,6 +67,10 @@ When memory reaches the size threshold (default `100%` of budget) and optional W
 - Heavy media elements (`iframe`, `canvas`, `video` count)
 - Unsaved non-password form edits (used to protect dirty forms when `protectUnsavedForms` is enabled)
 
+Form inspection uses the same rules on every host. Visible, editable native text fields can contain drafts outside a form. A changed selection, checkbox, or radio button counts only when it has a form owner, including one assigned by the HTML `form` attribute. Custom editors may hold drafts outside native controls, and the DOM cannot confirm that a server has saved an edit.
+
+A cached positive form result is rechecked before it protects a tab or appears in the palette. If the page cannot be inspected, the previous positive lasts until the sample expires. Revoking page access removes the form indication. The final check before discard also catches edits made after a negative sample.
+
 Pages where scripting is disallowed receive default weight (`1.0`). When Weighted Eviction is disabled, the size band falls back to oldest idle first. No permanent content scripts are ever registered.
 
 ### Protections
