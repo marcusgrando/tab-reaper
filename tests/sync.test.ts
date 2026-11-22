@@ -87,6 +87,7 @@ describe("multi-device single-writer folder sync integration", () => {
 
   let activeSyncDir: string;
   let hostHostname: string;
+  let readPaths: string[];
 
   beforeEach(() => {
     activeSyncDir = "/iCloud/TabReaper";
@@ -97,6 +98,7 @@ describe("multi-device single-writer folder sync integration", () => {
       "tabReaper.activeSyncDir": activeSyncDir,
     };
     virtualFs = new Map<string, string>();
+    readPaths = [];
     writable = true;
     hostOnline = true;
     hostOutdated = false;
@@ -153,6 +155,7 @@ describe("multi-device single-writer folder sync integration", () => {
           }
           if (cmd === "sync_read") {
             const relPath = payload.relPath as string;
+            readPaths.push(relPath);
             if (failNextIndexRead && relPath.endsWith("/index.json")) {
               failNextIndexRead = false;
               return { ok: false, error: "transient i/o error" };
@@ -202,6 +205,21 @@ describe("multi-device single-writer folder sync integration", () => {
     writable = false;
     expect((await listSyncedSnapshots())[0]?.id).toBe(snap!.id);
     expect((await readSyncedSnapshot(entry.relPath!))?.tabs.length).toBe(400);
+  });
+
+  test("periodic sync confirms published snapshots from the folder listing without reading them", async () => {
+    const tabs = Array.from({ length: 400 }, (_, id) => ({
+      id, url: `https://docs.test/${id}/${"x".repeat(2900)}`, title: "Draft", windowId: 1,
+      pinned: false, discarded: false, active: false, audible: false,
+    }));
+    const snap = await captureSessionSnapshot(tabs, { force: true });
+    const entry = (await listSyncedSnapshots())[0]!;
+    expect(virtualFs.has(entry.relPath!.replace(".json", "_p1.json"))).toBe(true);
+
+    readPaths = [];
+    const again = await syncPendingLocalSnapshots(async () => [snap!]);
+    expect(again).toMatchObject({ ok: true, uploaded: 0 });
+    expect(readPaths.filter((path) => path.includes("/snapshots/"))).toEqual([]);
   });
 
   test("a queued window backup cannot suppress the next complete capture after disk rotation", async () => {

@@ -462,17 +462,18 @@ export async function syncPendingLocalSnapshots(
 
     const freshLocal = await loadLocalSnapshots();
     const stillPendingDeleteSet = new Set(await loadPendingSnapshotDeletes(syncDir));
+    const listedPaths = presentInFolder.size > 0 ? await listSnapshotPaths(syncDir, identity.deviceId) : null;
 
     let uploaded = 0;
     let uploadOk = true;
     const ordered = [...freshLocal].sort((a, b) => a.capturedAt - b.capturedAt);
     for (const snap of ordered) {
+      if (stillPendingDeleteSet.has(snap.id)) continue;
+      const indexed = presentInFolder.get(snap.id);
+      if (indexed && (await isSnapshotPublished(syncDir, identity.deviceId, indexed, snap, listedPaths))) continue;
       // Re-verify membership right before writing so a concurrent deletion is never resurrected.
       const currentLocalIds = new Set((await loadLocalSnapshots()).map((s) => s.id));
       if (!currentLocalIds.has(snap.id)) continue;
-      if (stillPendingDeleteSet.has(snap.id)) continue;
-      const indexed = presentInFolder.get(snap.id);
-      if (indexed && (await hasCompleteSnapshot(syncDir, identity.deviceId, indexed, snap))) continue;
       const ok = await pushSnapshotUnlocked(syncDir, identity, snap, now);
       if (ok) {
         uploaded++;
@@ -482,6 +483,36 @@ export async function syncPendingLocalSnapshots(
     }
     return { ok: deleteOk && pruneOk && uploadOk, uploaded, deleted };
   });
+}
+
+/** Non-empty snapshot files, or null when the listing exceeds Chrome's native message limit. */
+async function listSnapshotPaths(syncDir: string, deviceId: string): Promise<Set<string> | null> {
+  const listing = await syncListFilesResult(syncDir, deviceId, `devices/${deviceId}/snapshots`);
+  if (!listing.ok) return null;
+  return new Set(listing.files.filter(file => file.sizeBytes > 0).map(file => file.relPath));
+}
+
+function hasListedFiles(entry: SnapshotIndexEntry, paths: Set<string>): boolean {
+  const count = entry.partCount ?? 1;
+  return Number.isSafeInteger(count) && count >= 1 && count <= paths.size &&
+    snapshotEntryPaths(entry).every(path => paths.has(path));
+}
+
+/**
+ * Periodic sync runs every few minutes, so it trusts the listing instead of
+ * reading every published snapshot back from a cloud folder. A missing or empty
+ * part still triggers a re-upload.
+ */
+async function isSnapshotPublished(
+  syncDir: string,
+  deviceId: string,
+  indexed: SnapshotIndexEntry,
+  local: SessionSnapshot,
+  listedPaths: Set<string> | null,
+): Promise<boolean> {
+  if (!listedPaths) return hasCompleteSnapshot(syncDir, deviceId, indexed, local);
+  return isOwnedSnapshotRelPath(deviceId, indexed.relPath) && indexed.tabCount === local.tabs.length &&
+    hasListedFiles(indexed, listedPaths);
 }
 
 async function hasCompleteSnapshot(
@@ -562,16 +593,8 @@ export async function findDeviceSnapshotEntry(
   if (!candidates.length) return;
 
   // The index and the snapshot parts can arrive independently in a cloud folder.
-  const listing = await syncListFilesResult(syncDir, deviceId, `devices/${deviceId}/snapshots`);
-  if (listing.ok) {
-    const paths = new Set(listing.files.filter(file => file.sizeBytes > 0).map(file => file.relPath));
-    return candidates.find(entry => {
-      const count = entry.partCount ?? 1;
-      return Number.isSafeInteger(count) && count >= 1 && count <= paths.size &&
-        snapshotEntryPaths(entry).every(path => paths.has(path));
-    });
-  }
-  // A large directory listing can exceed Chrome's native message limit.
+  const paths = await listSnapshotPaths(syncDir, deviceId);
+  if (paths) return candidates.find(entry => hasListedFiles(entry, paths));
   for (const entry of candidates) {
     const saved = await readSnapshotFiles(syncDir, deviceId, entry.relPath);
     if (saved?.id === entry.id && saved.tabCount === entry.tabCount) return entry;
