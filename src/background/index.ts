@@ -11,6 +11,14 @@ import {
 import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabReaperConfig, TabSummary } from "../shared/types.ts";
 import { updateActionBadge } from "./badge.ts";
 import {
+  UPDATE_ALARM,
+  UPDATE_CHECK_PERIOD_MINUTES,
+  checkForUpdate,
+  dismissUpdateVersion,
+  getUpdateAvailable,
+  getUpdateStatus,
+} from "./update.ts";
+import {
   computeOpenTabActions,
   getMemoryBand,
   isTabProtected,
@@ -168,7 +176,7 @@ async function discardTabSafely(
     }
     if (plannedLastActiveAt !== undefined) {
       // A tab used during form inspection must be ranked again on the next pass.
-      const state = await loadActivityState();
+      const state = await loadActivityState({ includeUrlHistory: false });
       if (getTabLastActiveAt(state, live, 0) !== plannedLastActiveAt) return false;
     }
     await chrome.tabs.discard(tabId);
@@ -177,10 +185,54 @@ async function discardTabSafely(
 }
 
 async function ensureAlarm(): Promise<void> {
-  const existing = await chrome.alarms.get(SWEEP_ALARM);
-  if (!existing || existing.periodInMinutes !== SWEEP_PERIOD_MINUTES) {
+  const [existingSweep, existingUpdate] = await Promise.all([
+    chrome.alarms.get(SWEEP_ALARM),
+    chrome.alarms.get(UPDATE_ALARM),
+  ]);
+  if (!existingSweep || existingSweep.periodInMinutes !== SWEEP_PERIOD_MINUTES) {
     await chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_PERIOD_MINUTES });
   }
+  if (!existingUpdate || existingUpdate.periodInMinutes !== UPDATE_CHECK_PERIOD_MINUTES) {
+    await chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_CHECK_PERIOD_MINUTES });
+  }
+}
+
+const EVENT_SWEEP_COOLDOWN_MS = 5_000;
+let lastEventSweepAt = 0;
+
+async function maybeCheckForUpdate(force = false): Promise<void> {
+  if (!isBrowserOnline()) return;
+  const config = await loadConfig();
+  if (!config.checkForUpdates) return;
+  await checkForUpdate({ force });
+}
+
+async function refreshActionBadge(existingConfig?: TabReaperConfig): Promise<void> {
+  const config = existingConfig ?? (await loadConfig());
+  const online = isBrowserOnline();
+  const [tabs, memory, updateAvailable] = await Promise.all([
+    queryAllTabs(false),
+    getMemorySnapshot(config, Date.now()),
+    getUpdateAvailable(config.checkForUpdates),
+  ]);
+  const loadedCount = tabs.filter((t) => !t.discarded).length;
+  await updateActionBadge(
+    memory,
+    loadedCount,
+    online,
+    {
+      idleRatio: config.idleEvictionPercent / 100,
+      sizeRatio: config.sizeEvictionPercent / 100,
+    },
+    updateAvailable,
+  );
+}
+
+async function maybeRunEventSweep(): Promise<void> {
+  const now = Date.now();
+  if (now >= lastEventSweepAt && now - lastEventSweepAt < EVENT_SWEEP_COOLDOWN_MS) return;
+  lastEventSweepAt = now;
+  await runSweep("sweep", { periodic: false });
 }
 
 async function runSweep(
@@ -198,7 +250,7 @@ async function runSweep(
     let activity!: ActivityState;
 
     await enqueueActivityUpdate(async () => {
-      const loaded = await loadActivityState();
+      const loaded = await loadActivityState({ includeUrlHistory: mode === "startup" });
       activity =
         mode === "startup"
           ? reconcileActivityOnStartup(loaded, tabs, now)
@@ -221,7 +273,8 @@ async function runSweep(
       ? Math.min(MAX_MEMORY_EVICTIONS_PER_PASS, Math.max(0, MAX_DISCARDS_WITHOUT_RELIEF - episode.discards))
       : MAX_MEMORY_EVICTIONS_PER_PASS;
     const shouldSample = mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand && passLimit > 0;
-    const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms) : new Map();
+    // Size-band ranking only needs weights; discardTabSafely performs a fresh live form check before discarding.
+    const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms, false) : new Map();
 
     const evictions = planEvictions({
       tabs,
@@ -258,7 +311,8 @@ async function runSweep(
       idleRatio: config.idleEvictionPercent / 100,
       sizeRatio: config.sizeEvictionPercent / 100,
     };
-    await updateActionBadge(memory, loadedCount, online, badgeThresholds);
+    const updateAvailable = await getUpdateAvailable(config.checkForUpdates);
+    await updateActionBadge(memory, loadedCount, online, badgeThresholds, updateAvailable);
 
     if (mode === "sweep" && periodic && config.enableSessionSnapshots && (await isFolderSyncOptedIn())) {
       try {
@@ -278,18 +332,54 @@ async function runSweep(
   }
 }
 
-async function buildStatus(): Promise<StatusPayload> {
+async function buildStatus(includeTabs = true): Promise<StatusPayload> {
   const now = Date.now();
   const online = isBrowserOnline();
   const config = await loadConfig();
-  const [tabs, windows, memory, activity, snapshots, nativeMessaging, hostAccess] = await Promise.all([
+  const [tabs, memory, nativeMessaging, hostAccess, { updateAvailable, updateStatus }] = await Promise.all([
     queryAllTabs(false),
-    chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
     getMemorySnapshot(config, now),
-    loadActivityState(),
-    loadSnapshots(),
     hasNativeMessagingPermission(),
     hasHostAccessPermission(),
+    getUpdateStatus(config.checkForUpdates),
+  ]);
+
+  if (!includeTabs) {
+    let loadedCount = 0;
+    let discardedCount = 0;
+    for (const tab of tabs) {
+      if (tab.discarded) discardedCount++;
+      else loadedCount++;
+    }
+    await updateActionBadge(
+      memory,
+      loadedCount,
+      online,
+      {
+        idleRatio: config.idleEvictionPercent / 100,
+        sizeRatio: config.sizeEvictionPercent / 100,
+      },
+      updateAvailable,
+    );
+    return {
+      config,
+      memory,
+      online,
+      loadedCount,
+      discardedCount,
+      protectedCount: 0,
+      openTabs: [],
+      recoverableSnapshot: null,
+      updateAvailable,
+      updateStatus,
+      permissions: { nativeMessaging, hostAccess },
+    };
+  }
+
+  const [windows, activity, snapshots] = await Promise.all([
+    chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
+    loadActivityState({ includeUrlHistory: false }),
+    loadSnapshots(),
   ]);
 
   const windowById = new Map<number, chrome.windows.Window>();
@@ -355,10 +445,16 @@ async function buildStatus(): Promise<StatusPayload> {
     return a.idleMinutes - b.idleMinutes;
   });
 
-  await updateActionBadge(memory, loadedCount, online, {
-    idleRatio: config.idleEvictionPercent / 100,
-    sizeRatio: config.sizeEvictionPercent / 100,
-  });
+  await updateActionBadge(
+    memory,
+    loadedCount,
+    online,
+    {
+      idleRatio: config.idleEvictionPercent / 100,
+      sizeRatio: config.sizeEvictionPercent / 100,
+    },
+    updateAvailable,
+  );
 
   return {
     config,
@@ -369,6 +465,8 @@ async function buildStatus(): Promise<StatusPayload> {
     protectedCount,
     openTabs,
     recoverableSnapshot: await findRecoverableSnapshot(tabs, snapshots, now),
+    updateAvailable,
+    updateStatus,
     permissions: { nativeMessaging, hostAccess },
   };
 }
@@ -399,6 +497,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (isFreshInstall) {
     await chrome.runtime.openOptionsPage();
   }
+  void maybeCheckForUpdate().then(() => refreshActionBadge()).catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -413,6 +512,7 @@ chrome.runtime.onStartup.addListener(async () => {
     await saveActivityState(activity);
   }
   void runPeriodicSync(true);
+  void maybeCheckForUpdate().then(() => refreshActionBadge()).catch(() => {});
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
@@ -423,10 +523,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const url = tab.url ?? tab.pendingUrl;
     await activeCacheUpdate;
     await enqueueActivityUpdate(async () => {
-      const loaded = await loadActivityState();
+      const loaded = await loadActivityState({ includeUrlHistory: false });
       await saveActivityState(recordTabVisit(loaded, tabId, url, Date.now(), windowId), loaded);
     });
-    await runSweep("sweep", { periodic: false });
+    await maybeRunEventSweep();
   } catch {
     // Tab closed before lookup.
   }
@@ -438,13 +538,13 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const url = tab.url ?? tab.pendingUrl;
   const activeWindowId = tab.active ? tab.windowId : undefined;
   await enqueueActivityUpdate(async () => {
-    const [activity, keptIds] = await Promise.all([loadActivityState(), loadKeptTabIds()]);
+    const [activity, keptIds] = await Promise.all([loadActivityState({ includeUrlHistory: false }), loadKeptTabIds()]);
     const state = recordTabVisit(activity, tabId, url, Date.now(), activeWindowId);
     await saveActivityState(state, activity);
     const summary = toTabSummary(tab, keptIds);
     if (summary) await cacheWindowTabs([summary], true);
   });
-  await runSweep("sweep", { periodic: false });
+  await maybeRunEventSweep();
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -459,7 +559,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (tab.active) {
       const nextUrl = changeInfo.url;
       await enqueueActivityUpdate(async () => {
-        const loaded = await loadActivityState();
+        const loaded = await loadActivityState({ includeUrlHistory: false });
         await saveActivityState(recordTabVisit(loaded, tabId, nextUrl, Date.now(), tab.windowId), loaded);
       });
     }
@@ -521,6 +621,9 @@ if (chrome.windows?.onRemoved) {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === SWEEP_ALARM) {
     await runSweep("sweep");
+  } else if (alarm.name === UPDATE_ALARM) {
+    await maybeCheckForUpdate(true);
+    await refreshActionBadge();
   }
 });
 
@@ -542,7 +645,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage | string, sende
 async function handleMessage(message: BackgroundMessage): Promise<unknown> {
   switch (message.type) {
     case "get_status":
-      return buildStatus();
+      return buildStatus(message.includeTabs !== false);
     case "discard_tab":
       try {
         const config = await loadConfig();
@@ -582,7 +685,13 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     }
     case "discard_idle_now":
       return runSweep("sweep");
+    case "dismiss_update": {
+      await dismissUpdateVersion(message.version);
+      await refreshActionBadge();
+      return { ok: true };
+    }
     case "save_config": {
+      const previousConfig = await loadConfig();
       // Maintain identical lock order (configMutationQueue -> localSnapshotQueue) as pullConfigFromSync.
       const saved = await enqueueConfigMutation(async () => {
         const apply = async () => {
@@ -598,7 +707,15 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
           : apply();
       });
       if (await isFolderSyncOptedIn()) void syncConfig().catch(() => {});
-      await runSweep("sweep");
+      if (saved.checkForUpdates && !previousConfig.checkForUpdates) {
+        await maybeCheckForUpdate();
+      }
+      const changedKeys = Object.keys(message.config);
+      if (changedKeys.length === 1 && changedKeys[0] === "checkForUpdates") {
+        await refreshActionBadge(saved);
+      } else {
+        await runSweep("sweep");
+      }
       return { ok: true, config: saved };
     }
     case "get_snapshots":

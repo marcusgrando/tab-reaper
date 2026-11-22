@@ -108,32 +108,25 @@ function Get-ChromeExtensionId([string]$FolderPath) {
 }
 
 function Find-ChromiumBrowser {
-    $Candidates = @(
-        @{ Name = "Google Chrome"; Paths = @(
-            (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-            (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
-            (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-        )},
-        @{ Name = "Brave"; Paths = @(
-            (Join-Path $env:ProgramFiles "BraveSoftware\Brave-Browser\Application\brave.exe"),
-            (Join-Path ${env:ProgramFiles(x86)} "BraveSoftware\Brave-Browser\Application\brave.exe"),
-            (Join-Path $env:LOCALAPPDATA "BraveSoftware\Brave-Browser\Application\brave.exe")
-        )},
-        @{ Name = "Chromium"; Paths = @(
-            (Join-Path $env:LOCALAPPDATA "Chromium\Application\chrome.exe")
-        )}
+    $Bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $Specs = @(
+        @{ Name = "Google Chrome"; RelPath = "Google\Chrome\Application\chrome.exe" },
+        @{ Name = "Brave"; RelPath = "BraveSoftware\Brave-Browser\Application\brave.exe" },
+        @{ Name = "Chromium"; RelPath = "Chromium\Application\chrome.exe" }
     )
-    foreach ($Entry in $Candidates) {
-        foreach ($P in $Entry.Paths) {
-            if ($P -and (Test-Path $P)) {
-                return @{ Name = $Entry.Name; Path = $P }
+    foreach ($Spec in $Specs) {
+        foreach ($Base in $Bases) {
+            $Candidate = Join-Path $Base $Spec.RelPath
+            if (Test-Path $Candidate) {
+                return @{ Name = $Spec.Name; Path = $Candidate }
             }
         }
     }
     return $null
 }
 
-$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+$TmpDir = Join-Path $AppDir (".staging-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
 function Test-AssetChecksum([string]$SumsPath, [string]$AssetName, [string]$FilePath) {
@@ -175,7 +168,11 @@ try {
     Test-AssetChecksum $SumsPath "tab-reaper-extension.zip" $ZipPath
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
-    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    $HostAsset = "tab-reaper-host-windows-$WinArch.exe"
+    Write-Step "2/4" "Downloading Local Companion ($HostAsset) and verifying checksum..."
+    Invoke-WebRequest -Uri (Get-ReleaseUrl $HostAsset) -OutFile $HostTmpPath -UseBasicParsing
+    Test-AssetChecksum $SumsPath $HostAsset $HostTmpPath
+
     if (Test-Path $ExtDir) {
         Remove-Item -Path $ExtDir -Recurse -Force
     }
@@ -184,11 +181,15 @@ try {
     $ExtId = Get-ChromeExtensionId $ExtDir
     Write-Ok "Extension installed to $ExtDir"
 
-    $HostAsset = "tab-reaper-host-windows-$WinArch.exe"
-    Write-Step "2/4" "Installing Local Companion ($HostAsset)..."
-    Invoke-WebRequest -Uri (Get-ReleaseUrl $HostAsset) -OutFile $HostTmpPath -UseBasicParsing
-    Test-AssetChecksum $SumsPath $HostAsset $HostTmpPath
+    $OldBinPath = "$BinPath.old"
+    if (Test-Path $OldBinPath) {
+        Remove-Item -Path $OldBinPath -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $BinPath) {
+        Move-Item -Path $BinPath -Destination $OldBinPath -Force
+    }
     Move-Item -Path $HostTmpPath -Destination $BinPath -Force
+    Remove-Item -Path $OldBinPath -Force -ErrorAction SilentlyContinue
     Write-Ok "Local Companion installed to $BinPath"
 
     Write-Step "3/4" "Registering Local Companion with browsers..."

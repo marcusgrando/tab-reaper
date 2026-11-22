@@ -4,6 +4,13 @@ export const CONFIG_STORAGE_KEY = "tabReaper.config";
 export const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 export const SETUP_PENDING_KEY = "tabReaper.setupPending";
 
+export function buildQuickUpdateCommand(userAgent = typeof navigator !== "undefined" ? navigator.userAgent : ""): string {
+  if (/Windows/i.test(userAgent)) {
+    return "irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex";
+  }
+  return "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash";
+}
+
 export const DEFAULT_CONFIG: TabReaperConfig = {
   memoryBudgetMode: "fraction",
   memoryBudgetFraction: 0.5,
@@ -19,6 +26,7 @@ export const DEFAULT_CONFIG: TabReaperConfig = {
   enableSessionSnapshots: true,
   snapshotIntervalMinutes: 5,
   allowlist: [],
+  checkForUpdates: true,
 };
 
 const INTERNAL_SCHEMES = [
@@ -68,6 +76,7 @@ export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabRe
     enableSessionSnapshots: Boolean(merged.enableSessionSnapshots),
     snapshotIntervalMinutes,
     allowlist: [...new Set(allowlist)],
+    checkForUpdates: Boolean(merged.checkForUpdates),
   };
 }
 

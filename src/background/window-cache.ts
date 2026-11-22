@@ -30,12 +30,18 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+let sessionCacheKnownEmpty = false;
+
 export async function cacheWindowTabs(tabs: TabSummary[], inserted = false): Promise<void> {
   if (!(await isAutoSnapshotsActive())) {
-    await chrome.storage.session.remove(WINDOW_TABS_SESSION_KEY);
-    await chrome.storage.session.remove(WINDOW_ACTIVE_TABS_KEY);
+    if (!sessionCacheKnownEmpty) {
+      await chrome.storage.session.remove(WINDOW_TABS_SESSION_KEY);
+      await chrome.storage.session.remove(WINDOW_ACTIVE_TABS_KEY);
+      sessionCacheKnownEmpty = true;
+    }
     return;
   }
+  sessionCacheKnownEmpty = false;
   const [windows, metadata, groups] = await Promise.all([
     loadWindowTabs(),
     captureWindowMetadata(new Set(tabs.map((t) => t.windowId))),
@@ -91,6 +97,8 @@ async function loadActiveTabIds(): Promise<Record<string, number>> {
 }
 
 export async function updateCachedActiveTab(windowId: number, activeTabId: number): Promise<void> {
+  if (!(await isAutoSnapshotsActive())) return;
+  sessionCacheKnownEmpty = false;
   const activeByWindow = await loadActiveTabIds();
   if (activeByWindow[String(windowId)] === activeTabId) return;
   activeByWindow[String(windowId)] = activeTabId;

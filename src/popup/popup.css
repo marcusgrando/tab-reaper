@@ -8,7 +8,7 @@ body {
   font-size: 13px;
 }
 header { background: var(--navy); color: var(--on-navy); }
-.masthead, .memory-line, .stats, footer, .recovery-banner, .recovery-choice {
+.masthead, .memory-line, .stats, footer, .recovery-banner, .recovery-choice, .update-banner, .update-actions {
   display: flex;
   align-items: center;
 }
@@ -91,10 +91,15 @@ header { background: var(--navy); color: var(--on-navy); }
 .section-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 [role="group"] + [role="group"] { margin-top: 6px; }
 .empty { padding: 22px 12px; text-align: center; }
-.recovery-banner, .action-status { padding: 8px 14px; background: var(--tint); }
-.recovery-banner { gap: 8px; flex-wrap: wrap; justify-content: space-between; }
+.recovery-banner, .update-banner, .action-status { padding: 8px 14px; background: var(--tint); }
+.recovery-banner, .update-banner { gap: 8px; flex-wrap: wrap; justify-content: space-between; }
+.update-banner { border-bottom: 1px solid var(--line); }
+.update-text { font-weight: 550; }
+.update-text a { color: var(--accent); font-weight: 650; text-decoration: none; }
+.update-text a:hover { text-decoration: underline; }
+.update-actions { gap: 4px; }
 .recovery-choice { gap: 5px; flex-wrap: wrap; }
-.recovery-banner, .action-status, footer, .search-wrap, header { flex-shrink: 0; }
+.recovery-banner, .update-banner, .action-status, footer, .search-wrap, header { flex-shrink: 0; }
 footer { padding: 10px 14px; background: var(--canvas); border-top: 1px solid var(--line); }
 footer button { font-size: 12px; }
 footer .icon { width: 15px; height: 15px; }

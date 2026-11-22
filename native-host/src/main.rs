@@ -45,7 +45,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|a| a == "--once") {
         match collect_memory_report() {
-            Ok(report) => println!("{}", memory_report_json(&report)),
+            Ok(report) => println!("{}", self_test_json(&report)),
             Err(err) => {
                 eprintln!("{}", format_error_json(&err));
                 std::process::exit(1);
@@ -159,6 +159,18 @@ fn sync_status_json(status: sync::SyncStatus) -> serde_json::Value {
         "syncDir": status.sync_dir,
         "writable": status.writable,
         "hostname": status.hostname,
+    })
+}
+
+fn self_test_json(r: &MemoryReport) -> serde_json::Value {
+    json!({
+        "ok": true,
+        "version": HOST_VERSION,
+        "platform": env::consts::OS,
+        "hostname": sync::get_hostname(),
+        "systemTotalBytes": r.system_total_bytes,
+        "systemAvailableBytes": r.system_available_bytes,
+        "metric": r.metric,
     })
 }
 

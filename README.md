@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Everything runs locally on your machine. No accounts, no telemetry, no external servers. See <a href="PRIVACY.md">PRIVACY.md</a>.
+  Everything runs locally on your machine. No accounts, no telemetry. Only an optional daily check to GitHub Releases notifies you of new versions. See <a href="PRIVACY.md">PRIVACY.md</a>.
 </p>
 
 ## Preview
@@ -40,7 +40,7 @@ Tab Reaper is installed with a guided one-command installer that sets up both th
   irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex
   ```
 
-Pass `--yes` (`-Yes` on Windows) to run without interactive prompts.
+For non-interactive installs, pass `--yes` on macOS/Linux (`curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash -s -- --yes`) or `-Yes` on Windows (`& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1))) -Yes`).
 
 ### 2. Load the extension in Chrome (one-time)
 

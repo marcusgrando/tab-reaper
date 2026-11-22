@@ -231,6 +231,25 @@
             <button id="btn-host-perm" type="button">Enable</button>
           </div>
         </div>
+
+        <div class="cap-row">
+          <div>
+            <strong>Automatic update checks</strong>
+            <p class="hint">
+              Checks GitHub Releases once a day for a newer version and shows an update banner with the install command. No personal data is sent.
+            </p>
+            <div class="checkbox-row" style="border-top: 0; min-height: 32px; padding: 0;">
+              <label class="checkbox">
+                <input id="check-updates" type="checkbox" />
+                <span>Notify when a new version is available</span>
+              </label>
+            </div>
+            <div id="update-check-status" class="status-text" role="status"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-copy-update-opt" type="button" class="secondary small hidden">Copy update command</button>
+          </div>
+        </div>
       </section>
 
       <section id="sync-card">

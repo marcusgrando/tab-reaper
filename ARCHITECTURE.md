@@ -154,6 +154,7 @@ All values are user-configurable on the Options page:
 | `enableSessionSnapshots` | `true` | Automatic session snapshots (active only when Folder Sync is configured) |
 | `snapshotIntervalMinutes` | `5` | Automatic snapshot interval in minutes (`1` to `1440`, configurable under Folder Sync) |
 | `allowlist` | `[]` | Domains or glob patterns excluded from discard |
+| `checkForUpdates` | `true` | Daily read-only check against GitHub Releases for newer versions |
 
 ## Project Layout
 
@@ -174,12 +175,14 @@ tab-reaper/
 │   │   ├── session.ts        # Session snapshot capture and restore
 │   │   ├── window-cache.ts   # Session-storage window cache for window-close recovery
 │   │   ├── badge.ts          # Extension toolbar badge state and formatting
+│   │   ├── update.ts         # Daily GitHub Releases update check, ETag cache, and dismissal
 │   │   ├── tracker.ts        # Persistent lastActiveAt and kept-tab tracking across restarts
 │   │   ├── sync.ts           # Folder Sync barrel exports
 │   │   └── sync/
 │   │       ├── client.ts     # Native host Folder Sync RPC client and device identity
 │   │       ├── config.ts     # Deterministic multi-device config sync
 │   │       └── snapshots.ts  # Snapshot upload, sharded index, and GFS retention
+│   ├── content/              # Isolated-world form edit observer (`form-observer.ts`)
 │   ├── popup/                # Open-tabs command palette UI (keyboard-first search & stats)
 │   ├── options/              # Configuration and Folder Sync UI
 │   └── shared/               # Types, config defaults, URL normalization

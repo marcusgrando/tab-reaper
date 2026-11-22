@@ -42,6 +42,12 @@ test("cached form protection follows live frame results while weight metrics kee
     inspections.length = 0;
     expect((await sampleTabWeights([tab], 1100, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
     expect(inspections).toEqual([]);
+    // With refreshFormState=false, cached dirty tabs stay eligible for size-band ranking without probing frames,
+    // while keeping the cached dirty flag intact as fallback for checkTabHasUnsavedForm.
+    cache["tabReaper.weightSamples"][1] = { ...metrics, hasUnsavedForm: true };
+    expect((await sampleTabWeights([tab], 1100, true, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
+    expect(inspections).toEqual([]);
+    expect(cache["tabReaper.weightSamples"][1].hasUnsavedForm).toBe(true);
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }

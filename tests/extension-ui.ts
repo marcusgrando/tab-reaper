@@ -133,6 +133,26 @@ try {
     return active?.url === "https://work.example.test/3" && !active.discarded;
   });
 
+  // Update banner appears in the popup when a newer release is cached and hides after dismissal.
+  await worker.evaluate(() => chrome.storage.local.set({
+    "tabReaper.updateState": {
+      checkedAt: Date.now(),
+      latestVersion: "99.0.0",
+      releaseUrl: "https://github.com/marcusgrando/tab-reaper/releases/tag/v99.0.0",
+    },
+  }));
+  const updatePopup = await context.newPage();
+  await updatePopup.setViewportSize({ width: 580, height: 600 });
+  await updatePopup.goto(new URL("popup.html", worker.url()).href);
+  await updatePopup.locator("#update-banner").waitFor({ state: "visible" });
+  assert.equal(await updatePopup.locator("#update-link").innerText(), "v99.0.0");
+  await updatePopup.locator("#btn-dismiss-update").click();
+  assert.ok(await updatePopup.locator("#update-banner").isHidden());
+  await updatePopup.reload();
+  await updatePopup.locator(".tab-item").first().waitFor();
+  assert.ok(await updatePopup.locator("#update-banner").isHidden(), "Dismissed update banner must stay hidden");
+  await updatePopup.close();
+
   console.log("Settings and tab palette passed in Chromium.");
 } finally {
   await context.close();

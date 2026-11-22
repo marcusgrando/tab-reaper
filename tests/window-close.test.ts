@@ -223,7 +223,7 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
     calls.length = 0;
     await listeners.alarm!({ name: "tabReaper.sweep" });
     await Bun.sleep(0);
-    expect(alarms).toEqual([0.5]);
+    expect(alarms).toEqual([0.5, 1440]);
     expect(calls).toEqual(["chrome_memory"]);
 
     // Re-register listeners as Chrome does when it wakes a new service worker.

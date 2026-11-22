@@ -1,4 +1,4 @@
-import type { MemorySnapshot } from "../shared/types.ts";
+import type { MemorySnapshot, UpdateAvailableInfo } from "../shared/types.ts";
 import { IDLE_EVICTION_MEMORY_THRESHOLD, SIZE_EVICTION_MEMORY_THRESHOLD, getMemoryBand } from "./eviction.ts";
 
 export interface BadgeDisplay {
@@ -24,6 +24,7 @@ export function computeBadge(
   loadedCount: number,
   isOnline: boolean,
   thresholds?: { idleRatio?: number; sizeRatio?: number },
+  updateAvailable?: UpdateAvailableInfo | null,
 ): BadgeDisplay {
   if (!isOnline) {
     return { text: "OFF", color: COLOR_OFFLINE };
@@ -35,6 +36,10 @@ export function computeBadge(
     thresholds?.sizeRatio ?? SIZE_EVICTION_MEMORY_THRESHOLD,
   );
   const color = band === "size" ? COLOR_OVER : band === "idle" ? COLOR_WARN : COLOR_OK;
+
+  if (updateAvailable) {
+    return { text: "UP", color };
+  }
 
   if (memory?.source === "native_host") {
     return { text: formatCompactBytes(memory.usedBytes), color };
@@ -48,14 +53,19 @@ export async function updateActionBadge(
   loadedCount: number,
   isOnline: boolean,
   thresholds?: { idleRatio?: number; sizeRatio?: number },
+  updateAvailable?: UpdateAvailableInfo | null,
 ): Promise<void> {
   if (!chrome.action?.setBadgeText) return;
-  const badge = computeBadge(memory, loadedCount, isOnline, thresholds);
+  const badge = computeBadge(memory, loadedCount, isOnline, thresholds, updateAvailable);
+  const title = updateAvailable
+    ? `Tab Reaper — Update available: v${updateAvailable.latestVersion}`
+    : "Tab Reaper";
   try {
     await Promise.all([
       chrome.action.setBadgeText({ text: badge.text }),
       chrome.action.setBadgeBackgroundColor({ color: badge.color }),
       chrome.action.setBadgeTextColor?.({ color: "#ffffff" }),
+      chrome.action.setTitle?.({ title }),
     ]);
   } catch {
     // Ignore transient badge update failures during browser shutdown.

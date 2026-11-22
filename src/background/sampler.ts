@@ -34,6 +34,7 @@ export async function sampleTabWeights(
   tabs: TabSummary[],
   now = Date.now(),
   protectUnsavedForms = true,
+  refreshFormState = true,
 ): Promise<Map<number, TabWeightSample>> {
   const weights = new Map<number, TabWeightSample>();
   if (tabs.length === 0) return weights;
@@ -50,15 +51,19 @@ export async function sampleTabWeights(
     let sample: TabWeightSample | null;
     if (cached && now - cached.sampledAt < SAMPLE_TTL_MS) {
       sample = cached;
-      const dirty = protectUnsavedForms ? await inspectFormState(tab.id) : false;
-      if (dirty !== undefined && dirty !== cached.hasUnsavedForm) {
-        sample = { ...cached, hasUnsavedForm: dirty };
+      if (refreshFormState) {
+        const dirty = protectUnsavedForms ? await inspectFormState(tab.id) : false;
+        if (dirty !== undefined && dirty !== cached.hasUnsavedForm) {
+          sample = { ...cached, hasUnsavedForm: dirty };
+        }
       }
     } else {
       sample = await sampleSingleTab(tab.id, now, protectUnsavedForms);
     }
     if (!sample) return;
-    weights.set(tab.id, sample);
+    // When refreshFormState is false, clear stale cached form flags in the returned map so
+    // planEvictions still ranks the tab by weight and lets discardTabSafely run the live form check.
+    weights.set(tab.id, !refreshFormState && sample === cached ? { ...sample, hasUnsavedForm: false } : sample);
     if (sample !== cached) {
       cache[key] = sample;
       cacheChanged = true;

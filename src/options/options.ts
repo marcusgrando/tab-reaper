@@ -3,6 +3,7 @@ import {
   MAX_DISCARDS_WITHOUT_RELIEF,
   REOPEN_OPTIONS_KEY,
   SETUP_PENDING_KEY,
+  buildQuickUpdateCommand,
   computeMemoryBudgetBytes,
   sanitizeConfig,
 } from "../shared/config.ts";
@@ -37,6 +38,9 @@ const protectForms = document.getElementById("protect-forms") as HTMLInputElemen
 const skipOffline = document.getElementById("skip-offline") as HTMLInputElement;
 const enableSnapshots = document.getElementById("enable-snapshots") as HTMLInputElement;
 const snapshotIntervalMinutes = document.getElementById("snapshot-interval-minutes") as HTMLInputElement;
+const checkUpdates = document.getElementById("check-updates") as HTMLInputElement;
+const updateCheckStatus = document.getElementById("update-check-status") as HTMLElement;
+const btnCopyUpdateOpt = document.getElementById("btn-copy-update-opt") as HTMLButtonElement;
 const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
 const saveStatus = document.getElementById("save-status") as HTMLElement;
 
@@ -140,7 +144,7 @@ function renderMemoryMode(): void {
 }
 
 async function refreshMemoryMode(): Promise<void> {
-  const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+  const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
   lastMemory = status.memory;
   renderMemoryMode();
 }
@@ -253,11 +257,12 @@ const fieldSpecs: FieldSpecs = {
     `${DEFAULT_CONFIG.snapshotIntervalMinutes} min`,
   ),
   allowlist: linesField(allowlist, DEFAULT_CONFIG.allowlist),
+  checkForUpdates: boolField(checkUpdates, DEFAULT_CONFIG.checkForUpdates),
 };
 
 const FIELD_KEYS = Object.keys(fieldSpecs) as ConfigKey[];
-const SNAPSHOT_FIELD_KEYS = new Set<ConfigKey>(["enableSessionSnapshots", "snapshotIntervalMinutes"]);
-const MAIN_FORM_KEYS = FIELD_KEYS.filter((key) => !SNAPSHOT_FIELD_KEYS.has(key));
+const INSTANT_SAVE_KEYS = new Set<ConfigKey>(["enableSessionSnapshots", "snapshotIntervalMinutes", "checkForUpdates"]);
+const MAIN_FORM_KEYS = FIELD_KEYS.filter((key) => !INSTANT_SAVE_KEYS.has(key));
 
 function isConfigKey(key: string | undefined): key is ConfigKey {
   return key !== undefined && key in fieldSpecs;
@@ -492,7 +497,7 @@ async function applySyncFolder(path: string | null): Promise<void> {
   if (res?.ok) {
     await Promise.all([refreshSyncUI(), refreshSnapshotsUI()]);
     if (path) {
-      const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+      const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
       populateForm(status.config);
     }
   } else {
@@ -739,16 +744,65 @@ async function init(): Promise<void> {
   setupShortcutEl.textContent = /Mac/i.test(navigator.platform) ? "Option+Shift+K" : "Alt+Shift+K";
   const [storedSetup, status] = await Promise.all([
     chrome.storage.local.get(SETUP_PENDING_KEY),
-    chrome.runtime.sendMessage({ type: "get_status" }) as Promise<StatusPayload>,
+    chrome.runtime.sendMessage({ type: "get_status", includeTabs: false }) as Promise<StatusPayload>,
   ]);
   if (storedSetup[SETUP_PENDING_KEY] || new URLSearchParams(location.search).get("setup") === "1") {
     setupVisible = true;
   }
   lastMemory = status.memory;
   populateForm(status.config);
+  renderUpdateCheckStatus(status);
   await Promise.all([refreshPermissionsUI(), refreshSyncUI(), refreshSnapshotsUI()]);
   renderSetupCard();
 }
+
+function renderUpdateCheckStatus(status: StatusPayload): void {
+  const version = chrome.runtime.getManifest().version;
+  if (!status.config.checkForUpdates) {
+    updateCheckStatus.textContent = `Automatic checks are off (installed v${version}).`;
+    updateCheckStatus.className = "status-text";
+    btnCopyUpdateOpt.classList.add("hidden");
+    return;
+  }
+  const latest = status.updateAvailable?.latestVersion ?? status.updateStatus?.latestVersion ?? null;
+  if (latest) {
+    const dismissedNote = status.updateStatus?.dismissed ? " · popup banner dismissed" : "";
+    updateCheckStatus.textContent = `Update available: v${latest} (installed v${version}${dismissedNote}).`;
+    updateCheckStatus.className = "status-text ok";
+    btnCopyUpdateOpt.classList.remove("hidden");
+  } else if (status.updateStatus && status.updateStatus.checkedAt === null) {
+    updateCheckStatus.textContent = `Update check pending (installed v${version}).`;
+    updateCheckStatus.className = "status-text";
+    btnCopyUpdateOpt.classList.add("hidden");
+  } else {
+    updateCheckStatus.textContent = `Up to date (v${version}).`;
+    updateCheckStatus.className = "status-text";
+    btnCopyUpdateOpt.classList.add("hidden");
+  }
+}
+
+checkUpdates.addEventListener("change", async () => {
+  const res = (await chrome.runtime.sendMessage({
+    type: "save_config",
+    config: { checkForUpdates: checkUpdates.checked },
+  })) as { ok: boolean; config: TabReaperConfig };
+  if (res?.ok) {
+    const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
+    renderUpdateCheckStatus(status);
+  }
+});
+
+btnCopyUpdateOpt.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(buildQuickUpdateCommand());
+    btnCopyUpdateOpt.textContent = "Copied";
+    setTimeout(() => {
+      btnCopyUpdateOpt.textContent = "Copy update command";
+    }, 1800);
+  } catch {
+    btnCopyUpdateOpt.textContent = "Copy failed";
+  }
+});
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
 form.addEventListener("input", syncResetButtons);
@@ -949,7 +1003,7 @@ btnSyncNow.addEventListener("click", async () => {
     syncStatusEl.className = "status-text err";
   }
   if (res?.configUpdated) {
-    const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+    const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
     populateForm(status.config);
   }
   btnSyncNow.disabled = false;

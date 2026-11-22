@@ -23,6 +23,21 @@ export interface TabReaperConfig {
   snapshotIntervalMinutes: number;
   /** Domain or glob patterns excluded from discard. */
   allowlist: string[];
+  /** Check GitHub Releases daily for a newer Tab Reaper version. */
+  checkForUpdates: boolean;
+}
+
+export interface UpdateAvailableInfo {
+  latestVersion: string;
+  currentVersion: string;
+  releaseUrl: string;
+}
+
+export interface UpdateCheckStatus {
+  checkedAt: number | null;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+  dismissed: boolean;
 }
 
 export interface TabActivityRecord {
@@ -196,6 +211,8 @@ export interface StatusPayload {
   protectedCount: number;
   openTabs: OpenTabInfo[];
   recoverableSnapshot: { id: string; capturedAt: number; tabCount: number; windowCount?: number; relPath?: string } | null;
+  updateAvailable: UpdateAvailableInfo | null;
+  updateStatus?: UpdateCheckStatus;
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
@@ -203,7 +220,7 @@ export interface StatusPayload {
 }
 
 export type BackgroundMessage =
-  | { type: "get_status" }
+  | { type: "get_status"; includeTabs?: boolean }
   | { type: "discard_tab"; tabId: number }
   | { type: "toggle_keep_tab"; tabId: number }
   | { type: "close_tab"; tabId: number }
@@ -220,4 +237,5 @@ export type BackgroundMessage =
   | { type: "pick_sync_folder" }
   | { type: "set_sync_folder"; path: string | null }
   | { type: "set_device_name"; deviceName: string }
-  | { type: "sync_now" };
+  | { type: "sync_now" }
+  | { type: "dismiss_update"; version: string };

@@ -213,10 +213,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-export async function loadActivityState(): Promise<ActivityState> {
-  const result = await chrome.storage.local.get([ACTIVITY_STORAGE_KEY, URL_HISTORY_STORAGE_KEY]);
+export async function loadActivityState(options?: { includeUrlHistory?: boolean }): Promise<ActivityState> {
+  const includeUrlHistory = options?.includeUrlHistory ?? true;
+  const keys = includeUrlHistory ? [ACTIVITY_STORAGE_KEY, URL_HISTORY_STORAGE_KEY] : [ACTIVITY_STORAGE_KEY];
+  const result = await chrome.storage.local.get(keys);
   const raw = result[ACTIVITY_STORAGE_KEY] as Partial<ActivityState> | undefined;
-  const storedByUrl = result[URL_HISTORY_STORAGE_KEY];
+  const storedByUrl = includeUrlHistory ? result[URL_HISTORY_STORAGE_KEY] : undefined;
   const byUrl = isRecord(storedByUrl) ? storedByUrl : {};
   if (!isRecord(raw)) {
     return { ...createEmptyActivityState(), byUrl: byUrl as ActivityState["byUrl"] };
