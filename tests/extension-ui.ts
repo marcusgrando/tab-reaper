@@ -16,14 +16,19 @@ try {
   await options.getByRole("link", { name: "Protections", exact: true }).click();
   assert.equal(new URL(options.url()).hash, "#protections");
 
-  await options.locator("#memory-mode").selectOption("fixed_gb");
-  assert.ok(await options.locator("#memory-gb").isVisible());
-  await options.locator("#memory-gb").fill("512");
+  // Without the Local Companion there is no Chrome budget: Settings shows the pressure thresholds instead.
+  await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
+  assert.ok(await options.locator("#budget-fields").isHidden());
+  assert.match(await options.locator("#memory-now").innerText(), /drops to \d+ MB/);
+
+  const startupSweep = options.locator("#startup-sweep");
+  const startupBefore = await startupSweep.isChecked();
+  await startupSweep.setChecked(!startupBefore);
   await options.getByRole("button", { name: "Save settings", exact: true }).click();
   await options.locator("#save-status.ok").waitFor();
   await options.reload();
-  await options.locator("#fixed-gb-wrap").waitFor();
-  assert.equal(await options.locator("#memory-mode").inputValue(), "fixed_gb");
+  await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
+  assert.equal(await startupSweep.isChecked(), !startupBefore);
 
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -54,6 +59,8 @@ try {
   await popup.setViewportSize({ width: 800, height: 600 });
   await popup.goto(new URL("popup.html", worker.url()).href);
   await popup.locator(".tab-item").first().waitFor();
+  assert.match(await popup.locator("#memory-badge").innerText(), /^(Normal|Moderate|Critical) · [\d.]+ GB free$/);
+  assert.ok(await popup.locator(".bar-track").isHidden());
   const search = popup.getByRole("combobox", { name: "Search open tabs" });
   await search.fill("no matching tab");
   assert.ok(await popup.locator(".empty").isVisible());

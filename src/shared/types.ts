@@ -47,6 +47,7 @@ export interface TabWeightSample {
 }
 
 export type MemorySource = "native_host" | "system_memory";
+export type MemoryPressure = "normal" | "moderate" | "critical";
 
 export interface MemorySnapshot {
   source: MemorySource;
@@ -58,6 +59,13 @@ export interface MemorySnapshot {
   processCount?: number;
   metric?: string;
   overBudget: boolean;
+  /**
+   * Set only for system_memory. Without the Local Companion, eviction follows
+   * system memory pressure instead of the budget. Thresholds are free bytes at or
+   * below which each level starts. Null thresholds mean memory-based eviction is off.
+   */
+  pressure?: MemoryPressure;
+  pressureThresholds?: { moderateBytes: number; criticalBytes: number } | null;
   checkedAt: number;
 }
 

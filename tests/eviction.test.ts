@@ -380,6 +380,47 @@ describe("eviction engine", () => {
   });
 });
 
+describe("system memory pressure bands", () => {
+  const systemMemory = (pressure: MemorySnapshot["pressure"]): MemorySnapshot => ({
+    source: "system_memory",
+    // Usage far above the budget must not matter without the Local Companion.
+    usedBytes: 7 * 1024 ** 3,
+    budgetBytes: 4 * 1024 ** 3,
+    systemTotalBytes: 8 * 1024 ** 3,
+    systemAvailableBytes: 1024 ** 3,
+    overBudget: false,
+    pressure,
+    checkedAt: 0,
+  });
+  const now = 1_700_000_000_000;
+  const tabs = [makeTab(1), makeTab(2), makeTab(3)];
+  let activity = createEmptyActivityState();
+  activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 3_000);
+  activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 1_000);
+  activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 2_000);
+  const weights = new Map([[2, { jsHeapBytes: 900, weightMultiplier: 1, sampledAt: now } as TabWeightSample]]);
+  const plan = (memory: MemorySnapshot) =>
+    planEvictions({ tabs, activity, weights, config: sanitizeConfig({}), memory, now, mode: "sweep" }).map(tab => tab.id);
+
+  test("normal pressure keeps every tab loaded", () => {
+    expect(plan(systemMemory("normal"))).toEqual([]);
+  });
+
+  test("moderate pressure sleeps the least recently used tabs", () => {
+    expect(plan(systemMemory("moderate"))).toEqual([1, 3]);
+  });
+
+  test("critical pressure sleeps the heaviest tabs first", () => {
+    expect(plan(systemMemory("critical"))[0]).toBe(2);
+  });
+
+  test("the badge color follows pressure, not the budget", () => {
+    expect(computeBadge(systemMemory("normal"), 3, true).color).toBe("#16a34a");
+    expect(computeBadge(systemMemory("moderate"), 3, true).color).toBe("#d97706");
+    expect(computeBadge(systemMemory("critical"), 3, true).color).toBe("#dc2626");
+  });
+});
+
 describe("action badge", () => {
   test("formats Chrome RAM badge and color thresholds aligned with eviction bands", () => {
     const okMem: MemorySnapshot = {

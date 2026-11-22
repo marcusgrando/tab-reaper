@@ -10,7 +10,7 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 
 | Requirement | Mechanism | Status | Hard Platform Limit |
 | --- | --- | --- | --- |
-| Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `proc_pid_rusage` `phys_footprint` (macOS, matching Activity Monitor), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** `chrome.system.memory` OS pressure (`availableCapacity`). | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
+| Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `proc_pid_rusage` `phys_footprint` (macOS, matching Activity Monitor), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** system memory pressure from `chrome.system.memory` `availableCapacity`, with per-OS thresholds and no budget. | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
 | Memory-banded discarding (`idleEvictionPercent` / `sizeEvictionPercent`, defaults `80%` / `100%`) | Periodic `chrome.alarms` sweep and event-driven checks using `chrome.tabs.discard()`. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
 | Evict heaviest tabs first at the configured size threshold | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) and disabled Weighted Eviction fall back to oldest idle first. |
 | Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Only profiles with page access and form protection enabled register an edit observer. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
@@ -36,7 +36,7 @@ An eviction sweep runs on:
 - `chrome.alarms` every 30 seconds (memory budget check)
 - Tab creation and activation (memory check only, with no scheduled backup or folder sync)
 
-Periodic sweeps evaluate memory usage as a percentage of `memoryBudgetBytes`:
+With the Native Host, periodic sweeps evaluate Chrome's memory as a percentage of `memoryBudgetBytes`. Without it, the bands follow system memory pressure (see Memory Measurement Modes):
 
 1. **Below `idleEvictionPercent` (default `80%`) of budget:** No background tabs are discarded by periodic sweeps.
 2. **From `idleEvictionPercent` up to but excluding `sizeEvictionPercent` (defaults 80% and 100%).** Each pass discards up to two eligible tabs in least-recently-used order, regardless of how recently they were used.
@@ -54,10 +54,13 @@ Chrome Memory Saver offers three levels with different inactivity periods. Tab R
    - Extension calls `chrome.runtime.sendNativeMessage('com.tabreaper.host', { cmd: 'chrome_memory' })`.
    - Native host sums the memory of the browser that launched it: its parent process (past the `cmd.exe` Chrome interposes on Windows) and every descendant, excluding the host. Not by process name, because that also counts Canary, Chrome for Testing and other Chromium browsers. When the launching browser cannot be determined it returns `ok: false` and the extension uses the fallback below. Per-process metric: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set (Windows `K32GetProcessMemoryInfo`), and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
    - Budget percentage is `chromeBytes / memoryBudgetBytes`.
-2. **OS Pressure Fallback (Pure Extension):**
-   - Extension calls `chrome.system.memory.getInfo()`.
-   - Compares `osUsedBytes = capacity - availableCapacity` against `memoryBudgetBytes`.
-   - UI clearly indicates whether it is running in **Exact (Native Host)** or **System Memory (Extension-only)** mode.
+2. **System memory pressure (extension only):**
+   - Extension calls `chrome.system.memory.getInfo()`. `availableCapacity` is a different metric on each OS, so the thresholds are absolute free bytes per OS from `chrome.runtime.getPlatformInfo()`, not a share of the budget.
+   - Windows uses Chrome's own default pressure thresholds on the same value (moderate at 1000 MiB, critical at 400 MiB). macOS leaves inactive and compressible pages out of `availableCapacity`, so a healthy 8 GiB Mac reports under 1 GiB. It uses 800/400 MiB as an approximation of the kernel pressure levels, which only native code can read. Linux uses 10% of RAM for moderate and 5% or 200 MiB for critical, following Firefox's low-memory rule. ChromeOS discards tabs under pressure itself, so memory-based eviction is off there.
+   - Moderate pressure is the least-recently-used band and critical pressure is the size band. The budget and the band percentages do not apply.
+   - Other apps can hold the memory, so discards may not relieve pressure. A pressure episode, kept in `chrome.storage.session`, allows four discards until free memory rises 128 MiB above the episode's baseline, and resets when pressure ends.
+   - Not the budget against system-wide use: on an 8 GiB Mac that put nearly every background tab to sleep, because the OS normally uses more than 40% of RAM.
+   - Settings and the palette show only what applies to the current mode, with live numbers.
 
 ### Weighted Eviction
 

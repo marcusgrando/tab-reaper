@@ -1,4 +1,4 @@
-import type { OpenTabInfo, RestoreMode, StatusPayload } from "../shared/types.ts";
+import type { MemoryPressure, OpenTabInfo, RestoreMode, StatusPayload } from "../shared/types.ts";
 
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const listEl = document.getElementById("tab-list") as HTMLElement;
@@ -24,6 +24,8 @@ let openTabs: OpenTabInfo[] = [];
 let visibleTabs: OpenTabInfo[] = [];
 let rows: HTMLElement[] = [];
 let selectedIndex = 0;
+
+const PRESSURE_LABELS: Record<MemoryPressure, string> = { normal: "Normal", moderate: "Moderate", critical: "Critical" };
 
 function formatGb(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
@@ -96,18 +98,21 @@ async function refreshStatus(): Promise<StatusPayload> {
     recoveryBanner.classList.add("hidden");
   }
 
-  if (status.memory) {
-    const modeLabel =
-      status.memory.source === "native_host"
-        ? status.memory.metric === "pss"
-          ? "Chrome PSS"
-          : "Chrome RAM"
-        : "System RAM";
+  if (status.memory?.source === "system_memory") {
+    // Without the Local Companion there is no budget to fill, only the system's pressure level.
+    const pressure = status.memory.pressure ?? "normal";
+    memorySource.textContent = status.online ? "System memory" : "System memory (offline)";
+    memoryBadge.textContent = `${PRESSURE_LABELS[pressure]} · ${formatGb(status.memory.systemAvailableBytes)} free`;
+    memoryBadge.classList.toggle("over", pressure === "critical");
+    memoryBar.parentElement?.classList.add("hidden");
+  } else if (status.memory) {
+    const modeLabel = status.memory.metric === "pss" ? "Chrome PSS" : "Chrome RAM";
     memorySource.textContent = status.online ? modeLabel : `${modeLabel} (offline)`;
     memoryBadge.textContent = `${formatGb(status.memory.usedBytes)} / ${formatGb(status.memory.budgetBytes)} budget`;
     memoryBadge.classList.toggle("over", status.memory.overBudget);
 
     const pct = Math.min(100, Math.round((status.memory.usedBytes / Math.max(1, status.memory.budgetBytes)) * 100));
+    memoryBar.parentElement?.classList.remove("hidden");
     memoryBar.style.width = `${pct}%`;
     memoryBar.classList.toggle("over", status.memory.overBudget);
   } else {

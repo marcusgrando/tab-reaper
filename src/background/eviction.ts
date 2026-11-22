@@ -17,6 +17,25 @@ export const SIZE_EVICTION_MEMORY_THRESHOLD = 1.0;
  */
 export const MAX_MEMORY_EVICTIONS_PER_PASS = 2;
 
+/** "idle" sleeps least recently used tabs. "size" sleeps the heaviest tabs first when weights exist. */
+export type MemoryBand = "normal" | "idle" | "size";
+
+/**
+ * With the Local Companion, bands come from Chrome's RAM against the budget.
+ * Without it, system-wide use says nothing about Chrome, so bands follow system
+ * memory pressure and the budget percentages do not apply.
+ */
+export function getMemoryBand(memory: MemorySnapshot | null, idleRatio: number, sizeRatio: number): MemoryBand {
+  if (!memory) return "normal";
+  if (memory.source === "system_memory") {
+    if (memory.pressure === "critical") return "size";
+    return memory.pressure === "moderate" ? "idle" : "normal";
+  }
+  const usageRatio = memory.budgetBytes > 0 ? memory.usedBytes / memory.budgetBytes : 0;
+  if (memory.overBudget || usageRatio >= Math.max(idleRatio, sizeRatio)) return "size";
+  return usageRatio >= idleRatio ? "idle" : "normal";
+}
+
 export function getTabProtectedReason(
   tab: TabSummary,
   config: TabReaperConfig,
@@ -124,13 +143,10 @@ export function planEvictions(input: PlanEvictionsInput): TabSummary[] {
     return eligibleLoaded;
   }
 
-  const idleThreshold = config.idleEvictionPercent / 100;
-  const sizeThreshold = Math.max(idleThreshold, config.sizeEvictionPercent / 100);
-  const usageRatio = memory && memory.budgetBytes > 0 ? memory.usedBytes / memory.budgetBytes : 0;
+  const band = getMemoryBand(memory, config.idleEvictionPercent / 100, config.sizeEvictionPercent / 100);
+  if (band === "normal") return [];
 
-  if (usageRatio < idleThreshold) return [];
-
-  const bySize = usageRatio >= sizeThreshold && weights.size > 0;
+  const bySize = band === "size" && weights.size > 0;
   const candidates = eligibleLoaded.map(tab => ({
     tab,
     lastActiveAt: getTabLastActiveAt(activity, tab, now),

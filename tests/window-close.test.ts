@@ -61,7 +61,7 @@ test("a cold worker captures the last navigation when its window closes", async 
   }
 });
 
-test("without optional permissions, successive memory checks discard down to the lower threshold", async () => {
+test("without page access, successive budget checks discard down to the lower threshold", async () => {
   const { listeners, tabs, localData, restore } = await worker();
   try {
     const now = Date.now();
@@ -76,8 +76,10 @@ test("without optional permissions, successive memory checks discard down to the
 
     let used = 100;
     Object.assign(chrome, {
-      permissions: { contains: async () => false },
-      system: { memory: { getInfo: async () => ({ capacity: 200, availableCapacity: 200 - used }) } },
+      permissions: { contains: async (p: { permissions?: string[] }) => Boolean(p.permissions?.includes("nativeMessaging")) },
+    });
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => ({ ok: true, chromeBytes: used, systemTotalBytes: 200, systemAvailableBytes: 50 }),
     });
     const discarded: number[] = [];
     Object.assign(chrome.tabs, {
@@ -102,6 +104,48 @@ test("without optional permissions, successive memory checks discard down to the
   }
 });
 
+test("without the Local Companion, sleeping tabs stops when it frees no memory until pressure ends", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  const MiB = 1024 ** 2;
+  try {
+    const now = Date.now();
+    localData["tabReaper.folderSyncOptedIn"] = false;
+    for (let id = 4; id <= 9; id++) tabs.push({ ...tabs[0]!, id, url: `https://old.test/${id}` });
+    localData["tabReaper.activity"] = {
+      byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - tab.id * 1000 }])),
+    };
+    let available = 700 * MiB;
+    Object.assign(chrome, {
+      permissions: { contains: async () => false },
+      system: { memory: { getInfo: async () => ({ capacity: 8192 * MiB, availableCapacity: available }) } },
+    });
+    Object.assign(chrome.runtime, { getPlatformInfo: async () => ({ os: "mac" }) });
+    const discarded: number[] = [];
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
+    });
+    const sweep = () => listeners.alarm!({ name: "tabReaper.sweep" });
+
+    available = 1200 * MiB;
+    await sweep();
+    expect(discarded).toEqual([]);
+
+    available = 700 * MiB;
+    for (let i = 0; i < 4; i++) await sweep();
+    expect(discarded).toHaveLength(4);
+
+    available = 1200 * MiB;
+    await sweep();
+    available = 700 * MiB;
+    await sweep();
+    expect(discarded).toHaveLength(6);
+  } finally {
+    restore();
+  }
+});
+
 test("an idle candidate used during form inspection stays open", async () => {
   const { listeners, tabs, localData, restore } = await worker();
   const discarded: number[] = [];
@@ -111,8 +155,10 @@ test("an idle candidate used during form inspection stays open", async () => {
     localData["tabReaper.folderSyncOptedIn"] = false;
     for (const tab of tabs.slice(1)) tab.pinned = true;
     localData["tabReaper.activity"] = { byTabId: { 1: { url: page.url, lastActiveAt: 1 } }, byUrl: {} };
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => ({ ok: true, chromeBytes: 85, systemTotalBytes: 200, systemAvailableBytes: 50 }),
+    });
     Object.assign(chrome, { permissions: { contains: async () => true },
-      system: { memory: { getInfo: async () => ({ capacity: 200, availableCapacity: 115 }) } },
       scripting: { executeScript: async () => {
         await listeners.activated!({ tabId: 1, windowId: 5 });
         await listeners.activated!({ tabId: 2, windowId: 5 });

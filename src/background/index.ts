@@ -3,14 +3,28 @@ import {
   DEFAULT_CONFIG,
   isInternalUrl,
   loadConfig,
+  MAX_DISCARDS_WITHOUT_RELIEF,
   REOPEN_OPTIONS_KEY,
   saveConfig,
 } from "../shared/config.ts";
 import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabReaperConfig, TabSummary } from "../shared/types.ts";
 import { updateActionBadge } from "./badge.ts";
-import { computeOpenTabActions, isTabProtected, MAX_MEMORY_EVICTIONS_PER_PASS, planEvictions } from "./eviction.ts";
+import {
+  computeOpenTabActions,
+  getMemoryBand,
+  isTabProtected,
+  MAX_MEMORY_EVICTIONS_PER_PASS,
+  planEvictions,
+} from "./eviction.ts";
 import { reconcileFormObserver } from "./form-observer.ts";
-import { getMemorySnapshot, hasNativeMessagingPermission, pingNativeHost } from "./memory.ts";
+import {
+  getMemorySnapshot,
+  hasNativeMessagingPermission,
+  loadPressureEpisode,
+  nextPressureEpisode,
+  pingNativeHost,
+  savePressureEpisode,
+} from "./memory.ts";
 import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
 import {
   captureSessionSnapshot,
@@ -196,13 +210,16 @@ async function runSweep(
     const memory = mode === "startup" ? null : await getMemorySnapshot(config, now);
     const online = isBrowserOnline();
 
-    // Sample eligible loaded tabs at >= sizeEvictionPercent RAM to sort by weight; in the idle band, unsaved-form check runs per candidate.
+    // Sample eligible loaded tabs in the size band to sort by weight; in the idle band, unsaved-form check runs per candidate.
     const eligibleLoaded = tabs.filter((t) => !t.discarded && !isTabProtected(t, config));
-    const sizeThreshold = Math.max(config.idleEvictionPercent, config.sizeEvictionPercent) / 100;
-    const atSizeBand = Boolean(
-      memory && (memory.overBudget || (memory.budgetBytes > 0 && memory.usedBytes / memory.budgetBytes >= sizeThreshold)),
-    );
-    const shouldSample = mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand;
+    const band = getMemoryBand(memory, config.idleEvictionPercent / 100, config.sizeEvictionPercent / 100);
+    const atSizeBand = band === "size";
+    const storedEpisode = memory ? await loadPressureEpisode() : null;
+    const episode = memory ? nextPressureEpisode(storedEpisode, memory) : null;
+    const passLimit = episode
+      ? Math.min(MAX_MEMORY_EVICTIONS_PER_PASS, Math.max(0, MAX_DISCARDS_WITHOUT_RELIEF - episode.discards))
+      : MAX_MEMORY_EVICTIONS_PER_PASS;
+    const shouldSample = mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand && passLimit > 0;
     const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms) : new Map();
 
     const evictions = planEvictions({
@@ -219,7 +236,7 @@ async function runSweep(
 
     let discarded = 0;
     for (const tab of evictions) {
-      if (mode === "sweep" && discarded >= MAX_MEMORY_EVICTIONS_PER_PASS) break;
+      if (mode === "sweep" && discarded >= passLimit) break;
       try {
         const plannedLastActiveAt = mode === "sweep" && !atSizeBand ? getTabLastActiveAt(activity, tab, 0) : undefined;
         if (await discardTabSafely(tab.id, config, "automatic", plannedLastActiveAt)) {
@@ -228,6 +245,11 @@ async function runSweep(
       } catch {
         // Tab may have become active, closed, or non-discardable concurrently.
       }
+    }
+
+    const nextEpisode = episode && { ...episode, discards: episode.discards + discarded };
+    if (mode === "sweep" && JSON.stringify(nextEpisode) !== JSON.stringify(storedEpisode)) {
+      await savePressureEpisode(nextEpisode);
     }
 
     const loadedCount = Math.max(0, tabs.filter((t) => !t.discarded).length - discarded);

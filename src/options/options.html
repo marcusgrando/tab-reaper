@@ -12,7 +12,7 @@
     <aside class="sidebar">
       <div class="brand"><img src="icons/icon48.png" alt="" />Tab Reaper</div>
       <nav aria-label="Settings sections">
-        <a href="#memory"><svg class="icon" aria-hidden="true"><use href="ui.svg#memory"/></svg>Memory budget</a>
+        <a href="#memory"><svg class="icon" aria-hidden="true"><use href="ui.svg#memory"/></svg>Memory</a>
         <a href="#protections"><svg class="icon" aria-hidden="true"><use href="ui.svg#shield"/></svg>Protections</a>
         <a href="#capabilities"><svg class="icon" aria-hidden="true"><use href="ui.svg#plug"/></svg>Capabilities</a>
         <a href="#sync-card"><svg class="icon" aria-hidden="true"><use href="ui.svg#folder"/></svg>Folder Sync</a>
@@ -24,54 +24,55 @@
 
       <form id="settings-form">
         <section id="memory">
-          <h2>Memory budget</h2>
-          <p class="hint">
-            Each check puts up to two eligible tabs to sleep until memory use falls below the sleep threshold.
-          </p>
+          <h2>Memory</h2>
+          <p class="hint" id="memory-mode-hint">Checking how Tab Reaper measures memory…</p>
+          <p class="status-text" id="memory-now"></p>
 
-          <div class="field">
-            <div class="field-header">
-              <label for="memory-mode">Budget type</label>
-              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
+          <div id="budget-fields">
+            <div class="field">
+              <div class="field-header">
+                <label for="memory-mode">Budget type</label>
+                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
+              </div>
+              <div class="select-wrap">
+                <select id="memory-mode">
+                  <option value="fraction">Fraction of system RAM</option>
+                  <option value="fixed_gb">Fixed amount in GB</option>
+                </select>
+              </div>
             </div>
-            <div class="select-wrap">
-              <select id="memory-mode">
-                <option value="fraction">Fraction of system RAM</option>
-                <option value="fixed_gb">Fixed amount in GB</option>
-              </select>
-            </div>
-          </div>
 
-          <div class="field" id="fraction-wrap">
-            <div class="field-header">
-              <label for="memory-fraction">Fraction of system RAM <small>0.1 to 0.9. Half of system RAM is 0.5.</small></label>
-              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
+            <div class="field" id="fraction-wrap">
+              <div class="field-header">
+                <label for="memory-fraction">Fraction of system RAM <small>0.1 to 0.9. Half of system RAM is 0.5.</small></label>
+                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
+              </div>
+              <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
             </div>
-            <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
-          </div>
 
-          <div class="field hidden" id="fixed-gb-wrap">
-            <div class="field-header">
-              <label for="memory-gb">Memory budget (GB) <small>Applies to this computer only. Folder Sync does not copy it.</small></label>
-              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
+            <div class="field hidden" id="fixed-gb-wrap">
+              <div class="field-header">
+                <label for="memory-gb">Memory budget (GB) <small>Applies to this computer only. Folder Sync does not copy it.</small></label>
+                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
+              </div>
+              <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
             </div>
-            <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
-          </div>
 
-          <div class="field">
-            <div class="field-header">
-              <label for="idle-eviction-percent">Sleep threshold (% of budget) <small>Start with the least recently used tabs. Range 10–100%.</small></label>
-              <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
+            <div class="field">
+              <div class="field-header">
+                <label for="idle-eviction-percent">Sleep threshold (% of budget) <small>Start with the least recently used tabs. Range 10–100%.</small></label>
+                <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
+              </div>
+              <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
             </div>
-            <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
-          </div>
 
-          <div class="field">
-            <div class="field-header">
-              <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
-              <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
+            <div class="field">
+              <div class="field-header">
+                <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
+                <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
+              </div>
+              <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
             </div>
-            <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
           </div>
 
           <div class="checkbox-row">

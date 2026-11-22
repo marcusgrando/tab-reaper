@@ -77,6 +77,13 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
   return Math.min(max, Math.max(min, value));
 }
 
+/**
+ * Without the Local Companion, sleeping tabs may not relieve system pressure when
+ * other apps hold the memory, so a pressure episode allows this many discards
+ * without relief before waiting for pressure to end.
+ */
+export const MAX_DISCARDS_WITHOUT_RELIEF = 4;
+
 export function computeMemoryBudgetBytes(config: TabReaperConfig, systemTotalBytes: number): number {
   if (config.memoryBudgetMode === "fixed_gb") {
     return Math.round(config.memoryBudgetGb * 1024 * 1024 * 1024);

@@ -1,6 +1,13 @@
-import { DEFAULT_CONFIG, REOPEN_OPTIONS_KEY } from "../shared/config.ts";
+import {
+  DEFAULT_CONFIG,
+  MAX_DISCARDS_WITHOUT_RELIEF,
+  REOPEN_OPTIONS_KEY,
+  computeMemoryBudgetBytes,
+  sanitizeConfig,
+} from "../shared/config.ts";
 import type {
   MemoryBudgetMode,
+  MemorySnapshot,
   RestoreMode,
   SessionSnapshot,
   SnapshotListItem,
@@ -17,6 +24,9 @@ const fixedGbWrap = document.getElementById("fixed-gb-wrap") as HTMLElement;
 const memoryFraction = document.getElementById("memory-fraction") as HTMLInputElement;
 const memoryGb = document.getElementById("memory-gb") as HTMLInputElement;
 const idleEvictionPercent = document.getElementById("idle-eviction-percent") as HTMLInputElement;
+const memoryModeHint = document.getElementById("memory-mode-hint") as HTMLElement;
+const memoryNow = document.getElementById("memory-now") as HTMLElement;
+const budgetFields = document.getElementById("budget-fields") as HTMLElement;
 const sizeEvictionPercent = document.getElementById("size-eviction-percent") as HTMLInputElement;
 const startupSweep = document.getElementById("startup-sweep") as HTMLInputElement;
 const protectActive = document.getElementById("protect-active") as HTMLInputElement;
@@ -61,6 +71,64 @@ function syncBudgetVisibility(): void {
   const isFixed = memoryMode.value === "fixed_gb";
   fractionWrap.classList.toggle("hidden", isFixed);
   fixedGbWrap.classList.toggle("hidden", !isFixed);
+  renderMemoryMode();
+}
+
+const PRESSURE_LABELS = { normal: "normal", moderate: "moderate", critical: "critical" } as const;
+let lastMemory: MemorySnapshot | null = null;
+
+function formatGb(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function formatMb(bytes: number): string {
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+/** Shows only the settings that apply to how memory is measured right now, with live numbers. */
+function renderMemoryMode(): void {
+  const memory = lastMemory;
+  if (memory?.source === "system_memory") {
+    budgetFields.classList.add("hidden");
+    const free = `Now ${formatGb(memory.systemAvailableBytes)} is free`;
+    const thresholds = memory.pressureThresholds;
+    if (!thresholds) {
+      memoryModeHint.textContent =
+        "ChromeOS puts tabs to sleep under memory pressure on its own. Without the Local Companion, Tab Reaper puts tabs to sleep only when Chrome starts or when you ask.";
+      memoryNow.textContent = `${free}.`;
+      return;
+    }
+    memoryModeHint.textContent =
+      "Without the Local Companion, Tab Reaper can't measure Chrome's memory, so it reacts to the computer's memory pressure and there is no budget to set. Install the Local Companion under Optional capabilities to cap Chrome's memory.";
+    memoryNow.textContent =
+      `${free} (${PRESSURE_LABELS[memory.pressure ?? "normal"]} pressure). ` +
+      `Tabs start sleeping, least recently used first, when free memory drops to ${formatMb(thresholds.moderateBytes)}. ` +
+      `At ${formatMb(thresholds.criticalBytes)} the heaviest go first. ` +
+      `If ${MAX_DISCARDS_WITHOUT_RELIEF} tabs sleep without freeing memory, Tab Reaper waits until the pressure ends.`;
+    return;
+  }
+
+  budgetFields.classList.remove("hidden");
+  if (!memory) {
+    memoryModeHint.textContent = "Memory reading is unavailable right now.";
+    memoryNow.textContent = "";
+    return;
+  }
+  const config = sanitizeConfig({ ...displayedConfig, ...readMainFormConfig() });
+  const budget = computeMemoryBudgetBytes(config, memory.systemTotalBytes);
+  const used = Math.round((memory.usedBytes / Math.max(1, budget)) * 100);
+  memoryModeHint.textContent =
+    "The Local Companion measures Chrome's own memory. Each check puts up to two eligible tabs to sleep until Chrome is back under the sleep threshold.";
+  memoryNow.textContent =
+    `Chrome uses ${formatGb(memory.usedBytes)} of a ${formatGb(budget)} budget (${used}%). ` +
+    `Tabs start sleeping at ${formatGb((budget * config.idleEvictionPercent) / 100)}, ` +
+    `and the heaviest go first at ${formatGb((budget * config.sizeEvictionPercent) / 100)}.`;
+}
+
+async function refreshMemoryMode(): Promise<void> {
+  const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+  lastMemory = status.memory;
+  renderMemoryMode();
 }
 
 const UNDO_ICON_SVG =
@@ -540,12 +608,14 @@ async function refreshSnapshotsUI(): Promise<void> {
 async function init(): Promise<void> {
   installCmd.textContent = buildInstallCommand(chrome.runtime.id);
   const status = (await chrome.runtime.sendMessage({ type: "get_status" })) as StatusPayload;
+  lastMemory = status.memory;
   populateForm(status.config);
   await Promise.all([refreshPermissionsUI(), refreshSyncUI(), refreshSnapshotsUI()]);
 }
 
 memoryMode.addEventListener("change", syncBudgetVisibility);
 form.addEventListener("input", syncResetButtons);
+budgetFields.addEventListener("input", renderMemoryMode);
 form.addEventListener("change", syncResetButtons);
 enableSnapshots.addEventListener("change", () => {
   void saveSyncSnapshotSettings("enableSessionSnapshots");
@@ -571,6 +641,7 @@ form.addEventListener("submit", async (event) => {
     }
     syncBudgetVisibility();
     syncResetButtons();
+    void refreshMemoryMode();
     saveStatus.textContent = "Saved.";
     saveStatus.className = "status-text ok";
   } else {

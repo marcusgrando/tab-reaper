@@ -1,5 +1,5 @@
 import type { MemorySnapshot } from "../shared/types.ts";
-import { IDLE_EVICTION_MEMORY_THRESHOLD, SIZE_EVICTION_MEMORY_THRESHOLD } from "./eviction.ts";
+import { IDLE_EVICTION_MEMORY_THRESHOLD, SIZE_EVICTION_MEMORY_THRESHOLD, getMemoryBand } from "./eviction.ts";
 
 export interface BadgeDisplay {
   text: string;
@@ -29,15 +29,12 @@ export function computeBadge(
     return { text: "OFF", color: COLOR_OFFLINE };
   }
 
-  const idleRatio = thresholds?.idleRatio ?? IDLE_EVICTION_MEMORY_THRESHOLD;
-  const sizeRatio = Math.max(idleRatio, thresholds?.sizeRatio ?? SIZE_EVICTION_MEMORY_THRESHOLD);
-  const ratio = memory && memory.budgetBytes > 0 ? memory.usedBytes / memory.budgetBytes : 0;
-  let color = COLOR_OK;
-  if (memory?.overBudget || ratio >= sizeRatio) {
-    color = COLOR_OVER;
-  } else if (ratio >= idleRatio) {
-    color = COLOR_WARN;
-  }
+  const band = getMemoryBand(
+    memory,
+    thresholds?.idleRatio ?? IDLE_EVICTION_MEMORY_THRESHOLD,
+    thresholds?.sizeRatio ?? SIZE_EVICTION_MEMORY_THRESHOLD,
+  );
+  const color = band === "size" ? COLOR_OVER : band === "idle" ? COLOR_WARN : COLOR_OK;
 
   if (memory?.source === "native_host") {
     return { text: formatCompactBytes(memory.usedBytes), color };

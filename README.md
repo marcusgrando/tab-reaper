@@ -6,14 +6,29 @@ Everything runs locally on your machine. No accounts, no telemetry, no external 
 
 ## How Memory-Banded Eviction Works
 
-Tab Reaper requests a memory check every 30 seconds and checks again when you open or switch tabs. The default budget is half your system RAM.
+Tab Reaper requests a memory check every 30 seconds and checks again when you open or switch tabs. How it decides depends on whether the optional Local Companion is installed. Settings shows only the options that apply, with the current numbers.
+
+### With the Local Companion: a Chrome RAM budget
+
+The companion measures Chrome's own memory. The default budget is half your system RAM.
 
 - **Below the sleep threshold (default 80%).** Memory checks leave tabs loaded.
 - **At or above the sleep threshold.** Each check puts up to two eligible tabs to sleep, starting with the least recently used. There is no minimum idle time.
 - **At or above the size threshold (default 100%).** With Weighted Eviction enabled, the heaviest tabs go first. As usage drops below the size threshold, checks resume least-recently-used order until usage falls below the sleep threshold or all remaining tabs are protected. Both thresholds are configurable.
 - **Chrome startup:** Non-protected background tabs are discarded immediately on startup (`startupSweep`, enabled by default).
 
-With the extension alone, these percentages compare system-wide memory use with your budget. Other apps can keep usage above the target even after all eligible tabs sleep. The optional Local Companion measures Chrome memory separately.
+### Without the Local Companion: system memory pressure
+
+A Chrome extension cannot read Chrome's own memory, so Tab Reaper reacts to how much memory the computer has free. There is no budget to set.
+
+| System | Least recently used first | Heaviest first |
+| --- | --- | --- |
+| Windows | 1000 MB free or less | 400 MB free or less |
+| macOS | 800 MB free or less | 400 MB free or less |
+| Linux | 10% of RAM free or less | 5% of RAM or 200 MB free or less |
+| ChromeOS | Off. ChromeOS discards tabs under pressure itself. | Off |
+
+Each check still puts at most two tabs to sleep. When other apps hold the memory, sleeping tabs may not help, so after four tabs sleep without freeing memory Tab Reaper waits until the pressure ends. Tabs still sleep on Chrome startup.
 
 Tab Reaper protects active, audible, pinned, kept, and allowlisted tabs by default. With Weighted Eviction page access and form protection enabled, the palette shows `Form` after an observed edit. A title or filter filled in by the page leaves the tab eligible for sleep. Protection clears when the field returns to its value before the edit, whether you undo the change or the app empties the field after sending, as chat and e-mail apps do. An app that saves silently or replaces the edited field can keep the tab protected until reload.
 
