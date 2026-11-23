@@ -617,3 +617,74 @@ test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs 
     restore();
   }
 });
+
+test("size-band eviction and status use real OS renderer RAM via webNavigation without page access", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  const MiB = 1024 ** 2;
+  const discarded: number[] = [];
+  const message = (body: unknown) => new Promise<any>(resolve => listeners.message!(body, {}, resolve));
+  try {
+    const now = Date.now();
+    localData["tabReaper.folderSyncOptedIn"] = false;
+    tabs.push({ ...tabs[0]!, id: 4, index: 3, url: "https://meet.google.com/abc", title: "Meet" });
+    // Tab 1 is active and shares renderer 10 (1000 MiB) with Tab 2.
+    // Tab 3 owns renderer 11 (200 MiB).
+    // Tab 4 (Meet) owns renderer 12 (1400 MiB).
+    tabs[0]!.active = true;
+    localData["tabReaper.activity"] = {
+      byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - (5 - tab.id) * 60_000 }])),
+      byUrl: {},
+    };
+    const framesByTab: Record<number, Array<{ frameId: number; processId: number; documentLifecycle: string }>> = {
+      1: [{ frameId: 0, processId: 10, documentLifecycle: "active" }],
+      2: [{ frameId: 0, processId: 10, documentLifecycle: "active" }],
+      3: [{ frameId: 0, processId: 11, documentLifecycle: "active" }],
+      4: [{ frameId: 0, processId: 12, documentLifecycle: "active" }],
+    };
+    Object.assign(chrome, {
+      // Only nativeMessaging granted; NO scripting / <all_urls> permission.
+      permissions: { contains: async (p: { permissions?: string[] }) => Boolean(p.permissions?.includes("nativeMessaging")) },
+      webNavigation: {
+        getAllFrames: async ({ tabId }: { tabId: number }) => framesByTab[tabId] ?? [],
+      },
+    });
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => ({
+        ok: true,
+        chromeBytes: 2600 * MiB,
+        systemTotalBytes: 4000 * MiB,
+        systemAvailableBytes: 1000 * MiB,
+        metric: "pss",
+        renderers: {
+          "10": 1000 * MiB,
+          "11": 200 * MiB,
+          "12": 1400 * MiB,
+        },
+      }),
+    });
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
+    });
+
+    // Status exposes real OS process memory, shared renderer info, and sorts heaviest first.
+    const status = await message({ type: "get_status" });
+    const byId = new Map<number, any>(status.openTabs.map((t: any) => [t.id, t]));
+    expect(status.openTabs.map((t: any) => t.id)).toEqual([4, 1, 2, 3]);
+    expect(byId.get(4)).toMatchObject({ memoryBytes: 1400 * MiB, memorySource: "process", sharedProcessTabs: 1 });
+    expect(byId.get(2)).toMatchObject({
+      memoryBytes: 500 * MiB,
+      memorySource: "process",
+      sharedProcessTabs: 2,
+      sharedProcessTotalBytes: 1000 * MiB,
+    });
+
+    // Size-band sweep discards sole-owner renderers (Tab 4 = 1400 MiB, Tab 3 = 200 MiB)
+    // before Tab 2 whose shared renderer is pinned alive by active Tab 1.
+    await listeners.alarm!({ name: "tabReaper.sweep" });
+    expect(discarded).toEqual([4, 3]);
+  } finally {
+    restore();
+  }
+});

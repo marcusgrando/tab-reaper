@@ -90,17 +90,45 @@ describe("system memory pressure without the Local Companion", () => {
     expect(snap.pressureThresholds).toBeNull();
   });
 
-  test("the Local Companion keeps budget mode without pressure levels", async () => {
+  test("the Local Companion keeps budget mode without pressure levels and parses valid per-renderer memory", async () => {
     (globalThis as { chrome?: unknown }).chrome = {
       permissions: { contains: async () => true },
       runtime: {
         getPlatformInfo: async () => ({ os: "mac" }),
-        sendNativeMessage: async () => ({ ok: true, chromeBytes: 3 * GiB, systemTotalBytes: 8 * GiB, systemAvailableBytes: 0.1 * GiB }),
+        sendNativeMessage: async () => ({
+          ok: true,
+          chromeBytes: 3 * GiB,
+          systemTotalBytes: 8 * GiB,
+          systemAvailableBytes: 0.1 * GiB,
+          renderers: {
+            "7": 250 * MiB,
+            "9": 1200 * MiB,
+            "bad-key": 100 * MiB,
+            "11": -5,
+            "12": Number.NaN,
+          },
+        }),
       },
     };
     const snap = await getMemorySnapshot(DEFAULT_CONFIG, 1_000);
     expect(snap.source).toBe("native_host");
     expect(snap.pressure).toBeUndefined();
+    expect(snap.renderers).toEqual({
+      "7": 250 * MiB,
+      "9": 1200 * MiB,
+    });
+  });
+
+  test("older Local Companion responses without renderers remain valid", async () => {
+    (globalThis as { chrome?: unknown }).chrome = {
+      permissions: { contains: async () => true },
+      runtime: {
+        sendNativeMessage: async () => ({ ok: true, chromeBytes: 2 * GiB, systemTotalBytes: 8 * GiB, systemAvailableBytes: 2 * GiB }),
+      },
+    };
+    const snap = await getMemorySnapshot(DEFAULT_CONFIG, 1_000);
+    expect(snap.source).toBe("native_host");
+    expect(snap.renderers).toBeUndefined();
   });
 });
 

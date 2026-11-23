@@ -116,3 +116,40 @@ test("saving samples drops tabs that were closed", async () => {
     Object.assign(globalThis, { chrome: previous });
   }
 });
+
+test("fresh page sampling aggregates DOM and media across frames and deduplicates JS heap by origin", async () => {
+  const previous = globalThis.chrome;
+  const MiB = 1024 * 1024;
+  const cache: Record<string, Record<string, unknown>> = {};
+  const tab = { id: 1, url: "https://app.example.test/", title: "App", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
+  try {
+    Object.assign(globalThis, { chrome: {
+      permissions: { contains: async () => true },
+      tabs: { query: async () => [{ id: 1 }] },
+      storage: { session: {
+        get: async () => structuredClone(cache),
+        set: async (update: typeof cache) => Object.assign(cache, structuredClone(update)),
+      } },
+      scripting: { executeScript: async () => [
+        // Top frame on https://app.example.test
+        { frameId: 0, result: { jsHeapBytes: 50 * MiB, domNodes: 1200, mediaNodes: 1, origin: "https://app.example.test", hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } },
+        // Same-origin iframe shares V8 isolate: keep max heap (55 MiB), do not double-count, sum DOM/media.
+        { frameId: 1, result: { jsHeapBytes: 55 * MiB, domNodes: 400, mediaNodes: 1, origin: "https://app.example.test", hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } },
+        // Cross-origin iframe runs in its own isolate: sum its 80 MiB heap + DOM/media.
+        { frameId: 2, result: { jsHeapBytes: 80 * MiB, domNodes: 900, mediaNodes: 2, origin: "https://embed.other.test", hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false } },
+        // Opaque srcdoc/about:blank iframe: do not double-count its heap, still sum DOM/media.
+        { frameId: 3, result: { jsHeapBytes: 55 * MiB, domNodes: 100, mediaNodes: 0, origin: "null", hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } },
+      ] },
+    } });
+    const sample = (await sampleTabWeights([tab], 2000)).get(1);
+    expect(sample).toMatchObject({
+      jsHeapBytes: 135 * MiB,
+      domNodes: 2600,
+      mediaNodes: 4,
+      hasUnsavedForm: true,
+      sampledAt: 2000,
+    });
+  } finally {
+    Object.assign(globalThis, { chrome: previous });
+  }
+});

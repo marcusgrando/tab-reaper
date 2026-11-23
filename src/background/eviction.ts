@@ -6,6 +6,7 @@ import type {
   TabSummary,
   TabWeightSample,
 } from "../shared/types.ts";
+import { computeFallbackWeightBytes } from "./sampler.ts";
 import { getTabLastActiveAt } from "./tracker.ts";
 
 export const IDLE_EVICTION_MEMORY_THRESHOLD = 0.8;
@@ -175,10 +176,19 @@ export function planEvictions(input: PlanEvictionsInput): TabSummary[] {
     lastActiveAt: getTabLastActiveAt(activity, tab, now),
     sample: weights.get(tab.id),
   }));
+  const hasProcessMemory = candidates.some((c) => (c.sample?.processMemoryBytes ?? 0) > 0);
   candidates.sort((a, b) => {
     if (bySize) {
-      const heapDifference = (b.sample?.jsHeapBytes ?? 0) - (a.sample?.jsHeapBytes ?? 0);
-      if (heapDifference) return heapDifference;
+      if (hasProcessMemory) {
+        const reclaimableDiff =
+          (b.sample?.reclaimableProcessBytes ?? b.sample?.processMemoryBytes ?? 0) -
+          (a.sample?.reclaimableProcessBytes ?? a.sample?.processMemoryBytes ?? 0);
+        if (reclaimableDiff) return reclaimableDiff;
+        const processDiff = (b.sample?.processMemoryBytes ?? 0) - (a.sample?.processMemoryBytes ?? 0);
+        if (processDiff) return processDiff;
+      }
+      const fallbackDiff = computeFallbackWeightBytes(b.sample) - computeFallbackWeightBytes(a.sample);
+      if (fallbackDiff) return fallbackDiff;
       const weightDifference = (b.sample?.weightMultiplier ?? 1) - (a.sample?.weightMultiplier ?? 1);
       if (weightDifference) return weightDifference;
     }

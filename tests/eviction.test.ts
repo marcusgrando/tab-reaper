@@ -337,6 +337,70 @@ describe("eviction engine", () => {
     expect(plannedByWeight.map((p) => p.id)).toEqual([3, 2]);
   });
 
+  test("at >= sizeEvictionPercent with OS process memory, prioritizes heaviest reclaimable renderer over pinned shared peers", () => {
+    const cfg = DEFAULT_CONFIG;
+    const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4)];
+    let activity = createEmptyActivityState();
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 40 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 5 * 60_000);
+    activity = recordTabVisit(activity, 3, tabs[2]!.url, now - 3 * 60_000);
+    activity = recordTabVisit(activity, 4, tabs[3]!.url, now - 2 * 60_000);
+
+    const MiB = 1024 ** 2;
+    const weights = new Map<number, TabWeightSample>([
+      // Tab 1: high JS heap reported, but tiny real OS process (100 MiB, reclaimable)
+      [1, { jsHeapBytes: 90 * MiB, domNodes: 100, mediaNodes: 0, weightMultiplier: 2.5, processMemoryBytes: 100 * MiB, reclaimableProcessBytes: 100 * MiB, sampledAt: now }],
+      // Tab 2: low JS heap (WASM/WebRTC heavy like Meet), huge real OS process (900 MiB, reclaimable)
+      [2, { jsHeapBytes: 40 * MiB, domNodes: 200, mediaNodes: 1, weightMultiplier: 1.8, processMemoryBytes: 900 * MiB, reclaimableProcessBytes: 900 * MiB, sampledAt: now }],
+      // Tab 3: huge attributed process (700 MiB), but renderer is pinned alive by a protected peer (reclaimable = 0)
+      [3, { jsHeapBytes: 200 * MiB, domNodes: 500, mediaNodes: 0, weightMultiplier: 3.5, processMemoryBytes: 700 * MiB, reclaimableProcessBytes: 0, pinnedByProtectedPeer: true, sampledAt: now }],
+      // Tab 4: medium real OS process (350 MiB, reclaimable)
+      [4, { jsHeapBytes: 30 * MiB, domNodes: 300, mediaNodes: 0, weightMultiplier: 1.5, processMemoryBytes: 350 * MiB, reclaimableProcessBytes: 350 * MiB, sampledAt: now }],
+    ]);
+
+    const planned = planEvictions({
+      tabs,
+      activity,
+      weights,
+      config: cfg,
+      memory: makeMemory(SIZE_EVICTION_MEMORY_THRESHOLD),
+      now,
+      mode: "sweep",
+      maxEvictions: Infinity,
+    });
+
+    // Reclaimable renderers first (900 MiB, 350 MiB, 100 MiB), then pinned-peer tab (700 MiB) last.
+    expect(planned.map((p) => p.id)).toEqual([2, 4, 1, 3]);
+  });
+
+  test("fallback mode without OS process memory combines JS heap with DOM and media weight instead of ignoring DOM/media", () => {
+    const cfg = DEFAULT_CONFIG;
+    const tabs = [makeTab(1), makeTab(2)];
+    let activity = createEmptyActivityState();
+    activity = recordTabVisit(activity, 1, tabs[0]!.url, now - 10 * 60_000);
+    activity = recordTabVisit(activity, 2, tabs[1]!.url, now - 5 * 60_000);
+
+    const MiB = 1024 ** 2;
+    const weights = new Map<number, TabWeightSample>([
+      // Slightly higher JS heap (35 MiB), tiny DOM, no media.
+      [1, { jsHeapBytes: 35 * MiB, domNodes: 200, mediaNodes: 0, weightMultiplier: computeWeightMultiplier({ jsHeapBytes: 35 * MiB, domNodes: 200, mediaNodes: 0 }), sampledAt: now }],
+      // Slightly lower JS heap (25 MiB), but 12,000 DOM nodes and 4 video/canvas elements.
+      [2, { jsHeapBytes: 25 * MiB, domNodes: 12000, mediaNodes: 4, weightMultiplier: computeWeightMultiplier({ jsHeapBytes: 25 * MiB, domNodes: 12000, mediaNodes: 4 }), sampledAt: now }],
+    ]);
+
+    const planned = planEvictions({
+      tabs,
+      activity,
+      weights,
+      config: cfg,
+      memory: makeMemory(SIZE_EVICTION_MEMORY_THRESHOLD),
+      now,
+      mode: "sweep",
+      maxEvictions: 1,
+    });
+    expect(planned.map((p) => p.id)).toEqual([2]);
+  });
+
   test("at >= 100% RAM without weight samples, falls back to oldest-idle first capped at 2 per pass", () => {
     const cfg = DEFAULT_CONFIG;
     const tabs = [makeTab(1), makeTab(2), makeTab(3), makeTab(4), makeTab(5)];

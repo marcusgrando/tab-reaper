@@ -37,7 +37,7 @@
             <div class="setup-step-body">
               <strong>Connect Local Companion</strong>
               <p class="hint">
-                Measures Chrome’s exact RAM and enables Folder Sync. Already pre-registered if you used the Quick Install command.
+                Measures exact Chrome and per-tab RAM for heaviest-first sleep and enables Folder Sync. Already pre-registered if you used the Quick Install command.
               </p>
               <div id="setup-native-status" class="status-text" role="status"></div>
             </div>
@@ -49,9 +49,9 @@
           <li id="setup-step-host" class="setup-step">
             <span class="setup-badge" aria-hidden="true">2</span>
             <div class="setup-step-body">
-              <strong>Weighted Eviction &amp; form protection</strong>
+              <strong>Page protections &amp; fallback weights</strong>
               <p class="hint">
-                Puts the heaviest tabs to sleep first at the size threshold and protects tabs with unsaved form edits.
+                Protects tabs with unsaved form edits, active screen sharing, or Picture-in-Picture, and estimates tab weight without the Local Companion.
               </p>
               <div id="setup-host-status" class="status-text" role="status"></div>
             </div>
@@ -126,7 +126,7 @@
 
           <div class="field">
             <div class="field-header">
-              <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
+              <label for="size-eviction-percent">Size threshold (% of budget) <small>Puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
               <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
             </div>
             <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
@@ -144,7 +144,7 @@
         <div class="checkbox-row">
           <label class="checkbox">
             <input id="weighted-eviction" type="checkbox" />
-            <span>Sleep heaviest tabs first (Weighted Eviction) <small>Uses optional page access to rank tabs by memory, DOM elements, and media at the size threshold. Applies to this browser only.</small></span>
+            <span>Sleep heaviest tabs first (Weighted Eviction) <small>Uses exact per-tab RAM from the Local Companion, or optional page access heuristics without it. Applies to this browser only.</small></span>
           </label>
         </div>
       </section>
@@ -303,7 +303,7 @@
           <div>
             <strong>Local Companion</strong>
             <p class="hint">
-              Measures Chrome’s exact RAM and enables Folder Sync. Run this command to install the companion on your computer.
+              Measures exact Chrome and per-tab RAM and enables Folder Sync. Run this command to install the companion on your computer.
             </p>
             <div class="install-cmd-row">
               <code id="install-cmd"></code>

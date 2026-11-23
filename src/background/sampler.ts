@@ -14,6 +14,7 @@ interface RawPageMetrics extends RawLiveState {
   jsHeapBytes: number;
   domNodes: number;
   mediaNodes: number;
+  origin?: string;
 }
 
 export interface LiveTabProtection {
@@ -28,12 +29,36 @@ interface LiveTabInspection {
   hasPictureInPicture: boolean;
 }
 
+const FALLBACK_DOM_NODE_BYTES = 2048;
+const FALLBACK_MEDIA_NODE_BYTES = 16 * 1024 * 1024;
+
 export function computeWeightMultiplier(metrics: Pick<RawPageMetrics, "jsHeapBytes" | "domNodes" | "mediaNodes">): number {
   const heapMb = metrics.jsHeapBytes / (1024 * 1024);
   const heapScore = Math.min(2.5, heapMb / 60);
   const domScore = Math.min(1.0, metrics.domNodes / 5000);
   const mediaScore = Math.min(0.5, metrics.mediaNodes * 0.15);
   return Number((1.0 + heapScore + domScore + mediaScore).toFixed(2));
+}
+
+/**
+ * Uncapped composite weight used when OS per-renderer memory is unavailable.
+ * Combines measured JS heap with approximate DOM and media element overhead so
+ * DOM/media-heavy pages are not masked by small JS heap differences.
+ */
+export function computeFallbackWeightBytes(
+  sample?: Pick<TabWeightSample, "jsHeapBytes" | "domNodes" | "mediaNodes">,
+): number {
+  if (!sample) return 0;
+  const heap = typeof sample.jsHeapBytes === "number" && Number.isFinite(sample.jsHeapBytes) && sample.jsHeapBytes > 0
+    ? sample.jsHeapBytes
+    : 0;
+  const dom = typeof sample.domNodes === "number" && Number.isFinite(sample.domNodes) && sample.domNodes > 0
+    ? sample.domNodes * FALLBACK_DOM_NODE_BYTES
+    : 0;
+  const media = typeof sample.mediaNodes === "number" && Number.isFinite(sample.mediaNodes) && sample.mediaNodes > 0
+    ? sample.mediaNodes * FALLBACK_MEDIA_NODE_BYTES
+    : 0;
+  return heap + dom + media;
 }
 
 export async function hasHostAccessPermission(): Promise<boolean> {
@@ -163,13 +188,13 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
 function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): RawPageMetrics | RawLiveState {
   const hasUnsavedForm = protectUnsavedForms && window.tabReaperFormObserver?.dirty === true;
   const isTop = window === window.top;
-  const isVisible = isTop && document.visibilityState === "visible";
+  // HeadlessChrome keeps every tab's visibilityState === "visible" regardless of activation,
+  // so only treat an inactive visible document as screen-shared/split-view in headed browsers.
+  const isHeadless = typeof navigator !== "undefined" && /\bHeadlessChrome\//i.test(navigator.userAgent);
+  const isVisible = isTop && !isHeadless && document.visibilityState === "visible";
   const docPip = (window as Window & { documentPictureInPicture?: { window?: unknown } }).documentPictureInPicture;
   const hasPictureInPicture = Boolean(document.pictureInPictureElement || docPip?.window);
   if (!includeMetrics) return { hasUnsavedForm, isVisible, hasPictureInPicture };
-  if (!isTop) {
-    return { jsHeapBytes: 0, domNodes: 0, mediaNodes: 0, hasUnsavedForm, isVisible: false, hasPictureInPicture };
-  }
 
   const perf = performance as Performance & {
     memory?: { usedJSHeapSize?: number };
@@ -177,7 +202,8 @@ function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): 
   const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
   const domNodes = document.getElementsByTagName("*").length;
   const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
-  return { jsHeapBytes, domNodes, mediaNodes, hasUnsavedForm, isVisible, hasPictureInPicture };
+  const origin = typeof location?.origin === "string" ? location.origin : "";
+  return { jsHeapBytes, domNodes, mediaNodes, origin, hasUnsavedForm, isVisible, hasPictureInPicture };
 }
 
 export async function checkTabLiveProtection(tabId: number, protectUnsavedForms = true): Promise<LiveTabProtection> {
@@ -244,8 +270,8 @@ async function sampleSingleTab(
       args: [true, protectUnsavedForms],
     });
     const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
-    const metrics = topFrame?.result as RawPageMetrics | undefined;
-    if (!metrics || typeof metrics !== "object") return null;
+    const topMetrics = topFrame?.result as Partial<RawPageMetrics> | undefined;
+    if (!topMetrics || typeof topMetrics !== "object") return null;
 
     const frames = results
       .map(frame => frame?.result as Partial<RawPageMetrics> | undefined)
@@ -254,12 +280,34 @@ async function sampleSingleTab(
     const isVisible = frames.some(frame => frame.isVisible === true);
     const hasPictureInPicture = frames.some(frame => frame.hasPictureInPicture === true);
 
+    // Same-origin frames share a V8 isolate, so deduplicate JS heap per concrete origin while
+    // summing cross-origin iframes (and never double-counting opaque srcdoc/about:blank frames).
+    const heapByOrigin = new Map<string, number>();
+    let domNodes = 0;
+    let mediaNodes = 0;
+    for (const frame of frames) {
+      if (typeof frame.domNodes === "number" && frame.domNodes > 0) domNodes += frame.domNodes;
+      if (typeof frame.mediaNodes === "number" && frame.mediaNodes > 0) mediaNodes += frame.mediaNodes;
+      const heap = typeof frame.jsHeapBytes === "number" && frame.jsHeapBytes > 0 ? frame.jsHeapBytes : 0;
+      const origin = typeof frame.origin === "string" && frame.origin !== "" && frame.origin !== "null" ? frame.origin : null;
+      if (heap > 0 && origin) {
+        heapByOrigin.set(origin, Math.max(heapByOrigin.get(origin) ?? 0, heap));
+      }
+    }
+    let jsHeapBytes = 0;
+    if (heapByOrigin.size > 0) {
+      for (const bytes of heapByOrigin.values()) jsHeapBytes += bytes;
+    } else if (typeof topMetrics.jsHeapBytes === "number" && topMetrics.jsHeapBytes > 0) {
+      jsHeapBytes = topMetrics.jsHeapBytes;
+    }
+
+    const aggregated = { jsHeapBytes, domNodes, mediaNodes };
     return {
       cacheable: {
-        jsHeapBytes: metrics.jsHeapBytes,
-        domNodes: metrics.domNodes,
-        mediaNodes: metrics.mediaNodes,
-        weightMultiplier: computeWeightMultiplier(metrics),
+        jsHeapBytes,
+        domNodes,
+        mediaNodes,
+        weightMultiplier: computeWeightMultiplier(aggregated),
         hasUnsavedForm,
         sampledAt: now,
       },

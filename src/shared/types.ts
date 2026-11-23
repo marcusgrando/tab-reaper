@@ -56,11 +56,23 @@ export interface ActivityState {
   activeByWindow?: Record<string, number>;
 }
 
+export type TabMemorySource = "process" | "js_heap";
+
 export interface TabWeightSample {
   jsHeapBytes: number;
   domNodes: number;
   mediaNodes: number;
   weightMultiplier: number;
+  /** Live-only (never cached): attributed OS renderer memory in bytes from Local Companion. */
+  processMemoryBytes?: number;
+  /** Live-only (never cached): OS renderer memory not pinned alive by a protected peer tab. */
+  reclaimableProcessBytes?: number;
+  /** Live-only (never cached): number of tabs sharing this tab's main-frame renderer process. */
+  sharedProcessTabs?: number;
+  /** Live-only (never cached): total OS memory of the tab's main-frame renderer process before splitting. */
+  sharedProcessTotalBytes?: number;
+  /** Live-only (never cached): another protected tab shares this tab's main-frame renderer process. */
+  pinnedByProtectedPeer?: boolean;
   hasUnsavedForm?: boolean;
   /** Live-only (never cached): top frame reports visibilityState === "visible". */
   isVisible?: boolean;
@@ -81,6 +93,8 @@ export interface MemorySnapshot {
   systemAvailableBytes: number;
   processCount?: number;
   metric?: string;
+  /** Per-renderer OS memory in bytes keyed by Chromium --renderer-client-id (matches webNavigation frame.processId). */
+  renderers?: Record<string, number>;
   overBudget: boolean;
   /**
    * Set only for system_memory. Without the Local Companion, eviction follows
@@ -119,6 +133,11 @@ export interface OpenTabInfo {
   idleMinutes: number;
   protectedReason: string | null;
   weightMultiplier: number;
+  /** Best available tab memory measurement in bytes (OS renderer RAM when available, else JS heap). */
+  memoryBytes: number | null;
+  memorySource: TabMemorySource | null;
+  sharedProcessTabs?: number;
+  sharedProcessTotalBytes?: number;
   jsHeapBytes: number | null;
   hasUnsavedForm: boolean;
   hasActiveUpload: boolean;

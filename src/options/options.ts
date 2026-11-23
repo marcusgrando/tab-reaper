@@ -161,6 +161,7 @@ async function refreshMemoryMode(): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
   lastMemory = status.memory;
   renderMemoryMode();
+  syncPermissionCheckboxes();
 }
 
 const UNDO_ICON_SVG =
@@ -319,8 +320,17 @@ function cancelDebounce(key: ConfigKey): void {
   }
 }
 
+function hasCompanionTabMemory(): boolean {
+  return Boolean(
+    hasNativePerm &&
+    lastMemory?.source === "native_host" &&
+    lastMemory.renderers &&
+    Object.keys(lastMemory.renderers).length > 0,
+  );
+}
+
 function syncPermissionCheckboxes(): void {
-  weightedEvictionEl.checked = hasHostPerm && displayedConfig.weightedEviction;
+  weightedEvictionEl.checked = (hasCompanionTabMemory() || hasHostPerm) && displayedConfig.weightedEviction;
   protectForms.checked = hasHostPerm && displayedConfig.protectUnsavedForms;
   protectUploads.checked = hasUploadPerm && displayedConfig.protectActiveUploads;
 }
@@ -1464,6 +1474,11 @@ async function handlePageAccessToggle(
 ): Promise<void> {
   const otherKey = key === "weightedEviction" ? "protectUnsavedForms" : "weightedEviction";
   if (checkbox.checked) {
+    if (key === "weightedEviction" && hasCompanionTabMemory()) {
+      await saveConfigPatch({ weightedEviction: true }, statusEl, { refreshMemory: true });
+      await refreshPermissionsUI();
+      return;
+    }
     const alreadyHasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
     let patch: Partial<TabReaperConfig> = { [key]: true };
     if (!alreadyHasHost) {

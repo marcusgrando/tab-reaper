@@ -52,9 +52,11 @@ import {
   pingNativeHost,
   savePressureEpisode,
 } from "./memory.ts";
+import { measureTabProcessMemory, mergeProcessMemorySamples } from "./process-memory.ts";
 import {
   checkTabLiveProtection,
   clearSampleCache,
+  computeFallbackWeightBytes,
   hasHostAccessPermission,
   loadCachedWeights,
   sampleTabFormsOnly,
@@ -219,7 +221,10 @@ async function discardTabSafely(
   const [initialRaw, initialKeptIds] = await Promise.all([chrome.tabs.get(tabId), loadKeptTabIds()]);
   const initialLive = toTabSummary(initialRaw, initialKeptIds);
   if (!initialLive || initialLive.discarded) return false;
-  if (mode === "manual" ? !computeOpenTabActions(initialLive, config).canSleep : isTabProtected(initialLive, config)) {
+  if (
+    (mode === "manual" ? !computeOpenTabActions(initialLive, config).canSleep : isTabProtected(initialLive, config)) ||
+    hasLiveUploadProtectionForTab(tabId)
+  ) {
     return false;
   }
   const liveProtection = await checkTabLiveProtection(tabId, config.protectUnsavedForms);
@@ -363,8 +368,24 @@ async function runSweep(
       : MAX_MEMORY_EVICTIONS_PER_PASS;
     const shouldSample =
       mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand && passLimit > 0 && config.weightedEviction;
-    // Size-band ranking only needs weights; discardTabSafely performs a fresh live form check before discarding.
-    const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms, false) : new Map();
+    // Prefer real per-renderer OS memory from the Local Companion + webNavigation (no JS injection needed).
+    // Fall back to page JS/DOM/media sampling when the companion is absent, older, or cannot match tabs.
+    let weights = new Map<number, TabWeightSample>();
+    if (shouldSample) {
+      if (memory?.renderers) {
+        const protectedIds = new Set(
+          tabs.filter((t) => isTabProtected(t, config, undefined, uploadingTabIds.has(t.id))).map((t) => t.id),
+        );
+        const processMemory = await measureTabProcessMemory(tabs, memory.renderers, protectedIds);
+        if (eligibleLoaded.some((t) => processMemory.has(t.id))) {
+          weights = mergeProcessMemorySamples(weights, processMemory, now);
+        }
+      }
+      if (weights.size === 0) {
+        // Size-band ranking only needs weights; discardTabSafely performs a fresh live form check before discarding.
+        weights = await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms, false);
+      }
+    }
 
     const evictions = planEvictions({
       tabs,
@@ -489,19 +510,29 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
   }
 
   const loadedSummaries = tabs.filter((t) => !t.discarded);
-  const weights =
-    hostAccess && config.weightedEviction
+  let weights =
+    hostAccess && config.weightedEviction && !memory?.renderers
       ? await sampleTabWeights(loadedSummaries, now, config.protectUnsavedForms)
-      : hostAccess && config.protectUnsavedForms
-        ? await sampleTabFormsOnly(loadedSummaries, now)
-        : config.weightedEviction
+      : hostAccess
+        ? await sampleTabFormsOnly(loadedSummaries, now, config.protectUnsavedForms)
+        : config.weightedEviction && !memory?.renderers
           ? await loadCachedWeights(now)
-          : new Map();
+          : new Map<number, TabWeightSample>();
+  if (memory?.renderers) {
+    const protectedIds = new Set(
+      tabs.filter((t) => isTabProtected(t, config, weights.get(t.id), uploadingTabIds.has(t.id))).map((t) => t.id),
+    );
+    const processMemory = await measureTabProcessMemory(tabs, memory.renderers, protectedIds);
+    if (processMemory.size > 0) {
+      weights = mergeProcessMemorySamples(weights, processMemory, now);
+    }
+  }
 
   let loadedCount = 0;
   let discardedCount = 0;
   let protectedCount = 0;
   const openTabs: OpenTabInfo[] = [];
+  const fallbackWeightById = new Map<number, number>();
 
   for (const tab of tabs) {
     const sample = weights.get(tab.id);
@@ -522,6 +553,17 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
 
     const lastActiveAt = getTabLastActiveAt(activity, tab, now);
     const idleMinutes = Math.max(0, Math.round((now - lastActiveAt) / 60_000));
+    const hasProcessBytes = Boolean(sample?.processMemoryBytes && sample.processMemoryBytes > 0);
+    const hasJsHeapBytes = Boolean(sample && sample.jsHeapBytes > 0);
+    const memoryBytes = hasProcessBytes
+      ? sample!.processMemoryBytes!
+      : hasJsHeapBytes
+        ? sample!.jsHeapBytes
+        : null;
+    const memorySource = hasProcessBytes ? "process" : hasJsHeapBytes ? "js_heap" : null;
+    if (sample) {
+      fallbackWeightById.set(tab.id, computeFallbackWeightBytes(sample));
+    }
 
     openTabs.push({
       id: tab.id,
@@ -532,6 +574,12 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
       idleMinutes,
       protectedReason: actions.protectedReason,
       weightMultiplier: sample?.weightMultiplier ?? 1.0,
+      memoryBytes,
+      memorySource,
+      ...(hasProcessBytes ? {
+        sharedProcessTabs: sample!.sharedProcessTabs,
+        sharedProcessTotalBytes: sample!.sharedProcessTotalBytes,
+      } : {}),
       jsHeapBytes: sample ? sample.jsHeapBytes : null,
       hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
       hasActiveUpload,
@@ -545,9 +593,17 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
   openTabs.sort((a, b) => {
     if (a.discarded !== b.discarded) return a.discarded ? 1 : -1;
     if (!a.discarded) {
-      const aHeap = a.jsHeapBytes ?? -1;
-      const bHeap = b.jsHeapBytes ?? -1;
-      if (aHeap !== bHeap) return bHeap - aHeap;
+      const aHasProcess = a.memorySource === "process";
+      const bHasProcess = b.memorySource === "process";
+      if (aHasProcess !== bHasProcess) return aHasProcess ? -1 : 1;
+      if (aHasProcess && bHasProcess) {
+        const memDiff = (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
+        if (memDiff !== 0) return memDiff;
+      } else {
+        const aWeight = fallbackWeightById.get(a.id) ?? -1;
+        const bWeight = fallbackWeightById.get(b.id) ?? -1;
+        if (aWeight !== bWeight) return bWeight - aWeight;
+      }
     }
     // Shortest idle first so tabs that just left active appear at the top.
     return a.idleMinutes - b.idleMinutes;

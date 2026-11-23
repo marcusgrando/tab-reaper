@@ -92,7 +92,21 @@ interface NativeMemoryResponse {
   systemTotalBytes?: number;
   systemAvailableBytes?: number;
   metric?: string;
+  renderers?: Record<string, number>;
   error?: string;
+}
+
+function parseRenderers(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const renderers: Record<string, number> = {};
+  let count = 0;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^\d+$/.test(key)) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) continue;
+    renderers[key] = value;
+    count++;
+  }
+  return count > 0 ? renderers : undefined;
 }
 
 interface NativePingResponse {
@@ -151,6 +165,7 @@ export async function getMemorySnapshot(config: TabReaperConfig, now = Date.now(
         response.systemTotalBytes > 0
       ) {
         const budgetBytes = computeMemoryBudgetBytes(config, response.systemTotalBytes);
+        const renderers = parseRenderers(response.renderers);
         return {
           source: "native_host",
           usedBytes: response.chromeBytes,
@@ -159,6 +174,7 @@ export async function getMemorySnapshot(config: TabReaperConfig, now = Date.now(
           systemAvailableBytes: response.systemAvailableBytes ?? 0,
           processCount: response.processCount,
           metric: response.metric,
+          ...(renderers ? { renderers } : {}),
           overBudget: response.chromeBytes > budgetBytes,
           checkedAt: now,
         };

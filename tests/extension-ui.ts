@@ -199,6 +199,72 @@ try {
   assert.ok(await updatePopup.locator("#update-banner").isHidden(), "Dismissed update banner must stay hidden");
   await updatePopup.close();
 
+  // Popup displays OS process RAM (without "JS"), shared renderer suffix + tooltip, and JS fallback label.
+  const memPopup = await context.newPage();
+  await memPopup.setViewportSize({ width: 580, height: 600 });
+  const MiB = 1024 * 1024;
+  await memPopup.addInitScript(({ MiB }) => {
+    const origSend = chrome.runtime.sendMessage.bind(chrome.runtime) as (...args: unknown[]) => unknown;
+    chrome.runtime.sendMessage = ((msg: any, ...rest: any[]) => {
+      if (msg && msg.type === "get_status") {
+        return Promise.resolve({
+          config: {},
+          memory: {
+            source: "native_host",
+            usedBytes: 3 * 1024 * MiB,
+            budgetBytes: 8 * 1024 * MiB,
+            systemTotalBytes: 16 * 1024 * MiB,
+            systemAvailableBytes: 8 * 1024 * MiB,
+            metric: "pss",
+            overBudget: false,
+            checkedAt: Date.now(),
+          },
+          online: true,
+          loadedCount: 3,
+          discardedCount: 0,
+          protectedCount: 0,
+          openTabs: [
+            {
+              id: 101, url: "https://meet.google.com/abc", title: "Google Meet", discarded: false, kept: false,
+              idleMinutes: 0, protectedReason: "Audio", weightMultiplier: 1,
+              memoryBytes: Math.round(1.4 * 1024 * MiB), memorySource: "process",
+              sharedProcessTabs: 1, sharedProcessTotalBytes: Math.round(1.4 * 1024 * MiB),
+              jsHeapBytes: null, hasUnsavedForm: false, isPwa: true, canKeep: false, canSleep: false, canClose: true,
+            },
+            {
+              id: 102, url: "https://github.com/org/repo", title: "Shared Renderer Tab", discarded: false, kept: false,
+              idleMinutes: 3, protectedReason: null, weightMultiplier: 1,
+              memoryBytes: 210 * MiB, memorySource: "process",
+              sharedProcessTabs: 2, sharedProcessTotalBytes: 420 * MiB,
+              jsHeapBytes: null, hasUnsavedForm: false, isPwa: false, canKeep: true, canSleep: true, canClose: true,
+            },
+            {
+              id: 103, url: "https://docs.example.test/page", title: "Fallback JS Tab", discarded: false, kept: false,
+              idleMinutes: 5, protectedReason: null, weightMultiplier: 1.5,
+              memoryBytes: 120 * MiB, memorySource: "js_heap",
+              jsHeapBytes: 120 * MiB, hasUnsavedForm: false, isPwa: false, canKeep: true, canSleep: true, canClose: true,
+            },
+          ],
+          recoverableSnapshot: null,
+          updateAvailable: null,
+          permissions: { nativeMessaging: true, hostAccess: false },
+        });
+      }
+      return origSend(msg, ...rest);
+    }) as typeof chrome.runtime.sendMessage;
+  }, { MiB });
+  await memPopup.goto(new URL("popup.html", worker.url()).href);
+  await memPopup.locator(".tab-item").first().waitFor();
+  const meetMeta = memPopup.getByRole("option", { name: /Google Meet/ }).locator(".item-meta");
+  assert.equal(await meetMeta.innerText(), "PWA · 1.40 GB · meet.google.com · now");
+  const sharedMeta = memPopup.getByRole("option", { name: /Shared Renderer Tab/ }).locator(".item-meta");
+  assert.equal(await sharedMeta.innerText(), "~210 MB · shared · github.com · 3m idle");
+  assert.equal(await sharedMeta.getAttribute("title"), "Shared Chrome renderer process: 420 MB across 2 tabs");
+  const jsMeta = memPopup.getByRole("option", { name: /Fallback JS Tab/ }).locator(".item-meta");
+  assert.equal(await jsMeta.innerText(), "JS 120 MB · docs.example.test · 5m idle");
+  assert.match((await jsMeta.getAttribute("title")) ?? "", /JS heap estimate only/);
+  await memPopup.close();
+
   console.log("Settings and tab palette passed in Chromium.");
 } finally {
   await context.close();

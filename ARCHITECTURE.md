@@ -12,7 +12,7 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 | --- | --- | --- | --- |
 | Enforce Chrome RAM budget (default `totalRAM / 2`) | **Primary (local):** Optional Native Messaging Host reads real Chrome PSS/RSS from `/proc` (Linux), `proc_pid_rusage` `phys_footprint` (macOS, matching Activity Monitor), or Win32 `K32GetProcessMemoryInfo` (Windows). **Fallback (extension-only):** system memory pressure from `chrome.system.memory` `availableCapacity`, with per-OS thresholds and no budget. | Feasible | Stable Chrome has no per-process or per-tab RAM API (`chrome.processes` is dev-only and deprecated). Exact Chrome-only GB caps require the optional Native Host. |
 | Memory-banded discarding (`idleEvictionPercent` / `sizeEvictionPercent`, defaults `80%` / `100%`) | Periodic `chrome.alarms` sweep and event-driven checks using `chrome.tabs.discard()`. | Feasible | Tabs sharing a SiteInstance renderer only release the OS process when all tabs in that origin are discarded. |
-| Evict heaviest tabs first at the configured size threshold | On-demand `chrome.scripting.executeScript` samples `performance.memory.usedJSHeapSize`, DOM node count, and `iframe`/`canvas`/`video` count. | Feasible | `usedJSHeapSize` measures V8 heap only (excludes GPU textures, decoded images, cross-origin iframes). Restricted pages (`chrome://`, Web Store) and disabled Weighted Eviction fall back to oldest idle first. |
+| Evict heaviest tabs first at the configured size threshold | **Primary (Local Companion):** Native host maps each renderer's `--renderer-client-id` to its OS memory (`PSS` on Linux, `phys_footprint` on macOS, `PrivateUsage` on Windows), matched against `chrome.webNavigation.getAllFrames()` `processId` without injecting scripts into pages. **Fallback (extension-only):** on-demand `chrome.scripting.executeScript` aggregates `performance.memory.usedJSHeapSize` (deduplicated per origin), DOM node count, and `iframe`/`canvas`/`video` count across frames. | Feasible | Shared GPU process VRAM is not split per tab (matching Chrome Task Manager). Without the Local Companion, `usedJSHeapSize` measures V8 heap only (excludes WASM, Workers, WebRTC buffers, GPU textures, decoded images), and restricted pages (`chrome://`, Web Store) fall back to oldest idle first. |
 | Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Only profiles with page access and form protection enabled register an edit observer. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
 | Protect active, audible, pinned, kept, unsaved-form, and allowlisted tabs | Filter `tab.active`, `tab.audible`, `tab.pinned`, kept state, unsaved form edits, and user domain allowlist before discard. | Feasible | `tabId` resets on browser restart, so `lastActiveAt` is persisted in `chrome.storage.local` and reconciled by URL on startup. |
 | Fast open-tabs palette | `chrome.commands` (`Alt+Shift+K`) opens the Tab Reaper open-tabs palette focused on search. | Feasible | None. |
@@ -52,7 +52,8 @@ Chrome Memory Saver offers three levels with different inactivity periods. Tab R
 
 1. **Exact Chrome RAM (Native Host connected):**
    - Extension calls `chrome.runtime.sendNativeMessage('com.tabreaper.host', { cmd: 'chrome_memory' })`.
-   - Native host sums the memory of the browser that launched it: its parent process (past the `cmd.exe` Chrome interposes on Windows) and every descendant, excluding the host. Not by process name, because that also counts Canary, Chrome for Testing and other Chromium browsers. When the launching browser cannot be determined it returns `ok: false` and the extension uses the fallback below. Per-process metric: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set (Windows `K32GetProcessMemoryInfo`), and returns `{ chromeBytes, systemTotalBytes, systemAvailableBytes }`.
+   - Native host sums the memory of the browser that launched it: its parent process (past the `cmd.exe` Chrome interposes on Windows) and every descendant, excluding the host. Not by process name, because that also counts Canary, Chrome for Testing and other Chromium browsers. When the launching browser cannot be determined it returns `ok: false` and the extension uses the fallback below. Per-process metric: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set for total Chrome RAM and `PrivateUsage` per renderer on Windows (`K32GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX`), returning `{ chromeBytes, systemTotalBytes, systemAvailableBytes, renderers }`.
+   - For each `--type=renderer` child in the browser tree, the host extracts `--renderer-client-id=<N>` from argv (Linux `/proc/<pid>/cmdline`, macOS `sysctl` `KERN_PROCARGS2` stopping after `argc` so `envp` is never read, Windows `NtQueryInformationProcess` `ProcessCommandLineInformation`) and returns only `{ [clientId]: bytes }`.
    - Budget percentage is `chromeBytes / memoryBudgetBytes`.
 2. **System memory pressure (extension only):**
    - Extension calls `chrome.system.memory.getInfo()`. `availableCapacity` is a different metric on each OS, so the thresholds are absolute free bytes per OS from `chrome.runtime.getPlatformInfo()`, not a share of the budget.
@@ -62,14 +63,20 @@ Chrome Memory Saver offers three levels with different inactivity periods. Tab R
    - Not the budget against system-wide use: on an 8 GiB Mac that put nearly every background tab to sleep, because the OS normally uses more than 40% of RAM.
    - Settings and the palette show only what applies to the current mode, with live numbers.
 
-### Weighted Eviction
+### Per-Tab Memory and Weighted Eviction
 
-When memory reaches the size threshold (default `100%` of budget) and optional Weighted Eviction (`scripting` + `<all_urls>`) is enabled, eligible loaded tabs are ranked heaviest first using an on-demand sample cached for 2 minutes in `chrome.storage.session`:
-- `usedJSHeapSize` (MB) from `performance.memory`
-- DOM node count (`document.getElementsByTagName('*').length`)
-- Heavy media elements (`iframe`, `canvas`, `video` count)
+When memory reaches the size threshold (default `100%` of budget) or when opening the tab palette:
 
-Pages where scripting is disallowed receive default weight (`1.0`). When Weighted Eviction is disabled, the size band falls back to oldest idle first.
+1. **OS renderer memory (primary, Local Companion connected):**
+   - The extension queries `chrome.webNavigation.getAllFrames({ tabId })` for loaded tabs (no `<all_urls>` or script injection required) and joins each frame's `processId` against the `renderers` map returned by `chrome_memory` (`--renderer-client-id` equals Chromium's `RenderProcessHost` ID).
+   - **Shared renderer attribution:** A renderer hosting one or more active top-level frames (`frameId === 0`) splits its memory equally across those top-level tabs so an embedded iframe on another tab never steals memory credit from a top-level tab in the same SiteInstance. A renderer hosting only active subframes (an isolated cross-origin OOPIF) splits its memory across the embedding tabs. Live BFCache/prerender frames count only when no active frame owns that renderer.
+   - **Reclaimability-aware eviction:** In the size band, tabs whose discard can free a renderer process (not pinned alive by a protected peer tab sharing that renderer) rank ahead of tabs whose shared renderer is kept alive by a protected peer. Not `chrome.debugger` or CDP remote debugging, because `chrome.debugger` displays a browser-wide debugging banner and CDP exposes full browser control.
+2. **In-page fallback heuristics (without Local Companion or on older companions):**
+   - When optional page access (`scripting` + `<all_urls>`) is enabled, an on-demand sample cached for 2 minutes in `chrome.storage.session` aggregates across all accessible frames:
+     - `usedJSHeapSize` from `performance.memory` (deduplicated per concrete origin to sum cross-origin iframes without double-counting same-origin or opaque `srcdoc`/`about:blank` frames)
+     - DOM node count (`document.getElementsByTagName('*').length`)
+     - Heavy media elements (`iframe`, `canvas`, `video` count)
+   - Ranking uses a composite fallback weight (`jsHeapBytes + domNodes * 2 KiB + mediaNodes * 16 MiB`) so DOM/media-heavy tabs are not masked by small JS heap differences. Pages where scripting is disallowed receive default weight (`1.0`). When neither companion renderer data nor page access is available, the size band falls back to oldest idle first.
 
 ### Detecting pending edits
 
@@ -141,10 +148,10 @@ Each native file request carries the directory selected at the start of the oper
 
 ## Permissions and Distribution
 
-- **Core permissions:** `tabs`, `storage`, `alarms`, `system.memory`, `tabGroups`.
+- **Core permissions:** `tabs`, `storage`, `alarms`, `system.memory`, `tabGroups`, `webNavigation`.
 - **Optional permissions (single-codebase Chrome Web Store compatibility):**
-  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), `scripting` paired with `<all_urls>` for on-demand weight sampling and the optional form edit observer, and `webRequest` paired with `<all_urls>` for optional active upload detection (off by default).
-  - `optional_host_permissions`: `<all_urls>` for sampling, observing accessible pages, and optional upload detection. Users who skip granting page access fall back to oldest idle first ordering.
+  - `optional_permissions`: `nativeMessaging` for exact Chrome and per-tab process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), `scripting` paired with `<all_urls>` for unsaved form protection, live screen-sharing/PiP checks, and fallback in-page weight sampling without the companion, and `webRequest` paired with `<all_urls>` for optional active upload detection (off by default).
+  - `optional_host_permissions`: `<all_urls>` for observing accessible pages, fallback weight sampling, and optional upload detection.
   - Revoking one optional capability preserves `<all_urls>` when another granted capability still requires it.
 
 ## Configuration Defaults
@@ -185,7 +192,8 @@ tab-reaper/
 │   │   ├── eviction.ts       # Memory-banded eviction engine and protections
 │   │   ├── form-observer.ts  # Optional isolated-world form edit observer registration
 │   │   ├── upload-observer.ts # Opt-in webRequest active upload heuristic
-│   │   ├── sampler.ts        # On-demand scripting weight and form sampler
+│   │   ├── process-memory.ts # OS renderer-to-tab attribution via webNavigation + Local Companion
+│   │   ├── sampler.ts        # On-demand scripting fallback weight and live protection sampler
 │   │   ├── memory.ts         # Native host client and chrome.system.memory fallback
 │   │   ├── session.ts        # Session snapshot capture and restore
 │   │   ├── window-cache.ts   # Session-storage window cache for window-close recovery

@@ -41,6 +41,11 @@ function formatMb(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
 }
 
+function formatTabMemory(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return formatGb(bytes);
+  return formatMb(bytes);
+}
+
 function formatAge(timestamp: number): string {
   const diffMin = Math.max(1, Math.round((Date.now() - timestamp) / 60_000));
   if (diffMin < 60) return `${diffMin}m ago`;
@@ -191,18 +196,37 @@ function renderOpenTabs(): void {
     title.title = title.textContent;
 
     const metaParts: string[] = [];
+    let metaTooltip: string | null = null;
     if (tab.isPwa) {
       metaParts.push("PWA");
     }
+    const memBytes = tab.memoryBytes ?? tab.jsHeapBytes;
+    const memSource = tab.memorySource ?? (tab.jsHeapBytes && tab.jsHeapBytes > 0 ? "js_heap" : null);
     if (tab.discarded) {
       metaParts.push("Sleeping");
-    } else if (tab.jsHeapBytes && tab.jsHeapBytes > 0) {
-      metaParts.push(`JS ${formatMb(tab.jsHeapBytes)}`);
+    } else if (memBytes && memBytes > 0) {
+      if (memSource === "process") {
+        const sharedCount = tab.sharedProcessTabs ?? 1;
+        if (sharedCount > 1) {
+          metaParts.push(`~${formatTabMemory(memBytes)} · shared`);
+          const totalBytes = tab.sharedProcessTotalBytes ?? memBytes * sharedCount;
+          metaTooltip = `Shared Chrome renderer process: ${formatTabMemory(totalBytes)} across ${sharedCount} tabs`;
+        } else {
+          metaParts.push(formatTabMemory(memBytes));
+        }
+      } else {
+        metaParts.push(`JS ${formatTabMemory(memBytes)}`);
+        metaTooltip =
+          "JS heap estimate only (excludes WASM, Web Workers, WebRTC, and GPU memory). Connect Local Companion for actual tab RAM.";
+      }
     }
     metaParts.push(extractHost(tab.url), formatIdle(tab.idleMinutes));
     const meta = document.createElement("div");
     meta.className = "item-meta";
     meta.textContent = metaParts.join(" · ");
+    if (metaTooltip) {
+      meta.title = metaTooltip;
+    }
     if (tab.discarded) {
       meta.insertAdjacentHTML("afterbegin", '<svg class="icon" aria-hidden="true"><use href="ui.svg#moon"/></svg>');
     }
