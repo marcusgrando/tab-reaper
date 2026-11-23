@@ -48,7 +48,18 @@ export function getTabProtectedReason(
   if (config.protectActive && tab.active) return "Active";
   if (config.protectAudible && tab.audible) return "Audio";
   if (config.protectPinned && tab.pinned) return "Pinned";
+  // Chromium keeps visibilityState === "visible" on inactive tabs only while visibly captured
+  // (getDisplayMedia screen sharing, casting, tabCapture) or displayed in Split View / WebXR.
+  if (!tab.active && sample?.isVisible) {
+    if (typeof tab.splitViewId === "number" && tab.splitViewId >= 0) {
+      if (config.protectActive) return "Active";
+    } else {
+      return "Sharing";
+    }
+  }
+  if (sample?.hasPictureInPicture) return "PiP";
   if (matchesAllowlist(tab.url, config.allowlist)) return "Allowlist";
+  if (tab.autoDiscardable === false) return "Protected";
   if (config.protectActiveUploads && hasActiveUpload) return "Upload";
   if (config.protectUnsavedForms && sample?.hasUnsavedForm) return "Form";
   return null;

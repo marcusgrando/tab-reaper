@@ -62,6 +62,10 @@ export interface TabWeightSample {
   mediaNodes: number;
   weightMultiplier: number;
   hasUnsavedForm?: boolean;
+  /** Live-only (never cached): top frame reports visibilityState === "visible". */
+  isVisible?: boolean;
+  /** Live-only (never cached): a frame has an active video or document Picture-in-Picture window. */
+  hasPictureInPicture?: boolean;
   sampledAt: number;
 }
 
@@ -96,11 +100,13 @@ export interface TabSummary {
   audible: boolean;
   pinned: boolean;
   discarded: boolean;
+  autoDiscardable?: boolean;
   kept?: boolean;
   status?: string;
   windowId: number;
   index?: number;
   groupId?: number;
+  splitViewId?: number;
   favIconUrl?: string;
 }
 

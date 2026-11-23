@@ -130,7 +130,58 @@ describe("eviction engine", () => {
     expect(isTabProtected(makeTab(5, { url: "https://meet.google.com/xyz" }), cfg)).toBe(true);
     expect(getTabProtectedReason(makeTab(7, { kept: true }), cfg)).toBe("Kept");
     expect(isTabProtected(makeTab(7, { kept: true }), cfg)).toBe(true);
+    expect(getTabProtectedReason(makeTab(8, { autoDiscardable: false }), cfg)).toBe("Protected");
+    expect(isTabProtected(makeTab(8, { autoDiscardable: false }), cfg)).toBe(true);
     expect(isTabProtected(makeTab(6), cfg)).toBe(false);
+  });
+
+  test("protects screen-shared background tabs, split-view visible tabs, and picture-in-picture tabs", () => {
+    const cfg = sanitizeConfig({ protectActive: true, protectUnsavedForms: false });
+    const visibleSample: TabWeightSample = {
+      jsHeapBytes: 10 * 1024 ** 2,
+      domNodes: 200,
+      mediaNodes: 1,
+      weightMultiplier: 1.2,
+      isVisible: true,
+      sampledAt: now,
+    };
+    const pipSample: TabWeightSample = {
+      jsHeapBytes: 10 * 1024 ** 2,
+      domNodes: 200,
+      mediaNodes: 1,
+      weightMultiplier: 1.2,
+      hasPictureInPicture: true,
+      sampledAt: now,
+    };
+
+    expect(getTabProtectedReason(makeTab(1, { active: false }), cfg, visibleSample)).toBe("Sharing");
+    expect(getTabProtectedReason(makeTab(2, { active: false, splitViewId: 3 }), cfg, visibleSample)).toBe("Active");
+    expect(getTabProtectedReason(makeTab(3, { active: false }), cfg, pipSample)).toBe("PiP");
+
+    // An active tab is naturally visible; with protectActive disabled it must not be mislabeled as Sharing.
+    const noActiveProtect = sanitizeConfig({ protectActive: false });
+    expect(getTabProtectedReason(makeTab(4, { active: true }), noActiveProtect, visibleSample)).toBeNull();
+    expect(getTabProtectedReason(makeTab(5, { active: true }), noActiveProtect, pipSample)).toBe("PiP");
+
+    // Manual actions hide Keep/Sleep for Sharing, PiP, and autoDiscardable=false tabs.
+    expect(computeOpenTabActions(makeTab(1, { active: false }), cfg, visibleSample)).toEqual({
+      protectedReason: "Sharing",
+      canKeep: false,
+      canSleep: false,
+      canClose: true,
+    });
+    expect(computeOpenTabActions(makeTab(3, { active: false }), cfg, pipSample)).toEqual({
+      protectedReason: "PiP",
+      canKeep: false,
+      canSleep: false,
+      canClose: true,
+    });
+    expect(computeOpenTabActions(makeTab(6, { autoDiscardable: false }), cfg)).toEqual({
+      protectedReason: "Protected",
+      canKeep: false,
+      canSleep: false,
+      canClose: true,
+    });
   });
 
   test("never discards below idleEvictionPercent memory budget even when tabs are idle", () => {

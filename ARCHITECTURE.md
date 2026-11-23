@@ -88,10 +88,13 @@ In-flight upload entries stay protected until completion, error, tab removal, fe
 ### Protections
 
 A tab is never discarded if any enabled protection matches:
-- `tab.active` (active tab in any window)
+- `tab.active` (active tab in any window, or a companion pane visible in Split View)
 - `tab.audible` (currently playing audio)
 - `tab.pinned` (pinned tab)
 - `tab.kept` (explicitly kept by the user in the palette)
+- `tab.autoDiscardable === false` (tabs explicitly marked non-auto-discardable by Chrome or another extension)
+- Screen-shared / mirrored background tabs (`!tab.active` while the top frame still reports `document.visibilityState === "visible"`, when page access is enabled). Not `chrome.tabCapture.getCapturedTabs()`, because it only reports extension-initiated captures, not web `getDisplayMedia()`.
+- Picture-in-Picture tabs (`document.pictureInPictureElement` or `window.documentPictureInPicture.window`, when page access is enabled)
 - Unsaved form edits (`protectUnsavedForms`, when Weighted Eviction is enabled)
 - Active HTTP uploads (`protectActiveUploads`, off by default, when Active upload detection is enabled)
 - URL matches user allowlist (domain or glob pattern)

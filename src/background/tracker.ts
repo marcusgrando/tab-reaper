@@ -350,6 +350,7 @@ export async function clearKeptTabIds(): Promise<void> {
 
 export function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>): TabSummary | null {
   if (typeof tab.id !== "number" || tab.incognito) return null;
+  const splitViewId = (tab as chrome.tabs.Tab & { splitViewId?: number }).splitViewId;
   return {
     id: tab.id,
     url: tab.url ?? tab.pendingUrl ?? "",
@@ -360,11 +361,13 @@ export function toTabSummary(tab: chrome.tabs.Tab, keptIds?: ReadonlySet<number>
     // Chrome's lazy session restore leaves background tabs with status="unloaded" and discarded=false
     // (no renderer process is running until focused), so treat them as sleeping.
     discarded: Boolean(tab.discarded || tab.status === "unloaded"),
+    autoDiscardable: tab.autoDiscardable,
     kept: keptIds?.has(tab.id) ?? false,
     status: tab.status,
     windowId: tab.windowId,
     index: tab.index,
     groupId: tab.groupId,
+    splitViewId,
     favIconUrl: tab.favIconUrl,
   };
 }

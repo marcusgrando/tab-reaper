@@ -1,15 +1,17 @@
 import { expect, test } from "bun:test";
-import { checkTabHasUnsavedForm, loadCachedWeights, sampleTabWeights } from "../src/background/sampler.ts";
+import { checkTabHasUnsavedForm, checkTabLiveProtection, loadCachedWeights, sampleTabWeights } from "../src/background/sampler.ts";
 
-test("cached form protection follows live frame results while weight metrics keep their timestamp", async () => {
+test("cached form, sharing, and PiP protection follow live frame results without caching transient visibility", async () => {
   const previous = globalThis.chrome;
   const tab = { id: 1, url: "https://editor.test/", title: "", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
   const metrics = { jsHeapBytes: 2048, domNodes: 38, mediaNodes: 1, weightMultiplier: 1.01, sampledAt: 1000 };
   const cache = { "tabReaper.weightSamples": {
     1: { ...metrics, hasUnsavedForm: true }, 2: { ...metrics, hasUnsavedForm: false },
   } };
-  const inspections: number[] = [];
+  const inspections: Array<{ tabId: number; args: boolean[] }> = [];
   let dirty = true;
+  let visible = false;
+  let pip = false;
   let blocked = false;
   try {
     Object.assign(globalThis, { chrome: {
@@ -20,30 +22,47 @@ test("cached form protection follows live frame results while weight metrics kee
       } },
       scripting: { executeScript: async ({ target, args }: { target: { tabId: number; allFrames: boolean }; args: boolean[] }) => {
         expect(target.allFrames).toBe(true);
-        expect(args).toEqual([false]);
-        inspections.push(target.tabId);
+        expect(args[0]).toBe(false);
+        inspections.push({ tabId: target.tabId, args });
         if (blocked) throw new Error("Page unavailable");
-        return [{ frameId: 0, result: false }, { frameId: 1, result: dirty }];
+        const protectForms = args[1] !== false;
+        return [
+          { frameId: 0, result: { hasUnsavedForm: false, isVisible: target.tabId === 1 ? visible : false, hasPictureInPicture: false } },
+          { frameId: 1, result: { hasUnsavedForm: protectForms && dirty, isVisible: false, hasPictureInPicture: target.tabId === 1 ? pip : false } },
+        ];
       } },
     } });
     // Revoked access still permits previously measured memory to be displayed.
     expect((await loadCachedWeights(1100)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
     const sample = async () => (await sampleTabWeights([tab, { ...tab, id: 2 }], 1100)).get(1);
-    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true });
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false });
     blocked = true;
-    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true });
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false });
     blocked = false;
     dirty = false;
-    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false });
-    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false });
+    visible = true;
+    pip = true;
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false, isVisible: true, hasPictureInPicture: true });
+    // Transient visibility and PiP flags must never be persisted in the 2-minute weight cache.
+    expect(cache["tabReaper.weightSamples"][1]).toEqual({ ...metrics, hasUnsavedForm: false });
+    visible = false;
+    pip = false;
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false });
     dirty = true;
-    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true });
-    expect(inspections).toEqual([1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
+    expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false });
+    expect(inspections.map(entry => entry.tabId)).toEqual([1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
     inspections.length = 0;
-    expect((await sampleTabWeights([tab], 1100, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
-    expect(inspections).toEqual([]);
+
+    // Even when protectUnsavedForms is false, live visibility/PiP checks still run for palette status.
+    visible = true;
+    expect((await sampleTabWeights([tab], 1100, false)).get(1)).toEqual({
+      ...metrics, hasUnsavedForm: false, isVisible: true, hasPictureInPicture: false,
+    });
+    expect(inspections).toEqual([{ tabId: 1, args: [false, false] }]);
+    inspections.length = 0;
+
     // With refreshFormState=false, cached dirty tabs stay eligible for size-band ranking without probing frames,
-    // while keeping the cached dirty flag intact as fallback for checkTabHasUnsavedForm.
+    // while keeping the cached dirty flag intact as fallback for checkTabLiveProtection.
     cache["tabReaper.weightSamples"][1] = { ...metrics, hasUnsavedForm: true };
     expect((await sampleTabWeights([tab], 1100, true, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
     expect(inspections).toEqual([]);
@@ -63,6 +82,12 @@ test("an unavailable live check preserves a recent observed edit before discard"
       storage: { session: { get: async () => ({ "tabReaper.weightSamples": { 1: sample } }) } },
     } });
     expect(await checkTabHasUnsavedForm(1)).toBe(true);
+    expect(await checkTabLiveProtection(1, true)).toEqual({
+      hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false,
+    });
+    expect(await checkTabLiveProtection(1, false)).toEqual({
+      hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false,
+    });
     sample.sampledAt -= 121_000;
     expect(await checkTabHasUnsavedForm(1)).toBe(false);
   } finally {
@@ -83,7 +108,7 @@ test("saving samples drops tabs that were closed", async () => {
         get: async () => structuredClone(cache),
         set: async (update: typeof cache) => Object.assign(cache, structuredClone(update)),
       } },
-      scripting: { executeScript: async () => [{ frameId: 0, result: true }] },
+      scripting: { executeScript: async () => [{ frameId: 0, result: { hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false } }] },
     } });
     await sampleTabWeights([tab], 1100);
     expect(Object.keys(cache["tabReaper.weightSamples"]!).sort()).toEqual(["1", "7"]);

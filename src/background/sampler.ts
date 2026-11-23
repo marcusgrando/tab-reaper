@@ -4,14 +4,31 @@ import type { TabSummary, TabWeightSample } from "../shared/types.ts";
 const SAMPLE_CACHE_KEY = "tabReaper.weightSamples";
 const SAMPLE_TTL_MS = 2 * 60 * 1000;
 
-interface RawPageMetrics {
+interface RawLiveState {
+  hasUnsavedForm: boolean;
+  isVisible: boolean;
+  hasPictureInPicture: boolean;
+}
+
+interface RawPageMetrics extends RawLiveState {
   jsHeapBytes: number;
   domNodes: number;
   mediaNodes: number;
-  hasUnsavedForm?: boolean;
 }
 
-export function computeWeightMultiplier(metrics: RawPageMetrics): number {
+export interface LiveTabProtection {
+  hasUnsavedForm: boolean;
+  isVisible: boolean;
+  hasPictureInPicture: boolean;
+}
+
+interface LiveTabInspection {
+  hasUnsavedForm: boolean | undefined;
+  isVisible: boolean;
+  hasPictureInPicture: boolean;
+}
+
+export function computeWeightMultiplier(metrics: Pick<RawPageMetrics, "jsHeapBytes" | "domNodes" | "mediaNodes">): number {
   const heapMb = metrics.jsHeapBytes / (1024 * 1024);
   const heapScore = Math.min(2.5, heapMb / 60);
   const domScore = Math.min(1.0, metrics.domNodes / 5000);
@@ -48,24 +65,36 @@ export async function sampleTabWeights(
     if (tab.discarded || isInternalUrl(tab.url)) return;
     const key = String(tab.id);
     const cached = cache[key];
-    let sample: TabWeightSample | null;
+    let cacheable: TabWeightSample | null;
+    let live: Pick<LiveTabProtection, "isVisible" | "hasPictureInPicture"> | undefined;
     if (cached && now - cached.sampledAt < SAMPLE_TTL_MS) {
-      sample = cached;
+      cacheable = cached;
       if (refreshFormState) {
-        const dirty = protectUnsavedForms ? await inspectFormState(tab.id) : false;
+        const inspected = await inspectLiveTabState(tab.id, protectUnsavedForms);
+        live = { isVisible: inspected.isVisible, hasPictureInPicture: inspected.hasPictureInPicture };
+        const dirty = protectUnsavedForms ? inspected.hasUnsavedForm : false;
         if (dirty !== undefined && dirty !== cached.hasUnsavedForm) {
-          sample = { ...cached, hasUnsavedForm: dirty };
+          cacheable = { ...cached, hasUnsavedForm: dirty };
         }
       }
     } else {
-      sample = await sampleSingleTab(tab.id, now, protectUnsavedForms);
+      const sampled = await sampleSingleTab(tab.id, now, protectUnsavedForms);
+      cacheable = sampled?.cacheable ?? null;
+      live = sampled?.live;
     }
-    if (!sample) return;
+    if (!cacheable) return;
     // When refreshFormState is false, clear stale cached form flags in the returned map so
-    // planEvictions still ranks the tab by weight and lets discardTabSafely run the live form check.
-    weights.set(tab.id, !refreshFormState && sample === cached ? { ...sample, hasUnsavedForm: false } : sample);
-    if (sample !== cached) {
-      cache[key] = sample;
+    // planEvictions still ranks the tab by weight and lets discardTabSafely run the live check.
+    if (!refreshFormState && cacheable === cached) {
+      weights.set(tab.id, { ...cacheable, hasUnsavedForm: false });
+    } else if (live) {
+      weights.set(tab.id, { ...cacheable, isVisible: live.isVisible, hasPictureInPicture: live.hasPictureInPicture });
+    } else {
+      weights.set(tab.id, cacheable);
+    }
+    if (cacheable !== cached) {
+      // Never persist transient visibility or PiP flags in the 2-minute weight cache.
+      cache[key] = cacheable;
       cacheChanged = true;
     }
   }));
@@ -86,20 +115,23 @@ async function withoutClosedTabs(cache: Record<string, TabWeightSample>): Promis
 export async function sampleTabFormsOnly(
   tabs: TabSummary[],
   now = Date.now(),
+  protectUnsavedForms = true,
 ): Promise<Map<number, TabWeightSample>> {
   const results = new Map<number, TabWeightSample>();
   if (tabs.length === 0 || !(await hasHostAccessPermission())) return results;
   await Promise.all(
     tabs.map(async (tab) => {
       if (tab.discarded || isInternalUrl(tab.url)) return;
-      const dirty = await inspectFormState(tab.id);
-      if (dirty === true) {
+      const live = await inspectLiveTabState(tab.id, protectUnsavedForms);
+      if (live.hasUnsavedForm === true || live.isVisible || live.hasPictureInPicture) {
         results.set(tab.id, {
           jsHeapBytes: 0,
           domNodes: 0,
           mediaNodes: 0,
           weightMultiplier: 1.0,
-          hasUnsavedForm: true,
+          hasUnsavedForm: live.hasUnsavedForm === true,
+          isVisible: live.isVisible,
+          hasPictureInPicture: live.hasPictureInPicture,
           sampledAt: now,
         });
       }
@@ -128,11 +160,15 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
   return weights;
 }
 
-function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): RawPageMetrics | boolean {
+function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): RawPageMetrics | RawLiveState {
   const hasUnsavedForm = protectUnsavedForms && window.tabReaperFormObserver?.dirty === true;
-  if (!includeMetrics) return hasUnsavedForm;
-  if (window !== window.top) {
-    return { jsHeapBytes: 0, domNodes: 0, mediaNodes: 0, hasUnsavedForm };
+  const isTop = window === window.top;
+  const isVisible = isTop && document.visibilityState === "visible";
+  const docPip = (window as Window & { documentPictureInPicture?: { window?: unknown } }).documentPictureInPicture;
+  const hasPictureInPicture = Boolean(document.pictureInPictureElement || docPip?.window);
+  if (!includeMetrics) return { hasUnsavedForm, isVisible, hasPictureInPicture };
+  if (!isTop) {
+    return { jsHeapBytes: 0, domNodes: 0, mediaNodes: 0, hasUnsavedForm, isVisible: false, hasPictureInPicture };
   }
 
   const perf = performance as Performance & {
@@ -141,33 +177,65 @@ function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): 
   const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
   const domNodes = document.getElementsByTagName("*").length;
   const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
-  return { jsHeapBytes, domNodes, mediaNodes, hasUnsavedForm };
+  return { jsHeapBytes, domNodes, mediaNodes, hasUnsavedForm, isVisible, hasPictureInPicture };
+}
+
+export async function checkTabLiveProtection(tabId: number, protectUnsavedForms = true): Promise<LiveTabProtection> {
+  if (!chrome.scripting?.executeScript || !(await hasHostAccessPermission())) {
+    return { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false };
+  }
+  const live = await inspectLiveTabState(tabId, protectUnsavedForms);
+  let hasUnsavedForm = false;
+  if (protectUnsavedForms) {
+    if (live.hasUnsavedForm !== undefined) {
+      hasUnsavedForm = live.hasUnsavedForm;
+    } else {
+      const cached = (await loadSampleCache())[String(tabId)];
+      hasUnsavedForm = cached?.hasUnsavedForm === true && Date.now() - cached.sampledAt < SAMPLE_TTL_MS;
+    }
+  }
+  return {
+    hasUnsavedForm,
+    isVisible: live.isVisible,
+    hasPictureInPicture: live.hasPictureInPicture,
+  };
 }
 
 export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
-  if (!chrome.scripting?.executeScript) return false;
-  if (!(await hasHostAccessPermission())) return false;
-  const dirty = await inspectFormState(tabId);
-  if (dirty !== undefined) return dirty;
-  const cached = (await loadSampleCache())[String(tabId)];
-  return cached?.hasUnsavedForm === true && Date.now() - cached.sampledAt < SAMPLE_TTL_MS;
+  return (await checkTabLiveProtection(tabId, true)).hasUnsavedForm;
 }
 
-async function inspectFormState(tabId: number): Promise<boolean | undefined> {
+async function inspectLiveTabState(tabId: number, protectUnsavedForms: boolean): Promise<LiveTabInspection> {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       func: inspectPageInTab,
-      args: [false],
+      args: [false, protectUnsavedForms],
     });
-    if (results.some(frame => frame.result === true)) return true;
-    if (results.length > 0 && results.every(frame => frame.result === false)) return false;
+    const frames = results
+      .map(frame => frame?.result as Partial<RawLiveState> | undefined)
+      .filter((res): res is Partial<RawLiveState> => Boolean(res && typeof res === "object"));
+    const hasUnsavedForm = frames.some(frame => frame.hasUnsavedForm === true)
+      ? true
+      : frames.length > 0 && frames.length === results.length && frames.every(frame => frame.hasUnsavedForm === false)
+        ? false
+        : undefined;
+    return {
+      hasUnsavedForm,
+      isVisible: frames.some(frame => frame.isVisible === true),
+      hasPictureInPicture: frames.some(frame => frame.hasPictureInPicture === true),
+    };
   } catch {
     // Keep a previously observed draft protected until a successful recheck or cache expiry.
+    return { hasUnsavedForm: undefined, isVisible: false, hasPictureInPicture: false };
   }
 }
 
-async function sampleSingleTab(tabId: number, now: number, protectUnsavedForms: boolean): Promise<TabWeightSample | null> {
+async function sampleSingleTab(
+  tabId: number,
+  now: number,
+  protectUnsavedForms: boolean,
+): Promise<{ cacheable: TabWeightSample; live: Pick<LiveTabProtection, "isVisible" | "hasPictureInPicture"> } | null> {
   if (!chrome.scripting?.executeScript) return null;
   try {
     const results = await chrome.scripting.executeScript({
@@ -179,18 +247,23 @@ async function sampleSingleTab(tabId: number, now: number, protectUnsavedForms: 
     const metrics = topFrame?.result as RawPageMetrics | undefined;
     if (!metrics || typeof metrics !== "object") return null;
 
-    const hasUnsavedForm = results.some((frame) => {
-      const res = frame?.result as RawPageMetrics | undefined;
-      return Boolean(res && typeof res === "object" && res.hasUnsavedForm);
-    });
+    const frames = results
+      .map(frame => frame?.result as Partial<RawPageMetrics> | undefined)
+      .filter((res): res is Partial<RawPageMetrics> => Boolean(res && typeof res === "object"));
+    const hasUnsavedForm = frames.some(frame => Boolean(frame.hasUnsavedForm));
+    const isVisible = frames.some(frame => frame.isVisible === true);
+    const hasPictureInPicture = frames.some(frame => frame.hasPictureInPicture === true);
 
     return {
-      jsHeapBytes: metrics.jsHeapBytes,
-      domNodes: metrics.domNodes,
-      mediaNodes: metrics.mediaNodes,
-      weightMultiplier: computeWeightMultiplier(metrics),
-      hasUnsavedForm,
-      sampledAt: now,
+      cacheable: {
+        jsHeapBytes: metrics.jsHeapBytes,
+        domNodes: metrics.domNodes,
+        mediaNodes: metrics.mediaNodes,
+        weightMultiplier: computeWeightMultiplier(metrics),
+        hasUnsavedForm,
+        sampledAt: now,
+      },
+      live: { isVisible, hasPictureInPicture },
     };
   } catch {
     return null;

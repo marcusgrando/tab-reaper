@@ -8,7 +8,15 @@ import {
   SETUP_PENDING_KEY,
   saveConfig,
 } from "../shared/config.ts";
-import type { ActivityState, BackgroundMessage, OpenTabInfo, StatusPayload, TabReaperConfig, TabSummary } from "../shared/types.ts";
+import type {
+  ActivityState,
+  BackgroundMessage,
+  OpenTabInfo,
+  StatusPayload,
+  TabReaperConfig,
+  TabSummary,
+  TabWeightSample,
+} from "../shared/types.ts";
 import { updateActionBadge } from "./badge.ts";
 import {
   UPDATE_ALARM,
@@ -45,7 +53,7 @@ import {
   savePressureEpisode,
 } from "./memory.ts";
 import {
-  checkTabHasUnsavedForm,
+  checkTabLiveProtection,
   clearSampleCache,
   hasHostAccessPermission,
   loadCachedWeights,
@@ -208,14 +216,32 @@ async function discardTabSafely(
   mode: "manual" | "automatic",
   plannedLastActiveAt?: number,
 ): Promise<boolean> {
-  if (config.protectUnsavedForms && (await checkTabHasUnsavedForm(tabId))) {
+  const [initialRaw, initialKeptIds] = await Promise.all([chrome.tabs.get(tabId), loadKeptTabIds()]);
+  const initialLive = toTabSummary(initialRaw, initialKeptIds);
+  if (!initialLive || initialLive.discarded) return false;
+  if (mode === "manual" ? !computeOpenTabActions(initialLive, config).canSleep : isTabProtected(initialLive, config)) {
     return false;
   }
+  const liveProtection = await checkTabLiveProtection(tabId, config.protectUnsavedForms);
+  const liveSample: TabWeightSample = {
+    jsHeapBytes: 0,
+    domNodes: 0,
+    mediaNodes: 0,
+    weightMultiplier: 1,
+    sampledAt: Date.now(),
+    hasUnsavedForm: liveProtection.hasUnsavedForm,
+    isVisible: liveProtection.isVisible,
+    hasPictureInPicture: liveProtection.hasPictureInPicture,
+  };
   return enqueueActivityUpdate(async () => {
     const [raw, keptIds] = await Promise.all([chrome.tabs.get(tabId), loadKeptTabIds()]);
     const live = toTabSummary(raw, keptIds);
     if (!live || live.discarded) return false;
-    if (mode === "manual" ? !computeOpenTabActions(live, config).canSleep : isTabProtected(live, config)) {
+    if (
+      mode === "manual"
+        ? !computeOpenTabActions(live, config, liveSample).canSleep
+        : isTabProtected(live, config, liveSample)
+    ) {
       return false;
     }
     if (plannedLastActiveAt !== undefined) {

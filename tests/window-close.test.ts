@@ -162,7 +162,7 @@ test("an idle candidate used during form inspection stays open", async () => {
       scripting: { executeScript: async () => {
         await listeners.activated!({ tabId: 1, windowId: 5 });
         await listeners.activated!({ tabId: 2, windowId: 5 });
-        return [{ frameId: 0, result: false }];
+        return [{ frameId: 0, result: { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } }];
       } },
     });
     Object.assign(chrome.tabs, { query: async () => tabs, get: async (id: number) => tabs[id - 1],
@@ -545,6 +545,75 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
   } finally {
     localData["tabReaper.config"] = { protectActiveUploads: false };
     await listeners.permissionRemoved!({ permissions: ["webRequest"] });
+    restore();
+  }
+});
+
+test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs across sweeps even with form protection off", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  const discarded: number[] = [];
+  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, {}, resolve));
+  try {
+    const now = Date.now();
+    localData["tabReaper.folderSyncOptedIn"] = false;
+    // Form protection disabled must still protect screen-shared and PiP tabs when page access is granted.
+    localData["tabReaper.config"] = { protectUnsavedForms: false };
+    tabs.push(
+      { ...tabs[0]!, id: 4, index: 3, url: "https://old.test/4", title: "4" },
+      { ...tabs[0]!, id: 5, index: 4, url: "https://old.test/5", title: "5" },
+    );
+    // Tab 1: screen-shared (background tab kept visible by Chromium's visible capturer)
+    // Tab 2: Picture-in-Picture video
+    // Tab 3: autoDiscardable === false (protected without page access)
+    // Tab 4: normal background tab (should be discarded)
+    // Tab 5: active tab
+    (tabs[2] as { autoDiscardable?: boolean }).autoDiscardable = false;
+    tabs[4]!.active = true;
+    localData["tabReaper.activity"] = {
+      byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - (6 - tab.id) * 60_000 }])),
+      byUrl: {},
+    };
+    let sharingTab1 = true;
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => ({ ok: true, chromeBytes: 90, systemTotalBytes: 200, systemAvailableBytes: 50 }),
+    });
+    Object.assign(chrome, {
+      permissions: { contains: async () => true },
+      scripting: {
+        executeScript: async ({ target }: { target: { tabId: number } }) => {
+          if (target.tabId === 1) {
+            return [{ frameId: 0, result: { hasUnsavedForm: false, isVisible: sharingTab1, hasPictureInPicture: false } }];
+          }
+          if (target.tabId === 2) {
+            return [
+              { frameId: 0, result: { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } },
+              { frameId: 1, result: { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: true } },
+            ];
+          }
+          return [{ frameId: 0, result: { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } }];
+        },
+      },
+    });
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
+    });
+
+    // Tab switch event sweep discards only normal background tab 4, keeping tabs 1, 2, 3 alive.
+    await listeners.activated!({ tabId: 5, windowId: 5 });
+    expect(discarded).toEqual([4]);
+
+    // Manual sleep also refuses tabs 1, 2, and 3 while protected.
+    expect(await message({ type: "discard_tab", tabId: 1 })).toEqual({ ok: false });
+    expect(await message({ type: "discard_tab", tabId: 2 })).toEqual({ ok: false });
+    expect(await message({ type: "discard_tab", tabId: 3 })).toEqual({ ok: false });
+
+    // Once screen sharing stops on tab 1, the next sweep can discard it.
+    sharingTab1 = false;
+    await listeners.alarm!({ name: "tabReaper.sweep" });
+    expect(discarded).toEqual([4, 1]);
+  } finally {
     restore();
   }
 });
