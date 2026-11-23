@@ -331,8 +331,9 @@ describe("eviction engine", () => {
     expect(planned.map((p) => p.id)).toEqual([3, 5]);
   });
 
-  test("protects loading tabs and tabs with unsaved form input", () => {
+  test("protects loading tabs, unsaved form input, and opt-in active uploads", () => {
     const cfg = sanitizeConfig({ protectUnsavedForms: true });
+    expect(cfg.protectActiveUploads).toBe(false);
     expect(getTabProtectedReason(makeTab(1, { status: "loading" }), cfg)).toBe("Loading");
     expect(isTabProtected(makeTab(1, { status: "loading" }), cfg)).toBe(true);
 
@@ -346,16 +347,29 @@ describe("eviction engine", () => {
     };
     expect(getTabProtectedReason(makeTab(2), cfg, formSample)).toBe("Form");
 
+    // Upload protection is off by default even if an uploading tabId is present.
+    expect(getTabProtectedReason(makeTab(3), cfg, undefined, true)).toBe(null);
+
+    const uploadCfg = sanitizeConfig({ protectUnsavedForms: true, protectActiveUploads: true });
+    expect(getTabProtectedReason(makeTab(3), uploadCfg, undefined, true)).toBe("Upload");
+    expect(computeOpenTabActions(makeTab(3), uploadCfg, undefined, false, true)).toEqual({
+      protectedReason: "Upload",
+      canKeep: false,
+      canSleep: false,
+      canClose: true,
+    });
+
     const planned = planEvictions({
-      tabs: [makeTab(1, { status: "loading" }), makeTab(2), makeTab(3)],
+      tabs: [makeTab(1, { status: "loading" }), makeTab(2), makeTab(3), makeTab(4)],
       activity: createEmptyActivityState(),
       weights: new Map([[2, formSample]]),
-      config: cfg,
+      uploadingTabIds: new Set([3]),
+      config: uploadCfg,
       memory: makeMemory(0.85),
       now,
       mode: "sweep",
     });
-    expect(planned.map(tab => tab.id)).toEqual([3]);
+    expect(planned.map(tab => tab.id)).toEqual([4]);
   });
 
   test("skips all evictions when offline and skipWhenOffline is enabled", () => {

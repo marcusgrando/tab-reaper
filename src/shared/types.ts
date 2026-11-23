@@ -16,6 +16,8 @@ export interface TabReaperConfig {
   protectAudible: boolean;
   protectPinned: boolean;
   protectUnsavedForms: boolean;
+  /** Opt-in webRequest heuristic that pauses sleeping while a tab has an active upload. Off by default. */
+  protectActiveUploads: boolean;
   skipWhenOffline: boolean;
   /** Automatic session snapshots (active only when Folder Sync is configured). */
   enableSessionSnapshots: boolean;
@@ -111,6 +113,7 @@ export interface OpenTabInfo {
   weightMultiplier: number;
   jsHeapBytes: number | null;
   hasUnsavedForm: boolean;
+  hasActiveUpload: boolean;
   isPwa: boolean;
   canKeep: boolean;
   canSleep: boolean;
@@ -229,6 +232,7 @@ export interface StatusPayload {
   permissions: {
     nativeMessaging: boolean;
     hostAccess: boolean;
+    uploadProtection: boolean;
   };
 }
 

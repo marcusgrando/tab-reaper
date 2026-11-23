@@ -79,6 +79,12 @@ Trusted edit events on visible text inputs, textareas and editable HTML count on
 
 The palette and eviction planner read each frame's edit flag independently of the two-minute weight cache. A failed read can reuse the last positive result until the sample expires. The final discard check reads the live document again. Only the boolean crosses from a frame to the worker.
 
+### Detecting active uploads (opt-in)
+
+With `protectActiveUploads` enabled (off by default) and optional `webRequest` plus `<all_urls>` access granted, the background service worker observes `POST`, `PUT`, and `PATCH` requests across `xmlhttprequest`, `main_frame`, `sub_frame`, and `other` resource types. It flags a request as an active upload when `onBeforeRequest` reports a file reference, raw payload of at least `64 KiB`, or a Chromium Blob/stream body marker, or when `onBeforeSendHeaders` carries upload headers (`multipart/form-data`, `application/octet-stream`, `application/offset+octet-stream`, media/archive/PDF `Content-Type`, `Content-Range`, `Upload-Offset`, or `Content-Length >= 64 KiB`), or on a `PATCH` request with no `Content-Type` header and no small `Content-Length` (matching raw binary `Uint8Array`/`Blob` `PATCH` transfers where Chromium omits `requestBody` and `Content-Length`). Small JSON or form-urlencoded requests, `GET` polling, SSE, and `ping` beacons are ignored so persistent connections do not block sleeping.
+
+In-flight upload entries stay protected until completion, error, tab removal, feature disable, or permission revocation, with a 20-second post-completion cooldown to bridge gaps between chunks in resumable uploads. State is persisted in `chrome.storage.session` and orphaned entries for closed tabs are pruned on reconcile. This protection is off by default because Chrome's `webRequest` filter cannot filter by HTTP method, so enabling it wakes the service worker on background XHR/fetch traffic. It cannot observe uploads sent from Service Workers (`tabId: -1`), WebSockets, or WebRTC.
+
 ### Protections
 
 A tab is never discarded if any enabled protection matches:
@@ -87,6 +93,7 @@ A tab is never discarded if any enabled protection matches:
 - `tab.pinned` (pinned tab)
 - `tab.kept` (explicitly kept by the user in the palette)
 - Unsaved form edits (`protectUnsavedForms`, when Weighted Eviction is enabled)
+- Active HTTP uploads (`protectActiveUploads`, off by default, when Active upload detection is enabled)
 - URL matches user allowlist (domain or glob pattern)
 - Loading tabs (`tab.status === "loading"`)
 - Internal browser pages (`chrome://`, `chrome-extension://`, `chrome-search://`, `devtools://`, `edge://`, `about:`)
@@ -123,7 +130,7 @@ During pre-release development, the extension supports one storage format at a t
 Cloud-synced folders propagate files asynchronously, so distributed locks are unreliable and shared mutable files produce conflicted copies. To eliminate conflicts by construction, **every writable file is strictly single-writer per `deviceId`** under `devices/<deviceId>/`:
 
 - `devices/<deviceId>/meta.json` — device identity (including `deviceName`, optional `hostname` to identify earlier installs or other profiles on the same computer) and last seen timestamp.
-- Devices write settings to `devices/<deviceId>/config-v2.json`. The highest `updatedAt` wins, with `deviceId` breaking ties. This version applies to the whole configuration except `memoryBudgetMode` and `memoryBudgetGb`, which each device keeps, because a GB budget sized for one machine's RAM can stop discarding on a smaller one.
+- Devices write settings to `devices/<deviceId>/config-v2.json`. The highest `updatedAt` wins, with `deviceId` breaking ties. This version applies to the whole configuration except `memoryBudgetMode`, `memoryBudgetGb`, and `protectActiveUploads`, which each device keeps, because a GB budget sized for one machine's RAM can stop discarding on a smaller one and `protectActiveUploads` depends on per-browser optional `webRequest` permission.
 - `devices/<deviceId>/snapshots/<iso>_<id>.json` + `devices/<deviceId>/index.json` — full session snapshots (window geometry/state, tab index, pinned, kept, active, collapsed tab groups, and sanitized favicon URL) retained under a GFS policy (unlimited manual, 20 recent auto, 1/hour for 24h, 1/day for 30d). New captures record `complete` in the snapshot and index. Window-close captures and copies truncated to fit the local quota set it to `false`. Rotation keeps the newest complete session. In the sync folder, the replacement must be published in the index before the writer removes older files. Once a snapshot index spans multiple files, `index.json` points to overflow parts under `index-parts/<generation>-p<N>.json`. The writer publishes the manifest only after writing every part. A reader that cannot assemble the published generation retries without replacing the index.
 - **Explicit device and snapshot management (`manage_devices` capability):** Routine writes and GFS rotation remain strictly single-writer per `deviceId`. From Settings, a user can inspect tabs inside any snapshot on demand, delete an individual snapshot belonging to another device (restricted by the host to `snapshots/`, `index.json`, and `index-parts/` only — never `config-v2.json` or `meta.json`), remove an unused device's folder (`sync_delete_device`, refusing symlinks and the current device), or resume an earlier install from the same computer by approving and switching to its `deviceId`, merging any temporary snapshots, and removing the temporary device folder.
 
@@ -133,9 +140,9 @@ Each native file request carries the directory selected at the start of the oper
 
 - **Core permissions:** `tabs`, `storage`, `alarms`, `system.memory`, `tabGroups`.
 - **Optional permissions (single-codebase Chrome Web Store compatibility):**
-  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), and `scripting` paired with `<all_urls>` for on-demand weight sampling and the optional form edit observer.
-  - `optional_host_permissions`: `<all_urls>` for sampling and observing accessible pages. Users who skip granting page access fall back to oldest idle first ordering.
-  - Both optional capabilities can be toggled with one click on the Options page, avoiding broad install-time permission warnings on the Chrome Web Store.
+  - `optional_permissions`: `nativeMessaging` for exact Chrome process RAM reporting and Folder Sync via the local Rust host binary (`native-host/`), `scripting` paired with `<all_urls>` for on-demand weight sampling and the optional form edit observer, and `webRequest` paired with `<all_urls>` for optional active upload detection (off by default).
+  - `optional_host_permissions`: `<all_urls>` for sampling, observing accessible pages, and optional upload detection. Users who skip granting page access fall back to oldest idle first ordering.
+  - Revoking one optional capability preserves `<all_urls>` when another granted capability still requires it.
 
 ## Configuration Defaults
 
@@ -151,6 +158,7 @@ All values are user-configurable on the Options page:
 | `protectAudible` | `true` | Never discard tabs playing audio |
 | `protectPinned` | `true` | Never discard pinned tabs |
 | `protectUnsavedForms` | `true` | Protect tabs with unsaved non-password form edits (when Weighted Eviction is enabled) |
+| `protectActiveUploads` | `false` | Opt-in `webRequest` heuristic to protect tabs with active HTTP uploads (requires Active upload detection permission) |
 | `skipWhenOffline` | `true` | Pause automatic discarding while offline |
 | `enableSessionSnapshots` | `true` | Automatic session snapshots (active only when Folder Sync is configured) |
 | `snapshotIntervalMinutes` | `5` | Automatic snapshot interval in minutes (`1` to `1440`, configurable under Folder Sync) |
@@ -171,6 +179,8 @@ tab-reaper/
 │   ├── background/
 │   │   ├── index.ts          # Event listeners (tabs, alarms, startup, messages)
 │   │   ├── eviction.ts       # Memory-banded eviction engine and protections
+│   │   ├── form-observer.ts  # Optional isolated-world form edit observer registration
+│   │   ├── upload-observer.ts # Opt-in webRequest active upload heuristic
 │   │   ├── sampler.ts        # On-demand scripting weight and form sampler
 │   │   ├── memory.ts         # Native host client and chrome.system.memory fallback
 │   │   ├── session.ts        # Session snapshot capture and restore

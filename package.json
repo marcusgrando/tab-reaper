@@ -1,6 +1,6 @@
 {
   "name": "tab-reaper",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "package": "bun run build && rm -f dist/tab-reaper-extension.zip && (cd dist && zip -qr tab-reaper-extension.zip .)",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:ui": "bun run build && bun tests/extension-ui.ts && bun tests/form-observer.ts",
+    "test:ui": "bun run build && bun tests/extension-ui.ts && bun tests/form-observer.ts && bun tests/upload-observer.ts",
     "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo test --manifest-path native-host/Cargo.toml",
     "build:host": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo build --release --manifest-path native-host/Cargo.toml"
   },

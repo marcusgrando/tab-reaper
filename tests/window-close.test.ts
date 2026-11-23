@@ -271,3 +271,280 @@ test("granting page access attaches to already loaded tabs and revocation stops 
     restore();
   }
 });
+
+test("an upload starting while tabs.get is pending prevents discard", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  try {
+    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    let onBeforeRequest: ((details: chrome.webRequest.WebRequestBodyDetails) => void) | undefined;
+    const noopEvent = () => ({ addListener: () => {}, removeListener: () => {}, hasListener: () => false });
+    Object.assign(chrome.permissions, { contains: async () => true });
+    Object.assign(chrome, {
+      webRequest: {
+        onBeforeRequest: {
+          addListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => { onBeforeRequest = fn; },
+          removeListener: () => { onBeforeRequest = undefined; },
+          hasListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => onBeforeRequest === fn,
+        },
+        onBeforeSendHeaders: noopEvent(),
+        onCompleted: noopEvent(),
+        onErrorOccurred: noopEvent(),
+      },
+    });
+    const discarded: number[] = [];
+    let releaseGet!: () => void;
+    let getEntered!: () => void;
+    const getReached = new Promise<void>((resolve) => { getEntered = resolve; });
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => {
+        getEntered();
+        await new Promise<void>((resolve) => { releaseGet = resolve; });
+        return tabs[id - 1];
+      },
+      discard: async (id: number) => { discarded.push(id); return { ...tabs[id - 1], discarded: true }; },
+    });
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+    expect(onBeforeRequest).toBeDefined();
+
+    const response = new Promise<{ ok?: boolean }>((resolve) => {
+      listeners.message!({ type: "discard_tab", tabId: 2 }, {}, resolve);
+    });
+    await getReached;
+    // Start an upload on tab 2 while tabs.get is still pending inside discardTabSafely.
+    onBeforeRequest!({
+      requestId: "race-1",
+      tabId: 2,
+      method: "POST",
+      url: "https://upload.test/file",
+      type: "xmlhttprequest",
+      frameId: 0,
+      parentFrameId: -1,
+      timeStamp: Date.now(),
+      requestBody: { raw: [{ file: "/tmp/video.mp4" }] },
+    });
+    releaseGet();
+    expect(await response).toEqual({ ok: false });
+    expect(discarded).toEqual([]);
+  } finally {
+    localData["tabReaper.config"] = { protectActiveUploads: false };
+    await listeners.permissionRemoved!({ permissions: ["webRequest"] });
+    restore();
+  }
+});
+
+test("an upload starting while expired cooldown cleanup is awaiting prevents discard", async () => {
+  const { listeners, tabs, localData, sessionData, restore } = await worker();
+  try {
+    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    sessionData["tabReaper.activeUploads"] = {
+      inFlight: {},
+      cooldownUntilByTabId: { "2": Date.now() - 1000 },
+    };
+    let onBeforeRequest: ((details: chrome.webRequest.WebRequestBodyDetails) => void) | undefined;
+    const noopEvent = () => ({ addListener: () => {}, removeListener: () => {}, hasListener: () => false });
+    Object.assign(chrome.permissions, { contains: async () => true });
+    Object.assign(chrome, {
+      webRequest: {
+        onBeforeRequest: {
+          addListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => { onBeforeRequest = fn; },
+          removeListener: () => { onBeforeRequest = undefined; },
+          hasListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => onBeforeRequest === fn,
+        },
+        onBeforeSendHeaders: noopEvent(),
+        onCompleted: noopEvent(),
+        onErrorOccurred: noopEvent(),
+      },
+    });
+    const discarded: number[] = [];
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { discarded.push(id); return { ...tabs[id - 1], discarded: true }; },
+    });
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+
+    // Seed an expired cooldown in the hydrated state, then pause session.remove during checkTabHasActiveUpload.
+    sessionData["tabReaper.activeUploads"] = {
+      inFlight: {},
+      cooldownUntilByTabId: { "2": Date.now() - 1000 },
+    };
+    // Re-hydrate with the expired cooldown via a fresh enable so cachedState holds it until checkTabHasActiveUpload prunes it.
+    let releaseRemove!: () => void;
+    let removeEntered!: () => void;
+    const removeReached = new Promise<void>((resolve) => { removeEntered = resolve; });
+    const origRemove = chrome.storage.session.remove;
+    let interceptRemove = false;
+    chrome.storage.session.remove = async (key: string | string[]) => {
+      if (interceptRemove && key === "tabReaper.activeUploads") {
+        interceptRemove = false;
+        removeEntered();
+        await new Promise<void>((resolve) => { releaseRemove = resolve; });
+      }
+      return origRemove(key);
+    };
+
+    // Put a short-lived upload through start -> finish, then advance past cooldown so checkTabHasActiveUpload prunes it.
+    const realNow = Date.now;
+    const base = 1_700_000_000_000;
+    let fakeNow = base;
+    Date.now = () => fakeNow;
+    try {
+      let onCompleted!: (details: chrome.webRequest.WebResponseCacheDetails) => void;
+      chrome.webRequest.onCompleted.addListener = (fn: (details: chrome.webRequest.WebResponseCacheDetails) => void) => {
+        onCompleted = fn;
+      };
+      // Re-attach so our onCompleted capture is registered.
+      localData["tabReaper.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
+      await listeners.storageChanged!({ "tabReaper.config": { oldValue: { protectActiveUploads: true }, newValue: { protectActiveUploads: false } } }, "local");
+      localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+      await listeners.storageChanged!({ "tabReaper.config": { oldValue: { protectActiveUploads: false }, newValue: { protectActiveUploads: true } } }, "local");
+
+      onBeforeRequest!({
+        requestId: "cool-1",
+        tabId: 2,
+        method: "POST",
+        url: "https://upload.test/chunk1",
+        type: "xmlhttprequest",
+        frameId: 0,
+        parentFrameId: -1,
+        timeStamp: fakeNow,
+        requestBody: { raw: [{ file: "/tmp/chunk1.bin" }] },
+      });
+      onCompleted({
+        requestId: "cool-1",
+        tabId: 2,
+        method: "POST",
+        url: "https://upload.test/chunk1",
+        type: "xmlhttprequest",
+        frameId: 0,
+        parentFrameId: -1,
+        timeStamp: fakeNow,
+        fromCache: false,
+        statusCode: 200,
+        statusLine: "HTTP/1.1 200 OK",
+      });
+      await Bun.sleep(10);
+
+      // Expire the cooldown so checkTabHasActiveUpload calls session.remove.
+      fakeNow = base + 30_000;
+      interceptRemove = true;
+      const response = new Promise<{ ok?: boolean }>((resolve) => {
+        listeners.message!({ type: "discard_tab", tabId: 2 }, {}, resolve);
+      });
+      await removeReached;
+      // Start AND complete a brand-new chunk on tab 2 while session.remove is paused.
+      onBeforeRequest!({
+        requestId: "cool-2",
+        tabId: 2,
+        method: "POST",
+        url: "https://upload.test/chunk2",
+        type: "xmlhttprequest",
+        frameId: 0,
+        parentFrameId: -1,
+        timeStamp: fakeNow,
+        requestBody: { raw: [{ file: "/tmp/chunk2.bin" }] },
+      });
+      onCompleted({
+        requestId: "cool-2",
+        tabId: 2,
+        method: "POST",
+        url: "https://upload.test/chunk2",
+        type: "xmlhttprequest",
+        frameId: 0,
+        parentFrameId: -1,
+        timeStamp: fakeNow,
+        fromCache: false,
+        statusCode: 200,
+        statusLine: "HTTP/1.1 200 OK",
+      });
+      releaseRemove();
+      expect(await response).toEqual({ ok: false });
+      expect(discarded).toEqual([]);
+    } finally {
+      Date.now = realNow;
+    }
+  } finally {
+    localData["tabReaper.config"] = { protectActiveUploads: false };
+    await listeners.permissionRemoved!({ permissions: ["webRequest"] });
+    restore();
+  }
+});
+
+test("enabling upload protection while a sweep is awaiting memory prevents discarding an uploading tab", async () => {
+  const { listeners, tabs, localData, restore } = await worker();
+  try {
+    const now = Date.now();
+    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabReaper.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
+    localData["tabReaper.activity"] = {
+      byTabId: Object.fromEntries(tabs.map((tab) => [tab.id, { url: tab.url, lastActiveAt: now - (10 - tab.id) * 60_000 }])),
+      byUrl: {},
+    };
+    let webRequestPerm = false;
+    let onBeforeRequest: ((details: chrome.webRequest.WebRequestBodyDetails) => void) | undefined;
+    const noopEvent = () => ({ addListener: () => {}, removeListener: () => {}, hasListener: () => false });
+    Object.assign(chrome.permissions, {
+      contains: async (p: { permissions?: string[] }) =>
+        Boolean(p.permissions?.includes("nativeMessaging")) ||
+        (Boolean(p.permissions?.includes("webRequest")) && webRequestPerm),
+    });
+    Object.assign(chrome, {
+      webRequest: {
+        onBeforeRequest: {
+          addListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => { onBeforeRequest = fn; },
+          removeListener: () => { onBeforeRequest = undefined; },
+          hasListener: (fn: (details: chrome.webRequest.WebRequestBodyDetails) => void) => onBeforeRequest === fn,
+        },
+        onBeforeSendHeaders: noopEvent(),
+        onCompleted: noopEvent(),
+        onErrorOccurred: noopEvent(),
+      },
+    });
+    let releaseMemory!: () => void;
+    let memoryEntered!: () => void;
+    const memoryReached = new Promise<void>((resolve) => { memoryEntered = resolve; });
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => {
+        memoryEntered();
+        await new Promise<void>((resolve) => { releaseMemory = resolve; });
+        return { ok: true, chromeBytes: 180, systemTotalBytes: 200, systemAvailableBytes: 20 };
+      },
+    });
+    const discarded: number[] = [];
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { discarded.push(id); return { ...tabs[id - 1], discarded: true }; },
+    });
+
+    // Start the sweep while protectActiveUploads is still false. Tab 1 is oldest and first candidate.
+    const sweepDone = listeners.alarm!({ name: "tabReaper.sweep" });
+    await memoryReached;
+
+    // Enable upload protection and start an upload on tab 1 before memory reading completes.
+    webRequestPerm = true;
+    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+    onBeforeRequest!({
+      requestId: "mid-sweep-1",
+      tabId: 1,
+      method: "POST",
+      url: "https://upload.test/archive",
+      type: "xmlhttprequest",
+      frameId: 0,
+      parentFrameId: -1,
+      timeStamp: Date.now(),
+      requestBody: { raw: [{ file: "/tmp/archive.zip" }] },
+    });
+    releaseMemory();
+    await sweepDone;
+
+    expect(discarded).not.toContain(1);
+    expect(discarded).toEqual([2, 3]);
+  } finally {
+    localData["tabReaper.config"] = { protectActiveUploads: false };
+    await listeners.permissionRemoved!({ permissions: ["webRequest"] });
+    restore();
+  }
+});

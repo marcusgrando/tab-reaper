@@ -177,6 +177,14 @@
 
           <div class="checkbox-row">
             <label class="checkbox">
+              <input id="protect-uploads" type="checkbox" />
+              <span>Protect tabs with active uploads <small>Off by default. Heuristic using optional network request access. Wakes the extension on background XHR/fetch traffic and may miss streaming, Service Worker, or WebSocket uploads.</small></span>
+            </label>
+            <button type="button" class="reset-btn hidden" data-reset="protectActiveUploads"></button>
+          </div>
+
+          <div class="checkbox-row">
+            <label class="checkbox">
               <input id="skip-offline" type="checkbox" />
               <span>Skip discarding tabs while offline</span>
             </label>
@@ -229,6 +237,19 @@
           </div>
           <div class="cap-buttons">
             <button id="btn-host-perm" type="button">Enable</button>
+          </div>
+        </div>
+
+        <div class="cap-row">
+          <div>
+            <strong>Active upload detection</strong>
+            <p class="hint">
+              Uses optional network request access to pause sleep during in-flight HTTP uploads and brief gaps between chunks. Off by default because observing requests wakes the extension on background XHR/fetch traffic.
+            </p>
+            <div id="upload-status" class="status-text" role="status"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-upload-perm" type="button">Enable</button>
           </div>
         </div>
 

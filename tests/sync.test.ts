@@ -534,6 +534,32 @@ describe("multi-device single-writer folder sync integration", () => {
     expect((await pullConfigFromSync(loadConfig, async () => {})).ok).toBe(false);
   });
 
+  test("keeps protectActiveUploads device-local when pulling a newer v0.9.4 config that omits it", async () => {
+    const now = 1_700_000_000_000;
+    const legacyConfig = { ...DEFAULT_CONFIG, snapshotIntervalMinutes: 30 } as Record<string, unknown>;
+    delete legacyConfig.protectActiveUploads;
+    virtualFs.set(
+      "devices/dev-legacy/config-v2.json",
+      JSON.stringify({
+        schemaVersion: 2,
+        updatedAt: now + 5000,
+        deviceId: "dev-legacy",
+        config: legacyConfig,
+      }),
+    );
+
+    await setLocalConfigVersion({ updatedAt: now, deviceId: "dev-mac" });
+    let applied: TabReaperConfig | null = null;
+    const res = await pullConfigFromSync(
+      async () => ({ ...DEFAULT_CONFIG, protectActiveUploads: true }),
+      async (cfg) => { applied = cfg; },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.updated).toBe(true);
+    expect(applied!.snapshotIntervalMinutes).toBe(30);
+    expect(applied!.protectActiveUploads).toBe(true);
+  });
+
   test("a failed config read leaves the device file intact for a retry", async () => {
     const path = "devices/dev-mac/config-v2.json";
     const config = { ...DEFAULT_CONFIG, snapshotIntervalMinutes: 1440, idleEvictionPercent: 63 };

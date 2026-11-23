@@ -27,6 +27,16 @@ import {
 } from "./eviction.ts";
 import { reconcileFormObserver } from "./form-observer.ts";
 import {
+  bootstrapUploadObserver,
+  checkTabHasActiveUpload,
+  forgetTabUploads,
+  getUploadingTabIds,
+  hasLiveUploadProtectionForTab,
+  hasUploadProtectionPermission,
+  migrateTabUploads,
+  reconcileUploadObserver,
+} from "./upload-observer.ts";
+import {
   getMemorySnapshot,
   hasNativeMessagingPermission,
   loadPressureEpisode,
@@ -206,6 +216,11 @@ async function discardTabSafely(
       const state = await loadActivityState({ includeUrlHistory: false });
       if (getTabLastActiveAt(state, live, 0) !== plannedLastActiveAt) return false;
     }
+    // Always consult the live upload observer (not a snapshot config captured earlier in a sweep)
+    // and re-check synchronous in-flight/cooldown protection immediately before chrome.tabs.discard.
+    if ((await checkTabHasActiveUpload(tabId)) || hasLiveUploadProtectionForTab(tabId)) {
+      return false;
+    }
     const discardedTab = await chrome.tabs.discard(tabId);
     const nextTabId = discardedTab?.id;
     if (typeof nextTabId === "number" && nextTabId !== tabId) {
@@ -302,7 +317,10 @@ async function runSweep(
     const online = isBrowserOnline();
 
     // Sample eligible loaded tabs in the size band to sort by weight; in the idle band, unsaved-form check runs per candidate.
-    const eligibleLoaded = tabs.filter((t) => !t.discarded && !isTabProtected(t, config));
+    const uploadingTabIds = config.protectActiveUploads ? await getUploadingTabIds(now) : new Set<number>();
+    const eligibleLoaded = tabs.filter(
+      (t) => !t.discarded && !isTabProtected(t, config, undefined, uploadingTabIds.has(t.id)),
+    );
     const band = getMemoryBand(memory, config.idleEvictionPercent / 100, config.sizeEvictionPercent / 100);
     const atSizeBand = band === "size";
     const storedEpisode = memory ? await loadPressureEpisode() : null;
@@ -318,6 +336,7 @@ async function runSweep(
       tabs,
       activity,
       weights,
+      uploadingTabIds,
       config,
       memory,
       now,
@@ -378,11 +397,12 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
   const now = Date.now();
   const online = isBrowserOnline();
   const config = await loadConfig();
-  const [tabs, memory, nativeMessaging, hostAccess, { updateAvailable, updateStatus }] = await Promise.all([
+  const [tabs, memory, nativeMessaging, hostAccess, uploadProtection, { updateAvailable, updateStatus }] = await Promise.all([
     queryAllTabs(false),
     getMemorySnapshot(config, now),
     hasNativeMessagingPermission(),
     hasHostAccessPermission(),
+    hasUploadProtectionPermission(),
     getUpdateStatus(config.checkForUpdates),
   ]);
 
@@ -414,14 +434,15 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
       recoverableSnapshot: null,
       updateAvailable,
       updateStatus,
-      permissions: { nativeMessaging, hostAccess },
+      permissions: { nativeMessaging, hostAccess, uploadProtection },
     };
   }
 
-  const [windows, initialActivity, snapshots] = await Promise.all([
+  const [windows, initialActivity, snapshots, uploadingTabIds] = await Promise.all([
     chrome.windows.getAll().catch(() => [] as chrome.windows.Window[]),
     loadActivityState({ includeUrlHistory: false }),
     loadSnapshots(),
+    config.protectActiveUploads ? getUploadingTabIds(now) : Promise.resolve(new Set<number>()),
   ]);
   const hasUntrackedTab = tabs.some((t) => !t.active && !(String(t.id) in initialActivity.byTabId));
   const activity = hasUntrackedTab ? await loadActivityState({ includeUrlHistory: true }) : initialActivity;
@@ -446,7 +467,8 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
     const win = windowById.get(tab.windowId);
     const isPwa = win?.type === "app";
     const isFocusedActive = tab.active && win?.focused === true;
-    const actions = computeOpenTabActions(tab, config, sample, isFocusedActive);
+    const hasActiveUpload = config.protectActiveUploads && uploadingTabIds.has(tab.id);
+    const actions = computeOpenTabActions(tab, config, sample, isFocusedActive, hasActiveUpload);
 
     if (actions.protectedReason !== null) {
       protectedCount++;
@@ -471,6 +493,7 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
       weightMultiplier: sample?.weightMultiplier ?? 1.0,
       jsHeapBytes: sample ? sample.jsHeapBytes : null,
       hasUnsavedForm: Boolean(sample?.hasUnsavedForm),
+      hasActiveUpload,
       isPwa,
       canKeep: actions.canKeep,
       canSleep: actions.canSleep,
@@ -511,12 +534,15 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
     recoverableSnapshot: await findRecoverableSnapshot(tabs, snapshots, now),
     updateAvailable,
     updateStatus,
-    permissions: { nativeMessaging, hostAccess },
+    permissions: { nativeMessaging, hostAccess, uploadProtection },
   };
 }
 
 function pageAccessChanged(change: chrome.permissions.Permissions) {
-  if (change.permissions?.includes("scripting") || change.origins?.length) return reconcileFormObserver(true);
+  const tasks: Promise<unknown>[] = [];
+  if (change.permissions?.includes("scripting") || change.origins?.length) tasks.push(reconcileFormObserver(true));
+  if (change.permissions?.includes("webRequest") || change.origins?.length) tasks.push(reconcileUploadObserver());
+  if (tasks.length > 0) return Promise.all(tasks);
 }
 
 chrome.permissions.onAdded.addListener(pageAccessChanged);
@@ -524,9 +550,14 @@ chrome.permissions.onRemoved.addListener(pageAccessChanged);
 chrome.storage.onChanged.addListener((changes, area) => {
   const entry = changes[CONFIG_STORAGE_KEY];
   if (area !== "local" || !entry) return;
-  const before = entry.oldValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
-  const after = entry.newValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
-  if (before !== after) return reconcileFormObserver(true);
+  const tasks: Promise<unknown>[] = [];
+  const beforeForms = entry.oldValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
+  const afterForms = entry.newValue?.protectUnsavedForms ?? DEFAULT_CONFIG.protectUnsavedForms;
+  if (beforeForms !== afterForms) tasks.push(reconcileFormObserver(true));
+  const beforeUploads = entry.oldValue?.protectActiveUploads ?? DEFAULT_CONFIG.protectActiveUploads;
+  const afterUploads = entry.newValue?.protectActiveUploads ?? DEFAULT_CONFIG.protectActiveUploads;
+  if (beforeUploads !== afterUploads) tasks.push(reconcileUploadObserver());
+  if (tasks.length > 0) return Promise.all(tasks);
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -534,7 +565,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (isFreshInstall) {
     await chrome.storage.local.set({ [SETUP_PENDING_KEY]: true });
   }
-  await Promise.all([ensureAlarm(), reconcileFormObserver(await hasHostAccessPermission())]);
+  await Promise.all([
+    ensureAlarm(),
+    reconcileFormObserver(await hasHostAccessPermission()),
+    reconcileUploadObserver(),
+  ]);
   const tabs = await queryAllTabs();
   const activity = reconcileActivityOnStartup(await loadActivityState(), tabs, Date.now());
   await saveActivityState(activity);
@@ -546,7 +581,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  await Promise.all([ensureAlarm(), reconcileFormObserver()]);
+  await Promise.all([ensureAlarm(), reconcileFormObserver(), reconcileUploadObserver()]);
   await clearKeptTabIds();
   const config = await loadConfig();
   if (config.startupSweep) {
@@ -598,6 +633,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+  void migrateTabUploads(removedTabId, addedTabId);
   void enqueueActivityUpdate(async () => {
     const state = await loadActivityState({ includeUrlHistory: false });
     const replaced = replaceTrackedTab(state, removedTabId, addedTabId);
@@ -646,6 +682,7 @@ chrome.tabs.onAttached.addListener((tabId) =>
 );
 
 chrome.tabs.onRemoved.addListener(async (tabId, info) => {
+  void forgetTabUploads(tabId);
   await enqueueActivityUpdate(async () => {
     if (!info.isWindowClosing) await forgetWindowTab(info.windowId, tabId);
     const loaded = await loadActivityState();
@@ -766,6 +803,9 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
           : apply();
       });
       if (await isFolderSyncOptedIn()) void syncConfig().catch(() => {});
+      if (saved.protectActiveUploads !== previousConfig.protectActiveUploads) {
+        await reconcileUploadObserver();
+      }
       if (saved.checkForUpdates && !previousConfig.checkForUpdates) {
         await maybeCheckForUpdate();
       }
@@ -855,5 +895,6 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
   }
 }
 
+bootstrapUploadObserver();
 void ensureAlarm();
 void maybeReopenOptions();

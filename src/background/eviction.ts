@@ -40,6 +40,7 @@ export function getTabProtectedReason(
   tab: TabSummary,
   config: TabReaperConfig,
   sample?: TabWeightSample,
+  hasActiveUpload = false,
 ): string | null {
   if (isInternalUrl(tab.url)) return "Internal";
   if (tab.status === "loading") return "Loading";
@@ -48,12 +49,18 @@ export function getTabProtectedReason(
   if (config.protectAudible && tab.audible) return "Audio";
   if (config.protectPinned && tab.pinned) return "Pinned";
   if (matchesAllowlist(tab.url, config.allowlist)) return "Allowlist";
+  if (config.protectActiveUploads && hasActiveUpload) return "Upload";
   if (config.protectUnsavedForms && sample?.hasUnsavedForm) return "Form";
   return null;
 }
 
-export function isTabProtected(tab: TabSummary, config: TabReaperConfig, sample?: TabWeightSample): boolean {
-  return getTabProtectedReason(tab, config, sample) !== null;
+export function isTabProtected(
+  tab: TabSummary,
+  config: TabReaperConfig,
+  sample?: TabWeightSample,
+  hasActiveUpload = false,
+): boolean {
+  return getTabProtectedReason(tab, config, sample, hasActiveUpload) !== null;
 }
 
 export interface OpenTabActions {
@@ -72,8 +79,9 @@ export function computeOpenTabActions(
   config: TabReaperConfig,
   sample?: TabWeightSample,
   isFocusedActive = false,
+  hasActiveUpload = false,
 ): OpenTabActions {
-  const protectedReason = getTabProtectedReason(tab, config, sample);
+  const protectedReason = getTabProtectedReason(tab, config, sample, hasActiveUpload);
   const canClose = !tab.pinned && !tab.kept;
 
   // Protected by a config rule or browser state (Internal, Loading, Active, Audio, Pinned, Allowlist, Form):
@@ -110,6 +118,7 @@ export interface PlanEvictionsInput {
   tabs: TabSummary[];
   activity: ActivityState;
   weights: Map<number, TabWeightSample>;
+  uploadingTabIds?: ReadonlySet<number>;
   config: TabReaperConfig;
   memory: MemorySnapshot | null;
   now: number;
@@ -124,6 +133,7 @@ export function planEvictions(input: PlanEvictionsInput): TabSummary[] {
     tabs,
     activity,
     weights,
+    uploadingTabIds,
     config,
     memory,
     now,
@@ -136,7 +146,9 @@ export function planEvictions(input: PlanEvictionsInput): TabSummary[] {
     return [];
   }
 
-  const eligibleLoaded = tabs.filter((tab) => !tab.discarded && !isTabProtected(tab, config, weights.get(tab.id)));
+  const eligibleLoaded = tabs.filter(
+    (tab) => !tab.discarded && !isTabProtected(tab, config, weights.get(tab.id), uploadingTabIds?.has(tab.id) ?? false),
+  );
   if (eligibleLoaded.length === 0) return [];
 
   if (mode === "startup") {

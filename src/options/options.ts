@@ -38,6 +38,7 @@ const protectActive = document.getElementById("protect-active") as HTMLInputElem
 const protectAudible = document.getElementById("protect-audible") as HTMLInputElement;
 const protectPinned = document.getElementById("protect-pinned") as HTMLInputElement;
 const protectForms = document.getElementById("protect-forms") as HTMLInputElement;
+const protectUploads = document.getElementById("protect-uploads") as HTMLInputElement;
 const skipOffline = document.getElementById("skip-offline") as HTMLInputElement;
 const enableSnapshots = document.getElementById("enable-snapshots") as HTMLInputElement;
 const snapshotIntervalMinutes = document.getElementById("snapshot-interval-minutes") as HTMLInputElement;
@@ -51,9 +52,11 @@ const installCmd = document.getElementById("install-cmd") as HTMLElement;
 const btnCopyInstall = document.getElementById("btn-copy-install") as HTMLButtonElement;
 const nativeStatus = document.getElementById("native-status") as HTMLElement;
 const hostStatus = document.getElementById("host-status") as HTMLElement;
+const uploadStatus = document.getElementById("upload-status") as HTMLElement;
 const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonElement;
 const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonElement;
 const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
+const btnUploadPerm = document.getElementById("btn-upload-perm") as HTMLButtonElement;
 const snapshotsCardEl = document.getElementById("snapshots-card") as HTMLElement;
 const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
 const btnClearSnapshots = document.getElementById("btn-clear-snapshots") as HTMLButtonElement;
@@ -255,6 +258,7 @@ const fieldSpecs: FieldSpecs = {
   protectAudible: boolField(protectAudible, DEFAULT_CONFIG.protectAudible),
   protectPinned: boolField(protectPinned, DEFAULT_CONFIG.protectPinned),
   protectUnsavedForms: boolField(protectForms, DEFAULT_CONFIG.protectUnsavedForms),
+  protectActiveUploads: boolField(protectUploads, DEFAULT_CONFIG.protectActiveUploads),
   skipWhenOffline: boolField(skipOffline, DEFAULT_CONFIG.skipWhenOffline),
   enableSessionSnapshots: boolField(enableSnapshots, DEFAULT_CONFIG.enableSessionSnapshots),
   snapshotIntervalMinutes: numberField(
@@ -353,6 +357,11 @@ function populateForm(config: TabReaperConfig): void {
 
 const WEIGHTED_EVICTION_PERMS: chrome.permissions.Permissions = {
   permissions: ["scripting"],
+  origins: ["<all_urls>"],
+};
+
+const UPLOAD_PROTECTION_PERMS: chrome.permissions.Permissions = {
+  permissions: ["webRequest"],
   origins: ["<all_urls>"],
 };
 
@@ -470,9 +479,10 @@ async function pickSyncFolderWithDialog(): Promise<void> {
 }
 
 async function refreshPermissionsUI(): Promise<void> {
-  const [hasNative, hasHost] = await Promise.all([
+  const [hasNative, hasHost, hasUpload] = await Promise.all([
     chrome.permissions.contains({ permissions: ["nativeMessaging"] }),
     chrome.permissions.contains(WEIGHTED_EVICTION_PERMS),
+    chrome.permissions.contains(UPLOAD_PROTECTION_PERMS),
   ]);
   hasNativePerm = hasNative;
   hasHostPerm = hasHost;
@@ -486,6 +496,18 @@ async function refreshPermissionsUI(): Promise<void> {
     ? "On. Heavier tabs sleep first at the size threshold."
     : "Off. The oldest idle tabs sleep first.";
   hostStatus.className = `status-text ${hasHost ? "ok" : ""}`;
+
+  btnUploadPerm.textContent = hasUpload ? "Revoke" : "Enable";
+  if (!hasUpload) {
+    uploadStatus.textContent = "Off. Active uploads are not tracked.";
+    uploadStatus.className = "status-text";
+  } else if (displayedConfig.protectActiveUploads) {
+    uploadStatus.textContent = "On. Active HTTP uploads pause sleeping.";
+    uploadStatus.className = "status-text ok";
+  } else {
+    uploadStatus.textContent = "Permission granted, but protection is off under Protections above.";
+    uploadStatus.className = "status-text";
+  }
   renderSetupCard();
 }
 
@@ -1299,6 +1321,7 @@ form.addEventListener("submit", async (event) => {
     syncBudgetVisibility();
     syncResetButtons();
     void refreshMemoryMode();
+    void refreshPermissionsUI();
     saveStatus.textContent = "Saved.";
     saveStatus.className = "status-text ok";
   } else {
@@ -1487,7 +1510,9 @@ btnDeviceName.addEventListener("click", async () => {
 btnHostPerm.addEventListener("click", async () => {
   const hasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
   if (hasHost) {
-    await chrome.permissions.remove(WEIGHTED_EVICTION_PERMS);
+    // Keep <all_urls> when Active upload detection still relies on host access.
+    const keepOrigins = await chrome.permissions.contains({ permissions: ["webRequest"] });
+    await chrome.permissions.remove(keepOrigins ? { permissions: ["scripting"] } : WEIGHTED_EVICTION_PERMS);
     await refreshPermissionsUI();
     return;
   }
@@ -1495,6 +1520,70 @@ btnHostPerm.addEventListener("click", async () => {
   if (granted && !chrome.scripting?.executeScript) {
     hostStatus.textContent = "Activating weighted eviction...";
     hostStatus.className = "status-text";
+    await reloadToActivatePermission();
+    return;
+  }
+  await refreshPermissionsUI();
+});
+
+protectUploads.addEventListener("change", async () => {
+  if (!protectUploads.checked) return;
+  const hasUpload = await chrome.permissions.contains(UPLOAD_PROTECTION_PERMS);
+  if (hasUpload) return;
+  const granted = await chrome.permissions.request(UPLOAD_PROTECTION_PERMS);
+  if (!granted) {
+    protectUploads.checked = false;
+    syncResetButtons();
+    saveStatus.textContent = "Network request permission was not granted.";
+    saveStatus.className = "status-text err";
+    return;
+  }
+  if (!chrome.webRequest?.onBeforeRequest) {
+    await chrome.runtime.sendMessage({ type: "save_config", config: { protectActiveUploads: true } });
+    uploadStatus.textContent = "Activating upload detection...";
+    uploadStatus.className = "status-text";
+    await reloadToActivatePermission();
+    return;
+  }
+  await refreshPermissionsUI();
+  saveStatus.textContent = "Permission granted. Click Save settings to apply.";
+  saveStatus.className = "status-text";
+});
+
+btnUploadPerm.addEventListener("click", async () => {
+  const hasUpload = await chrome.permissions.contains(UPLOAD_PROTECTION_PERMS);
+  if (hasUpload) {
+    const keepOrigins = await chrome.permissions.contains({ permissions: ["scripting"] });
+    await chrome.permissions.remove(keepOrigins ? { permissions: ["webRequest"] } : UPLOAD_PROTECTION_PERMS);
+    const res = (await chrome.runtime.sendMessage({
+      type: "save_config",
+      config: { protectActiveUploads: false },
+    })) as { ok?: boolean; config?: TabReaperConfig };
+    if (res?.ok && res.config) {
+      displayedConfig = res.config;
+      writeFieldFrom("protectActiveUploads", res.config);
+      syncResetButtons();
+    }
+    await refreshPermissionsUI();
+    return;
+  }
+  const granted = await chrome.permissions.request(UPLOAD_PROTECTION_PERMS);
+  if (!granted) {
+    await refreshPermissionsUI();
+    return;
+  }
+  const res = (await chrome.runtime.sendMessage({
+    type: "save_config",
+    config: { protectActiveUploads: true },
+  })) as { ok?: boolean; config?: TabReaperConfig };
+  if (res?.ok && res.config) {
+    displayedConfig = res.config;
+    writeFieldFrom("protectActiveUploads", res.config);
+    syncResetButtons();
+  }
+  if (!chrome.webRequest?.onBeforeRequest) {
+    uploadStatus.textContent = "Activating upload detection...";
+    uploadStatus.className = "status-text";
     await reloadToActivatePermission();
     return;
   }
