@@ -15,10 +15,10 @@ const CONFIG_VERSION_KEY = "tabReaper.configVersion";
 /**
  * Per-device settings never overwritten by Folder Sync:
  * - memoryBudgetMode / memoryBudgetGb: a GB cap sized for one machine's RAM can disable discarding on a smaller one.
- * - protectActiveUploads: opt-in heuristic backed by a per-browser optional webRequest permission; keeping it local
- *   also prevents older clients without this field from disabling an opted-in browser.
+ * - weightedEviction / protectActiveUploads: tied to per-browser optional permissions; keeping them local also
+ *   prevents older clients without these fields from overwriting an opted-in or opted-out browser.
  */
-const DEVICE_LOCAL_KEYS = ["memoryBudgetMode", "memoryBudgetGb", "protectActiveUploads"] as const;
+const DEVICE_LOCAL_KEYS = ["memoryBudgetMode", "memoryBudgetGb", "weightedEviction", "protectActiveUploads"] as const;
 
 function withDeviceLocalSettings(synced: TabReaperConfig, local: TabReaperConfig): TabReaperConfig {
   const merged = { ...synced };

@@ -14,9 +14,9 @@
       <nav aria-label="Settings sections">
         <a href="#memory"><svg class="icon" aria-hidden="true"><use href="ui.svg#memory"/></svg>Memory</a>
         <a href="#protections"><svg class="icon" aria-hidden="true"><use href="ui.svg#shield"/></svg>Protections</a>
-        <a href="#capabilities"><svg class="icon" aria-hidden="true"><use href="ui.svg#plug"/></svg>Capabilities</a>
         <a href="#sync-card"><svg class="icon" aria-hidden="true"><use href="ui.svg#folder"/></svg>Folder Sync</a>
         <a href="#snapshots-card"><svg class="icon" aria-hidden="true"><use href="ui.svg#history"/></svg>Session recovery</a>
+        <a href="#system"><svg class="icon" aria-hidden="true"><use href="ui.svg#plug"/></svg>System</a>
       </nav>
     </aside>
     <main class="container">
@@ -78,198 +78,135 @@
         </p>
       </section>
 
-      <form id="settings-form">
-        <section id="memory">
+      <section id="memory">
+        <div class="section-head">
           <h2>Memory</h2>
-          <p class="hint" id="memory-mode-hint">Checking how Tab Reaper measures memory…</p>
-          <p class="status-text" id="memory-now"></p>
+          <span id="memory-status" class="status-text" role="status"></span>
+        </div>
+        <p class="hint" id="memory-mode-hint">Checking how Tab Reaper measures memory…</p>
+        <p class="status-text" id="memory-now"></p>
 
-          <div id="budget-fields">
-            <div class="field">
-              <div class="field-header">
-                <label for="memory-mode">Budget type</label>
-                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
-              </div>
-              <div class="select-wrap">
-                <select id="memory-mode">
-                  <option value="fraction">Fraction of system RAM</option>
-                  <option value="fixed_gb">Fixed amount in GB</option>
-                </select>
-              </div>
+        <div id="budget-fields">
+          <div class="field">
+            <div class="field-header">
+              <label for="memory-mode">Budget type</label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetMode"></button>
             </div>
-
-            <div class="field" id="fraction-wrap">
-              <div class="field-header">
-                <label for="memory-fraction">Fraction of system RAM <small>0.1 to 0.9. Half of system RAM is 0.5.</small></label>
-                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
-              </div>
-              <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
-            </div>
-
-            <div class="field hidden" id="fixed-gb-wrap">
-              <div class="field-header">
-                <label for="memory-gb">Memory budget (GB) <small>Applies to this computer only. Folder Sync does not copy it.</small></label>
-                <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
-              </div>
-              <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
-            </div>
-
-            <div class="field">
-              <div class="field-header">
-                <label for="idle-eviction-percent">Sleep threshold (% of budget) <small>Start with the least recently used tabs. Range 10–100%.</small></label>
-                <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
-              </div>
-              <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
-            </div>
-
-            <div class="field">
-              <div class="field-header">
-                <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
-                <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
-              </div>
-              <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
+            <div class="select-wrap">
+              <select id="memory-mode">
+                <option value="fraction">Fraction of system RAM</option>
+                <option value="fixed_gb">Fixed amount in GB</option>
+              </select>
             </div>
           </div>
 
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="startup-sweep" type="checkbox" />
-              <span>Put unprotected background tabs to sleep when Chrome starts</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="startupSweep"></button>
-          </div>
-        </section>
-
-        <section id="protections">
-          <h2>Protections</h2>
-
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="protect-active" type="checkbox" />
-              <span>Protect active tabs</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="protectActive"></button>
+          <div class="field" id="fraction-wrap">
+            <div class="field-header">
+              <label for="memory-fraction">Fraction of system RAM <small>0.1 to 0.9. Half of system RAM is 0.5.</small></label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetFraction"></button>
+            </div>
+            <input id="memory-fraction" type="number" min="0.1" max="0.9" step="0.05" />
           </div>
 
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="protect-audible" type="checkbox" />
-              <span>Protect tabs playing audio</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="protectAudible"></button>
-          </div>
-
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="protect-pinned" type="checkbox" />
-              <span>Protect pinned tabs</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="protectPinned"></button>
-          </div>
-
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="protect-forms" type="checkbox" />
-              <span>Protect tabs with unsaved form input <small>Requires page access for Weighted Eviction.</small></span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="protectUnsavedForms"></button>
-          </div>
-
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="protect-uploads" type="checkbox" />
-              <span>Protect tabs with active uploads <small>Off by default. Heuristic using optional network request access. Wakes the extension on background XHR/fetch traffic and may miss streaming, Service Worker, or WebSocket uploads.</small></span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="protectActiveUploads"></button>
-          </div>
-
-          <div class="checkbox-row">
-            <label class="checkbox">
-              <input id="skip-offline" type="checkbox" />
-              <span>Skip discarding tabs while offline</span>
-            </label>
-            <button type="button" class="reset-btn hidden" data-reset="skipWhenOffline"></button>
+          <div class="field hidden" id="fixed-gb-wrap">
+            <div class="field-header">
+              <label for="memory-gb">Memory budget (GB) <small>Applies to this computer only. Folder Sync does not copy it.</small></label>
+              <button type="button" class="reset-btn hidden" data-reset="memoryBudgetGb"></button>
+            </div>
+            <input id="memory-gb" type="number" min="0.5" max="512" step="0.5" />
           </div>
 
           <div class="field">
             <div class="field-header">
-              <label for="allowlist">Protected sites <small>Enter one domain or glob pattern per line.</small></label>
-              <button type="button" class="reset-btn hidden" data-reset="allowlist"></button>
+              <label for="idle-eviction-percent">Sleep threshold (% of budget) <small>Start with the least recently used tabs. Range 10–100%.</small></label>
+              <button type="button" class="reset-btn hidden" data-reset="idleEvictionPercent"></button>
             </div>
-            <textarea id="allowlist" rows="4" placeholder="meet.google.com&#10;*.slack.com"></textarea>
+            <input id="idle-eviction-percent" type="number" min="10" max="100" step="5" />
           </div>
-        </section>
 
-        <div class="actions">
-          <button type="submit">Save settings</button>
-          <span id="save-status" class="status-text" role="status"></span>
-        </div>
-      </form>
-
-      <section id="capabilities">
-        <h2>Optional capabilities</h2>
-
-        <div class="cap-row">
-          <div>
-            <strong>Local Companion</strong>
-            <p class="hint">
-              Measures Chrome’s memory use and enables Folder Sync. Run this command to install the companion on your computer.
-            </p>
-            <div class="install-cmd-row">
-              <code id="install-cmd"></code>
-              <button id="btn-copy-install" type="button" class="secondary small">Copy</button>
+          <div class="field">
+            <div class="field-header">
+              <label for="size-eviction-percent">Size threshold (% of budget) <small>Weighted Eviction puts the heaviest tabs to sleep first at this threshold. Range 10–100%.</small></label>
+              <button type="button" class="reset-btn hidden" data-reset="sizeEvictionPercent"></button>
             </div>
-            <div id="native-status" class="status-text" role="status"></div>
-          </div>
-          <div class="cap-buttons">
-            <button id="btn-native-perm" type="button">Enable</button>
-            <button id="btn-native-test" type="button" class="secondary">Test</button>
+            <input id="size-eviction-percent" type="number" min="10" max="100" step="5" />
           </div>
         </div>
 
-        <div class="cap-row">
-          <div>
-            <strong>Weighted Eviction</strong>
-            <p class="hint">
-              Uses page access to measure memory, page elements and media when choosing which tabs to put to sleep.
-            </p>
-            <div id="host-status" class="status-text" role="status"></div>
-          </div>
-          <div class="cap-buttons">
-            <button id="btn-host-perm" type="button">Enable</button>
-          </div>
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="startup-sweep" type="checkbox" />
+            <span>Put unprotected background tabs to sleep when Chrome starts</span>
+          </label>
+          <button type="button" class="reset-btn hidden" data-reset="startupSweep"></button>
         </div>
 
-        <div class="cap-row">
-          <div>
-            <strong>Active upload detection</strong>
-            <p class="hint">
-              Uses optional network request access to pause sleep during in-flight HTTP uploads and brief gaps between chunks. Off by default because observing requests wakes the extension on background XHR/fetch traffic.
-            </p>
-            <div id="upload-status" class="status-text" role="status"></div>
-          </div>
-          <div class="cap-buttons">
-            <button id="btn-upload-perm" type="button">Enable</button>
-          </div>
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="weighted-eviction" type="checkbox" />
+            <span>Sleep heaviest tabs first (Weighted Eviction) <small>Uses optional page access to rank tabs by memory, DOM elements, and media at the size threshold. Applies to this browser only.</small></span>
+          </label>
+        </div>
+      </section>
+
+      <section id="protections">
+        <div class="section-head">
+          <h2>Protections</h2>
+          <span id="protections-status" class="status-text" role="status"></span>
         </div>
 
-        <div class="cap-row">
-          <div>
-            <strong>Automatic update checks</strong>
-            <p class="hint">
-              Checks GitHub Releases once a day for a newer version and shows an update banner with the install command. No personal data is sent.
-            </p>
-            <div class="checkbox-row" style="border-top: 0; min-height: 32px; padding: 0;">
-              <label class="checkbox">
-                <input id="check-updates" type="checkbox" />
-                <span>Notify when a new version is available</span>
-              </label>
-            </div>
-            <div id="update-check-status" class="status-text" role="status"></div>
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="protect-active" type="checkbox" />
+            <span>Protect active tabs</span>
+          </label>
+          <button type="button" class="reset-btn hidden" data-reset="protectActive"></button>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="protect-audible" type="checkbox" />
+            <span>Protect tabs playing audio</span>
+          </label>
+          <button type="button" class="reset-btn hidden" data-reset="protectAudible"></button>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="protect-pinned" type="checkbox" />
+            <span>Protect pinned tabs</span>
+          </label>
+          <button type="button" class="reset-btn hidden" data-reset="protectPinned"></button>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="protect-forms" type="checkbox" />
+            <span>Protect tabs with unsaved form input <small>Uses optional page access to detect edited fields in each frame. Turning off both form protection and Weighted Eviction revokes page access.</small></span>
+          </label>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="protect-uploads" type="checkbox" />
+            <span>Protect tabs with active uploads <small>Off by default. Heuristic using optional network request access. Wakes the extension on background XHR/fetch traffic and may miss streaming, Service Worker, or WebSocket uploads. Turning it off revokes network request access. Applies to this browser only.</small></span>
+          </label>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox">
+            <input id="skip-offline" type="checkbox" />
+            <span>Skip discarding tabs while offline</span>
+          </label>
+          <button type="button" class="reset-btn hidden" data-reset="skipWhenOffline"></button>
+        </div>
+
+        <div class="field">
+          <div class="field-header">
+            <label for="allowlist">Protected sites <small>Enter one domain or glob pattern per line.</small></label>
+            <button type="button" class="reset-btn hidden" data-reset="allowlist"></button>
           </div>
-          <div class="cap-buttons">
-            <button id="btn-copy-update-opt" type="button" class="secondary small hidden">Copy update command</button>
-          </div>
+          <textarea id="allowlist" rows="4" placeholder="meet.google.com&#10;*.slack.com"></textarea>
         </div>
       </section>
 
@@ -357,6 +294,47 @@
         </div>
         <div id="snapshot-status" class="status-text" role="status"></div>
         <div id="snapshot-list" class="snapshot-list"></div>
+      </section>
+
+      <section id="system">
+        <h2>System</h2>
+
+        <div class="cap-row">
+          <div>
+            <strong>Local Companion</strong>
+            <p class="hint">
+              Measures Chrome’s exact RAM and enables Folder Sync. Run this command to install the companion on your computer.
+            </p>
+            <div class="install-cmd-row">
+              <code id="install-cmd"></code>
+              <button id="btn-copy-install" type="button" class="secondary small">Copy</button>
+            </div>
+            <div id="native-status" class="status-text" role="status"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-native-perm" type="button">Enable</button>
+            <button id="btn-native-test" type="button" class="secondary">Test</button>
+          </div>
+        </div>
+
+        <div class="cap-row">
+          <div>
+            <strong>Automatic update checks</strong>
+            <p class="hint">
+              Checks GitHub Releases once a day for a newer version and shows an update banner with the install command. No personal data is sent.
+            </p>
+            <div class="checkbox-row" style="border-top: 0; min-height: 32px; padding: 0;">
+              <label class="checkbox">
+                <input id="check-updates" type="checkbox" />
+                <span>Notify when a new version is available</span>
+              </label>
+            </div>
+            <div id="update-check-status" class="status-text" role="status"></div>
+          </div>
+          <div class="cap-buttons">
+            <button id="btn-copy-update-opt" type="button" class="secondary small hidden">Copy update command</button>
+          </div>
+        </div>
       </section>
     </main>
 

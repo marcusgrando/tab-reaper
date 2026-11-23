@@ -12,6 +12,8 @@ export interface TabReaperConfig {
   sizeEvictionPercent: number;
   /** Discard non-protected background tabs immediately on Chrome startup. */
   startupSweep: boolean;
+  /** Rank heaviest tabs first at the size threshold using page access. Kept per device. */
+  weightedEviction: boolean;
   protectActive: boolean;
   protectAudible: boolean;
   protectPinned: boolean;

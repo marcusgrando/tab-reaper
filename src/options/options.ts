@@ -5,6 +5,7 @@ import {
   SETUP_PENDING_KEY,
   buildQuickUpdateCommand,
   computeMemoryBudgetBytes,
+  createAsyncQueue,
   isHttpUrl,
   sanitizeConfig,
 } from "../shared/config.ts";
@@ -22,7 +23,6 @@ import type {
   TabReaperConfig,
 } from "../shared/types.ts";
 
-const form = document.getElementById("settings-form") as HTMLFormElement;
 const memoryMode = document.getElementById("memory-mode") as HTMLSelectElement;
 const fractionWrap = document.getElementById("fraction-wrap") as HTMLElement;
 const fixedGbWrap = document.getElementById("fixed-gb-wrap") as HTMLElement;
@@ -31,9 +31,12 @@ const memoryGb = document.getElementById("memory-gb") as HTMLInputElement;
 const idleEvictionPercent = document.getElementById("idle-eviction-percent") as HTMLInputElement;
 const memoryModeHint = document.getElementById("memory-mode-hint") as HTMLElement;
 const memoryNow = document.getElementById("memory-now") as HTMLElement;
+const memoryStatus = document.getElementById("memory-status") as HTMLElement;
+const protectionsStatus = document.getElementById("protections-status") as HTMLElement;
 const budgetFields = document.getElementById("budget-fields") as HTMLElement;
 const sizeEvictionPercent = document.getElementById("size-eviction-percent") as HTMLInputElement;
 const startupSweep = document.getElementById("startup-sweep") as HTMLInputElement;
+const weightedEvictionEl = document.getElementById("weighted-eviction") as HTMLInputElement;
 const protectActive = document.getElementById("protect-active") as HTMLInputElement;
 const protectAudible = document.getElementById("protect-audible") as HTMLInputElement;
 const protectPinned = document.getElementById("protect-pinned") as HTMLInputElement;
@@ -46,17 +49,12 @@ const checkUpdates = document.getElementById("check-updates") as HTMLInputElemen
 const updateCheckStatus = document.getElementById("update-check-status") as HTMLElement;
 const btnCopyUpdateOpt = document.getElementById("btn-copy-update-opt") as HTMLButtonElement;
 const allowlist = document.getElementById("allowlist") as HTMLTextAreaElement;
-const saveStatus = document.getElementById("save-status") as HTMLElement;
 
 const installCmd = document.getElementById("install-cmd") as HTMLElement;
 const btnCopyInstall = document.getElementById("btn-copy-install") as HTMLButtonElement;
 const nativeStatus = document.getElementById("native-status") as HTMLElement;
-const hostStatus = document.getElementById("host-status") as HTMLElement;
-const uploadStatus = document.getElementById("upload-status") as HTMLElement;
 const btnNativePerm = document.getElementById("btn-native-perm") as HTMLButtonElement;
 const btnNativeTest = document.getElementById("btn-native-test") as HTMLButtonElement;
-const btnHostPerm = document.getElementById("btn-host-perm") as HTMLButtonElement;
-const btnUploadPerm = document.getElementById("btn-upload-perm") as HTMLButtonElement;
 const snapshotsCardEl = document.getElementById("snapshots-card") as HTMLElement;
 const btnSaveSnapshot = document.getElementById("btn-save-snapshot") as HTMLButtonElement;
 const btnClearSnapshots = document.getElementById("btn-clear-snapshots") as HTMLButtonElement;
@@ -126,7 +124,7 @@ function renderMemoryMode(): void {
       return;
     }
     memoryModeHint.textContent =
-      "Without the Local Companion, Tab Reaper can't measure Chrome's memory, so it reacts to the computer's memory pressure and there is no budget to set. Install the Local Companion under Optional capabilities to cap Chrome's memory.";
+      "Without the Local Companion, Tab Reaper can't measure Chrome's memory, so it reacts to the computer's memory pressure and there is no budget to set. Install the Local Companion under System to cap Chrome's memory.";
     memoryNow.textContent =
       `${free} (${PRESSURE_LABELS[memory.pressure ?? "normal"]} pressure). ` +
       `Tabs start sleeping, least recently used first, when free memory drops to ${formatMb(thresholds.moderateBytes)}. ` +
@@ -141,7 +139,14 @@ function renderMemoryMode(): void {
     memoryNow.textContent = "";
     return;
   }
-  const config = sanitizeConfig({ ...displayedConfig, ...readMainFormConfig() });
+  const config = sanitizeConfig({
+    ...displayedConfig,
+    memoryBudgetMode: fieldSpecs.memoryBudgetMode.read(),
+    memoryBudgetFraction: fieldSpecs.memoryBudgetFraction.read(),
+    memoryBudgetGb: fieldSpecs.memoryBudgetGb.read(),
+    idleEvictionPercent: fieldSpecs.idleEvictionPercent.read(),
+    sizeEvictionPercent: fieldSpecs.sizeEvictionPercent.read(),
+  });
   const budget = computeMemoryBudgetBytes(config, memory.systemTotalBytes);
   const used = Math.round((memory.usedBytes / Math.max(1, budget)) * 100);
   memoryModeHint.textContent =
@@ -254,6 +259,7 @@ const fieldSpecs: FieldSpecs = {
     `${DEFAULT_CONFIG.sizeEvictionPercent}%`,
   ),
   startupSweep: boolField(startupSweep, DEFAULT_CONFIG.startupSweep),
+  weightedEviction: boolField(weightedEvictionEl, DEFAULT_CONFIG.weightedEviction),
   protectActive: boolField(protectActive, DEFAULT_CONFIG.protectActive),
   protectAudible: boolField(protectAudible, DEFAULT_CONFIG.protectAudible),
   protectPinned: boolField(protectPinned, DEFAULT_CONFIG.protectPinned),
@@ -271,8 +277,22 @@ const fieldSpecs: FieldSpecs = {
 };
 
 const FIELD_KEYS = Object.keys(fieldSpecs) as ConfigKey[];
-const INSTANT_SAVE_KEYS = new Set<ConfigKey>(["enableSessionSnapshots", "snapshotIntervalMinutes", "checkForUpdates"]);
-const MAIN_FORM_KEYS = FIELD_KEYS.filter((key) => !INSTANT_SAVE_KEYS.has(key));
+const MEMORY_KEYS = new Set<ConfigKey>([
+  "memoryBudgetMode",
+  "memoryBudgetFraction",
+  "memoryBudgetGb",
+  "idleEvictionPercent",
+  "sizeEvictionPercent",
+  "startupSweep",
+  "weightedEviction",
+]);
+const SNAPSHOT_KEYS = new Set<ConfigKey>(["enableSessionSnapshots", "snapshotIntervalMinutes"]);
+
+function statusElForKey(key: ConfigKey): HTMLElement {
+  if (MEMORY_KEYS.has(key)) return memoryStatus;
+  if (SNAPSHOT_KEYS.has(key)) return syncSnapshotsStatusEl;
+  return protectionsStatus;
+}
 
 function isConfigKey(key: string | undefined): key is ConfigKey {
   return key !== undefined && key in fieldSpecs;
@@ -283,40 +303,85 @@ function writeFieldFrom<K extends ConfigKey>(key: K, config: TabReaperConfig): v
 }
 
 let displayedConfig = DEFAULT_CONFIG;
+let hasNativePerm = false;
+let hasHostPerm = false;
+let hasUploadPerm = false;
 
-function readMainFormConfig(): Partial<TabReaperConfig> {
-  const payload: Partial<TabReaperConfig> = {};
-  const assign = <K extends ConfigKey>(key: K): void => {
-    const value = fieldSpecs[key].read();
-    if (JSON.stringify(value) !== JSON.stringify(displayedConfig[key])) payload[key] = value;
-  };
-  for (const key of MAIN_FORM_KEYS) {
-    assign(key);
+const enqueueSave = createAsyncQueue();
+const saveSeq: Partial<Record<ConfigKey, number>> = {};
+const debounceTimers = new Map<ConfigKey, ReturnType<typeof setTimeout>>();
+
+function cancelDebounce(key: ConfigKey): void {
+  const timer = debounceTimers.get(key);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    debounceTimers.delete(key);
   }
-  return payload;
 }
 
-type SnapshotSetting = "enableSessionSnapshots" | "snapshotIntervalMinutes";
-const snapshotSaveSeq = { enableSessionSnapshots: 0, snapshotIntervalMinutes: 0 };
+function syncPermissionCheckboxes(): void {
+  weightedEvictionEl.checked = hasHostPerm && displayedConfig.weightedEviction;
+  protectForms.checked = hasHostPerm && displayedConfig.protectUnsavedForms;
+  protectUploads.checked = hasUploadPerm && displayedConfig.protectActiveUploads;
+}
 
-async function saveSyncSnapshotSettings(key: SnapshotSetting): Promise<void> {
-  syncResetButtons();
-  const value = fieldSpecs[key].read();
-  const seq = ++snapshotSaveSeq[key];
-  const res = (await chrome.runtime.sendMessage({
-    type: "save_config",
-    config: { [key]: value },
-  })) as { ok: boolean; config: TabReaperConfig };
-  if (seq !== snapshotSaveSeq[key]) return;
-  if (res?.ok) {
-    if (fieldSpecs[key].read() === value) writeFieldFrom(key, res.config);
-    syncResetButtons();
-    syncSnapshotsStatusEl.textContent = "Saved.";
-    syncSnapshotsStatusEl.className = "status-text ok";
-  } else {
-    syncSnapshotsStatusEl.textContent = "Failed to save snapshot settings.";
-    syncSnapshotsStatusEl.className = "status-text err";
+function saveConfigPatch(
+  patch: Partial<TabReaperConfig>,
+  statusEl: HTMLElement,
+  options: { syncFields?: ConfigKey[]; refreshMemory?: boolean; statusText?: string } = {},
+): Promise<TabReaperConfig | null> {
+  const keys = Object.keys(patch) as ConfigKey[];
+  const seqs = new Map<ConfigKey, number>();
+  for (const key of keys) {
+    const next = (saveSeq[key] ?? 0) + 1;
+    saveSeq[key] = next;
+    seqs.set(key, next);
   }
+  return enqueueSave(async () => {
+    const res = (await chrome.runtime.sendMessage({
+      type: "save_config",
+      config: patch,
+    })) as { ok?: boolean; config?: TabReaperConfig };
+    if (!res?.ok || !res.config) {
+      statusEl.textContent = "Failed to save setting.";
+      statusEl.className = "status-text err";
+      return null;
+    }
+    displayedConfig = res.config;
+    const syncFields = options.syncFields ?? [];
+    for (const key of syncFields) {
+      if (!seqs.has(key) || saveSeq[key] === seqs.get(key)) {
+        writeFieldFrom(key, res.config);
+      }
+    }
+    syncPermissionCheckboxes();
+    syncBudgetVisibility();
+    syncResetButtons();
+    if (options.refreshMemory) void refreshMemoryMode();
+    if (keys.every((key) => saveSeq[key] === seqs.get(key))) {
+      statusEl.textContent = options.statusText ?? "Saved.";
+      statusEl.className = "status-text ok";
+    }
+    return res.config;
+  });
+}
+
+function scheduleDebouncedSave(
+  key: ConfigKey,
+  delayMs: number,
+  readPatch: () => Partial<TabReaperConfig> | null,
+  options: { syncFields?: ConfigKey[]; refreshMemory?: boolean } = {},
+): void {
+  cancelDebounce(key);
+  debounceTimers.set(
+    key,
+    setTimeout(() => {
+      debounceTimers.delete(key);
+      const patch = readPatch();
+      if (!patch) return;
+      void saveConfigPatch(patch, statusElForKey(key), options);
+    }, delayMs),
+  );
 }
 
 const resetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-reset]"));
@@ -330,11 +395,18 @@ for (const btn of resetButtons) {
   btn.title = hint;
   btn.setAttribute("aria-label", hint);
   btn.addEventListener("click", () => {
+    cancelDebounce(key);
     writeFieldFrom(key, DEFAULT_CONFIG);
     syncResetButtons();
-    if (key === "enableSessionSnapshots" || key === "snapshotIntervalMinutes") {
-      void saveSyncSnapshotSettings(key);
-    }
+    const syncFields: ConfigKey[] =
+      key === "idleEvictionPercent" || key === "sizeEvictionPercent"
+        ? ["idleEvictionPercent", "sizeEvictionPercent"]
+        : [key];
+    void saveConfigPatch(
+      { [key]: DEFAULT_CONFIG[key] } as Partial<TabReaperConfig>,
+      statusElForKey(key),
+      { syncFields, refreshMemory: MEMORY_KEYS.has(key) },
+    );
   });
 }
 
@@ -351,6 +423,7 @@ function populateForm(config: TabReaperConfig): void {
   for (const key of FIELD_KEYS) {
     writeFieldFrom(key, config);
   }
+  syncPermissionCheckboxes();
   syncBudgetVisibility();
   syncResetButtons();
 }
@@ -375,8 +448,6 @@ function buildInstallCommand(extensionId: string): string {
 }
 
 let setupVisible = false;
-let hasNativePerm = false;
-let hasHostPerm = false;
 let lastSyncStatus: SyncStatus | null = null;
 let lastSyncCandidates: SyncFolderCandidate[] = [];
 let setupNativeError: string | null = null;
@@ -486,28 +557,13 @@ async function refreshPermissionsUI(): Promise<void> {
   ]);
   hasNativePerm = hasNative;
   hasHostPerm = hasHost;
+  hasUploadPerm = hasUpload;
 
   btnNativePerm.textContent = hasNative ? "Revoke" : "Enable";
   nativeStatus.textContent = hasNative ? "Permission granted." : "Permission is off. Tab Reaper uses system RAM.";
   nativeStatus.className = `status-text ${hasNative ? "ok" : ""}`;
 
-  btnHostPerm.textContent = hasHost ? "Revoke" : "Enable";
-  hostStatus.textContent = hasHost
-    ? "On. Heavier tabs sleep first at the size threshold."
-    : "Off. The oldest idle tabs sleep first.";
-  hostStatus.className = `status-text ${hasHost ? "ok" : ""}`;
-
-  btnUploadPerm.textContent = hasUpload ? "Revoke" : "Enable";
-  if (!hasUpload) {
-    uploadStatus.textContent = "Off. Active uploads are not tracked.";
-    uploadStatus.className = "status-text";
-  } else if (displayedConfig.protectActiveUploads) {
-    uploadStatus.textContent = "On. Active HTTP uploads pause sleeping.";
-    uploadStatus.className = "status-text ok";
-  } else {
-    uploadStatus.textContent = "Permission granted, but protection is off under Protections above.";
-    uploadStatus.className = "status-text";
-  }
+  syncPermissionCheckboxes();
   renderSetupCard();
 }
 
@@ -763,7 +819,7 @@ async function refreshSyncUI(): Promise<void> {
     updateSnapshotsCardVisibility();
     btnSyncNow.classList.add("hidden");
     btnSyncDisable.classList.add("hidden");
-    syncStatusEl.textContent = "Enable and connect Local Companion above to use Folder Sync.";
+    syncStatusEl.textContent = "Enable and connect Local Companion under System below to use Folder Sync.";
     syncStatusEl.className = "status-text";
     renderSetupCard();
     return;
@@ -1292,42 +1348,169 @@ btnCopyUpdateOpt.addEventListener("click", async () => {
   }
 });
 
-memoryMode.addEventListener("change", syncBudgetVisibility);
-form.addEventListener("input", syncResetButtons);
-budgetFields.addEventListener("input", renderMemoryMode);
-form.addEventListener("change", syncResetButtons);
-enableSnapshots.addEventListener("change", () => {
-  void saveSyncSnapshotSettings("enableSessionSnapshots");
-});
-snapshotIntervalMinutes.addEventListener("input", syncResetButtons);
-snapshotIntervalMinutes.addEventListener("change", () => {
-  void saveSyncSnapshotSettings("snapshotIntervalMinutes");
+memoryMode.addEventListener("change", () => {
+  syncBudgetVisibility();
+  syncResetButtons();
+  void saveConfigPatch(
+    { memoryBudgetMode: fieldSpecs.memoryBudgetMode.read() },
+    memoryStatus,
+    { syncFields: ["memoryBudgetMode"], refreshMemory: true },
+  );
 });
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const before = Object.fromEntries(MAIN_FORM_KEYS.map(key => [key, JSON.stringify(fieldSpecs[key].read())]));
-  const payload = readMainFormConfig();
-
-  const res = (await chrome.runtime.sendMessage({ type: "save_config", config: payload })) as {
-    ok: boolean;
-    config: TabReaperConfig;
-  };
-  if (res?.ok) {
-    displayedConfig = res.config;
-    for (const key of MAIN_FORM_KEYS) {
-      if (JSON.stringify(fieldSpecs[key].read()) === before[key]) writeFieldFrom(key, res.config);
-    }
-    syncBudgetVisibility();
+function bindInstantCheckbox(el: HTMLInputElement, key: ConfigKey): void {
+  el.addEventListener("change", () => {
     syncResetButtons();
-    void refreshMemoryMode();
-    void refreshPermissionsUI();
-    saveStatus.textContent = "Saved.";
-    saveStatus.className = "status-text ok";
-  } else {
-    saveStatus.textContent = "Failed to save settings.";
-    saveStatus.className = "status-text err";
+    void saveConfigPatch(
+      { [key]: el.checked } as Partial<TabReaperConfig>,
+      statusElForKey(key),
+      { syncFields: [key], refreshMemory: MEMORY_KEYS.has(key) },
+    );
+  });
+}
+
+function bindNumberInput(
+  el: HTMLInputElement,
+  key: "memoryBudgetFraction" | "memoryBudgetGb" | "idleEvictionPercent" | "sizeEvictionPercent" | "snapshotIntervalMinutes",
+): void {
+  const isThreshold = key === "idleEvictionPercent" || key === "sizeEvictionPercent";
+  const syncFields: ConfigKey[] = isThreshold ? ["idleEvictionPercent", "sizeEvictionPercent"] : [key];
+  const isMemory = MEMORY_KEYS.has(key);
+  const readValid = (): Partial<TabReaperConfig> | null => {
+    if (el.value.trim() === "") return null;
+    const value = Number(el.value);
+    if (!Number.isFinite(value)) return null;
+    return { [key]: value };
+  };
+  el.addEventListener("input", () => {
+    syncResetButtons();
+    if (isMemory) renderMemoryMode();
+    scheduleDebouncedSave(key, 450, readValid, { refreshMemory: isMemory });
+  });
+  el.addEventListener("change", () => {
+    cancelDebounce(key);
+    syncResetButtons();
+    const patch = readValid() ?? { [key]: displayedConfig[key] };
+    void saveConfigPatch(patch, statusElForKey(key), { syncFields, refreshMemory: isMemory });
+  });
+}
+
+bindInstantCheckbox(startupSweep, "startupSweep");
+bindInstantCheckbox(protectActive, "protectActive");
+bindInstantCheckbox(protectAudible, "protectAudible");
+bindInstantCheckbox(protectPinned, "protectPinned");
+bindInstantCheckbox(skipOffline, "skipWhenOffline");
+bindInstantCheckbox(enableSnapshots, "enableSessionSnapshots");
+
+bindNumberInput(memoryFraction, "memoryBudgetFraction");
+bindNumberInput(memoryGb, "memoryBudgetGb");
+bindNumberInput(idleEvictionPercent, "idleEvictionPercent");
+bindNumberInput(sizeEvictionPercent, "sizeEvictionPercent");
+bindNumberInput(snapshotIntervalMinutes, "snapshotIntervalMinutes");
+
+allowlist.addEventListener("input", () => {
+  syncResetButtons();
+  scheduleDebouncedSave("allowlist", 500, () => ({ allowlist: fieldSpecs.allowlist.read() }));
+});
+allowlist.addEventListener("change", () => {
+  cancelDebounce("allowlist");
+  syncResetButtons();
+  void saveConfigPatch(
+    { allowlist: fieldSpecs.allowlist.read() },
+    protectionsStatus,
+    { syncFields: ["allowlist"] },
+  );
+});
+
+async function handlePageAccessToggle(
+  key: "weightedEviction" | "protectUnsavedForms",
+  checkbox: HTMLInputElement,
+  statusEl: HTMLElement,
+): Promise<void> {
+  const otherKey = key === "weightedEviction" ? "protectUnsavedForms" : "weightedEviction";
+  if (checkbox.checked) {
+    const alreadyHasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
+    let patch: Partial<TabReaperConfig> = { [key]: true };
+    if (!alreadyHasHost) {
+      const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
+      if (!granted) {
+        checkbox.checked = false;
+        statusEl.textContent = "Page access permission was not granted.";
+        statusEl.className = "status-text err";
+        return;
+      }
+      // First-time grant from a single checkbox turns on only the feature the user clicked.
+      patch = { [key]: true, [otherKey]: false };
+    }
+    hasHostPerm = true;
+    await saveConfigPatch(patch, statusEl, { refreshMemory: key === "weightedEviction" });
+    if (!chrome.scripting?.executeScript) {
+      statusEl.textContent = "Reloading extension to activate page access...";
+      statusEl.className = "status-text";
+      await reloadToActivatePermission();
+      return;
+    }
+    await refreshPermissionsUI();
+    return;
   }
+
+  const saved = await saveConfigPatch({ [key]: false }, statusEl, { refreshMemory: key === "weightedEviction" });
+  if (saved && !saved.weightedEviction && !saved.protectUnsavedForms) {
+    const hasScripting = await chrome.permissions.contains({ permissions: ["scripting"] });
+    if (hasScripting) {
+      const keepOrigins = await chrome.permissions.contains({ permissions: ["webRequest"] });
+      await chrome.permissions.remove(keepOrigins ? { permissions: ["scripting"] } : WEIGHTED_EVICTION_PERMS);
+    }
+  }
+  await refreshPermissionsUI();
+}
+
+weightedEvictionEl.addEventListener("change", () => {
+  void handlePageAccessToggle("weightedEviction", weightedEvictionEl, memoryStatus);
+});
+
+protectForms.addEventListener("change", () => {
+  void handlePageAccessToggle("protectUnsavedForms", protectForms, protectionsStatus);
+});
+
+protectUploads.addEventListener("change", async () => {
+  if (protectUploads.checked) {
+    const alreadyHasUpload = await chrome.permissions.contains(UPLOAD_PROTECTION_PERMS);
+    if (!alreadyHasUpload) {
+      const granted = await chrome.permissions.request(UPLOAD_PROTECTION_PERMS);
+      if (!granted) {
+        protectUploads.checked = false;
+        protectionsStatus.textContent = "Network request permission was not granted.";
+        protectionsStatus.className = "status-text err";
+        return;
+      }
+    }
+    hasUploadPerm = true;
+    await saveConfigPatch({ protectActiveUploads: true }, protectionsStatus);
+    if (!chrome.webRequest?.onBeforeRequest) {
+      protectionsStatus.textContent = "Reloading extension to activate upload protection...";
+      protectionsStatus.className = "status-text";
+      await reloadToActivatePermission();
+      return;
+    }
+    await refreshPermissionsUI();
+    return;
+  }
+
+  await saveConfigPatch({ protectActiveUploads: false }, protectionsStatus);
+  const hasWebRequest = await chrome.permissions.contains({ permissions: ["webRequest"] });
+  if (hasWebRequest) {
+    const keepOrigins = await chrome.permissions.contains({ permissions: ["scripting"] });
+    await chrome.permissions.remove(keepOrigins ? { permissions: ["webRequest"] } : UPLOAD_PROTECTION_PERMS);
+  }
+  await refreshPermissionsUI();
+});
+
+chrome.permissions.onAdded.addListener(() => {
+  void refreshPermissionsUI();
+});
+chrome.permissions.onRemoved.addListener(() => {
+  void refreshPermissionsUI();
 });
 
 btnCopyInstall.addEventListener("click", async () => {
@@ -1440,7 +1623,7 @@ btnSetupNative.addEventListener("click", async () => {
       return;
     }
     if (!resp?.ok) {
-      setupNativeError = `Companion not found (${resp?.error ?? "unknown error"}). Run the Quick Install command or the command under Optional capabilities.`;
+      setupNativeError = `Companion not found (${resp?.error ?? "unknown error"}). Run the Quick Install command or the command under System.`;
     }
     await Promise.all([refreshMemoryMode(), refreshPermissionsUI(), refreshSyncAndSnapshotsUI()]);
   } finally {
@@ -1452,7 +1635,13 @@ btnSetupHost.addEventListener("click", async () => {
   btnSetupHost.disabled = true;
   try {
     const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
-    if (granted && !chrome.scripting?.executeScript) {
+    if (!granted) {
+      await refreshPermissionsUI();
+      return;
+    }
+    hasHostPerm = true;
+    await saveConfigPatch({ weightedEviction: true, protectUnsavedForms: true }, memoryStatus);
+    if (!chrome.scripting?.executeScript) {
       setupHostStatus.textContent = "Reloading extension to activate Weighted Eviction...";
       setupHostStatus.className = "status-text";
       await reloadToActivatePermission();
@@ -1505,89 +1694,6 @@ btnDeviceName.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "set_device_name", deviceName: name });
   await refreshSyncAndSnapshotsUI();
   btnDeviceName.disabled = false;
-});
-
-btnHostPerm.addEventListener("click", async () => {
-  const hasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
-  if (hasHost) {
-    // Keep <all_urls> when Active upload detection still relies on host access.
-    const keepOrigins = await chrome.permissions.contains({ permissions: ["webRequest"] });
-    await chrome.permissions.remove(keepOrigins ? { permissions: ["scripting"] } : WEIGHTED_EVICTION_PERMS);
-    await refreshPermissionsUI();
-    return;
-  }
-  const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
-  if (granted && !chrome.scripting?.executeScript) {
-    hostStatus.textContent = "Activating weighted eviction...";
-    hostStatus.className = "status-text";
-    await reloadToActivatePermission();
-    return;
-  }
-  await refreshPermissionsUI();
-});
-
-protectUploads.addEventListener("change", async () => {
-  if (!protectUploads.checked) return;
-  const hasUpload = await chrome.permissions.contains(UPLOAD_PROTECTION_PERMS);
-  if (hasUpload) return;
-  const granted = await chrome.permissions.request(UPLOAD_PROTECTION_PERMS);
-  if (!granted) {
-    protectUploads.checked = false;
-    syncResetButtons();
-    saveStatus.textContent = "Network request permission was not granted.";
-    saveStatus.className = "status-text err";
-    return;
-  }
-  if (!chrome.webRequest?.onBeforeRequest) {
-    await chrome.runtime.sendMessage({ type: "save_config", config: { protectActiveUploads: true } });
-    uploadStatus.textContent = "Activating upload detection...";
-    uploadStatus.className = "status-text";
-    await reloadToActivatePermission();
-    return;
-  }
-  await refreshPermissionsUI();
-  saveStatus.textContent = "Permission granted. Click Save settings to apply.";
-  saveStatus.className = "status-text";
-});
-
-btnUploadPerm.addEventListener("click", async () => {
-  const hasUpload = await chrome.permissions.contains(UPLOAD_PROTECTION_PERMS);
-  if (hasUpload) {
-    const keepOrigins = await chrome.permissions.contains({ permissions: ["scripting"] });
-    await chrome.permissions.remove(keepOrigins ? { permissions: ["webRequest"] } : UPLOAD_PROTECTION_PERMS);
-    const res = (await chrome.runtime.sendMessage({
-      type: "save_config",
-      config: { protectActiveUploads: false },
-    })) as { ok?: boolean; config?: TabReaperConfig };
-    if (res?.ok && res.config) {
-      displayedConfig = res.config;
-      writeFieldFrom("protectActiveUploads", res.config);
-      syncResetButtons();
-    }
-    await refreshPermissionsUI();
-    return;
-  }
-  const granted = await chrome.permissions.request(UPLOAD_PROTECTION_PERMS);
-  if (!granted) {
-    await refreshPermissionsUI();
-    return;
-  }
-  const res = (await chrome.runtime.sendMessage({
-    type: "save_config",
-    config: { protectActiveUploads: true },
-  })) as { ok?: boolean; config?: TabReaperConfig };
-  if (res?.ok && res.config) {
-    displayedConfig = res.config;
-    writeFieldFrom("protectActiveUploads", res.config);
-    syncResetButtons();
-  }
-  if (!chrome.webRequest?.onBeforeRequest) {
-    uploadStatus.textContent = "Activating upload detection...";
-    uploadStatus.className = "status-text";
-    await reloadToActivatePermission();
-    return;
-  }
-  await refreshPermissionsUI();
 });
 
 btnSaveSnapshot.addEventListener("click", async () => {

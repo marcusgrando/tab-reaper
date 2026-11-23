@@ -281,16 +281,24 @@ try {
   await setProtectUploads(false);
   await waitUploadState(uploaderUrl, false, "disabling protectActiveUploads should clear active protection");
 
-  // 7. Revoking upload permission via Settings must keep <all_urls> when Weighted Eviction (scripting) is still granted.
+  // 7. Unchecking #protect-uploads in Settings revokes webRequest while keeping <all_urls> for Weighted Eviction,
+  // and unchecking both Weighted Eviction and unsaved forms revokes scripting + <all_urls>.
+  await setProtectUploads(true);
   await options.reload();
-  await options.locator("#btn-upload-perm").waitFor();
-  assert.equal(await options.locator("#btn-upload-perm").innerText(), "Revoke");
-  await options.locator("#btn-upload-perm").click();
+  await options.locator("#protect-uploads").waitFor();
+  assert.equal(await options.locator("#protect-uploads").isChecked(), true);
+  assert.equal(await options.locator("#weighted-eviction").isChecked(), true);
+  await options.locator("#protect-uploads").uncheck();
   await options.waitForFunction(async () => !(await chrome.permissions.contains({ permissions: ["webRequest"] })));
   const hostStillGranted = await options.evaluate(() =>
     chrome.permissions.contains({ permissions: ["scripting"], origins: ["<all_urls>"] }),
   );
-  assert.equal(hostStillGranted, true, "revoking upload detection must not revoke <all_urls> used by Weighted Eviction");
+  assert.equal(hostStillGranted, true, "turning off upload protection must not revoke <all_urls> used by Weighted Eviction");
+
+  await options.locator("#weighted-eviction").uncheck();
+  await options.waitForFunction(
+    async () => !(await chrome.permissions.contains({ permissions: ["scripting"], origins: ["<all_urls>"] })),
+  );
 
   console.log("Upload protection passed in Chromium.");
 } finally {

@@ -44,7 +44,14 @@ import {
   pingNativeHost,
   savePressureEpisode,
 } from "./memory.ts";
-import { checkTabHasUnsavedForm, hasHostAccessPermission, loadCachedWeights, sampleTabWeights } from "./sampler.ts";
+import {
+  checkTabHasUnsavedForm,
+  clearSampleCache,
+  hasHostAccessPermission,
+  loadCachedWeights,
+  sampleTabFormsOnly,
+  sampleTabWeights,
+} from "./sampler.ts";
 import {
   adoptDeviceHistory,
   captureSessionSnapshot,
@@ -328,7 +335,8 @@ async function runSweep(
     const passLimit = episode
       ? Math.min(MAX_MEMORY_EVICTIONS_PER_PASS, Math.max(0, MAX_DISCARDS_WITHOUT_RELIEF - episode.discards))
       : MAX_MEMORY_EVICTIONS_PER_PASS;
-    const shouldSample = mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand && passLimit > 0;
+    const shouldSample =
+      mode === "sweep" && online && eligibleLoaded.length > 1 && atSizeBand && passLimit > 0 && config.weightedEviction;
     // Size-band ranking only needs weights; discardTabSafely performs a fresh live form check before discarding.
     const weights = shouldSample ? await sampleTabWeights(eligibleLoaded, now, config.protectUnsavedForms, false) : new Map();
 
@@ -455,7 +463,14 @@ async function buildStatus(includeTabs = true): Promise<StatusPayload> {
   }
 
   const loadedSummaries = tabs.filter((t) => !t.discarded);
-  const weights = hostAccess ? await sampleTabWeights(loadedSummaries, now, config.protectUnsavedForms) : await loadCachedWeights(now);
+  const weights =
+    hostAccess && config.weightedEviction
+      ? await sampleTabWeights(loadedSummaries, now, config.protectUnsavedForms)
+      : hostAccess && config.protectUnsavedForms
+        ? await sampleTabFormsOnly(loadedSummaries, now)
+        : config.weightedEviction
+          ? await loadCachedWeights(now)
+          : new Map();
 
   let loadedCount = 0;
   let discardedCount = 0;
@@ -803,6 +818,12 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
           : apply();
       });
       if (await isFolderSyncOptedIn()) void syncConfig().catch(() => {});
+      if (saved.protectUnsavedForms !== previousConfig.protectUnsavedForms) {
+        await reconcileFormObserver(true);
+      }
+      if (!saved.weightedEviction && previousConfig.weightedEviction) {
+        await clearSampleCache();
+      }
       if (saved.protectActiveUploads !== previousConfig.protectActiveUploads) {
         await reconcileUploadObserver();
       }

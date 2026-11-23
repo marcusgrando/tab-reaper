@@ -83,6 +83,39 @@ async function withoutClosedTabs(cache: Record<string, TabWeightSample>): Promis
   }
 }
 
+export async function sampleTabFormsOnly(
+  tabs: TabSummary[],
+  now = Date.now(),
+): Promise<Map<number, TabWeightSample>> {
+  const results = new Map<number, TabWeightSample>();
+  if (tabs.length === 0 || !(await hasHostAccessPermission())) return results;
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (tab.discarded || isInternalUrl(tab.url)) return;
+      const dirty = await inspectFormState(tab.id);
+      if (dirty === true) {
+        results.set(tab.id, {
+          jsHeapBytes: 0,
+          domNodes: 0,
+          mediaNodes: 0,
+          weightMultiplier: 1.0,
+          hasUnsavedForm: true,
+          sampledAt: now,
+        });
+      }
+    }),
+  );
+  return results;
+}
+
+export async function clearSampleCache(): Promise<void> {
+  try {
+    await chrome.storage.session.remove(SAMPLE_CACHE_KEY);
+  } catch {
+    // Session storage is best-effort cache.
+  }
+}
+
 export async function loadCachedWeights(now = Date.now()): Promise<Map<number, TabWeightSample>> {
   const weights = new Map<number, TabWeightSample>();
   const cache = await loadSampleCache();

@@ -33,12 +33,21 @@ try {
   const startupSweep = options.locator("#startup-sweep");
   const startupBefore = await startupSweep.isChecked();
   await startupSweep.setChecked(!startupBefore);
-  await options.getByRole("button", { name: "Save settings", exact: true }).click();
-  await options.locator("#save-status.ok").waitFor();
+  await options.locator("#memory-status.ok").waitFor();
+  await options.locator("#allowlist").fill("docs.example.test");
+  await options.locator("#allowlist").blur();
+  await options.locator("#protections-status.ok").waitFor();
   await options.reload();
   await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
   assert.ok(await options.locator("#setup-card").isHidden(), "Dismissed setup card must stay hidden after reload");
   assert.equal(await startupSweep.isChecked(), !startupBefore);
+  assert.equal(await options.locator("#allowlist").inputValue(), "docs.example.test");
+  // Resetting allowlist saves immediately too.
+  await options.locator('[data-reset="allowlist"]').click();
+  await options.locator("#protections-status.ok").waitFor();
+  await options.reload();
+  await options.locator("#memory-now").filter({ hasText: "free" }).waitFor();
+  assert.equal(await options.locator("#allowlist").inputValue(), "");
 
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
