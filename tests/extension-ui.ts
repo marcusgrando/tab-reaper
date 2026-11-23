@@ -52,31 +52,39 @@ try {
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
-  // Session recovery lets the user inspect tabs inside a saved snapshot without overflow.
+  // Session recovery caps the initial list at 20 scrollable items with an expand button, and inspects tabs without overflow.
   await worker.evaluate(() => chrome.storage.local.set({
-    "tabReaper.sessionSnapshots": [{
-      id: "ui-snap-1",
+    "tabReaper.sessionSnapshots": Array.from({ length: 23 }, (_, i) => ({
+      id: `ui-snap-${i + 1}`,
       complete: true,
-      capturedAt: Date.now() - 60_000,
+      capturedAt: Date.now() - (i + 1) * 60_000,
       tabCount: 2,
       windowCount: 2,
-      trigger: "manual",
-      label: "Before upgrade",
+      trigger: i === 0 ? "manual" : "auto",
+      label: i === 0 ? "Before upgrade" : undefined,
       deviceId: "dev-ui-1",
       deviceName: "Test-Mac",
       tabs: [
         { url: "https://docs.example.test/guide", title: "Release guide", pinned: true, kept: false, windowId: 1, index: 0 },
         { url: "https://status.example.test/board", title: "Status board", pinned: false, kept: true, windowId: 2, index: 0, groupId: 1, groupTitle: "Ops" },
       ],
-    }],
+    })),
   }));
   await options.setViewportSize({ width: 1024, height: 720 });
   await options.reload();
   await options.locator("#snapshots-card").waitFor({ state: "visible" });
-  await options.locator("#snapshot-list").getByRole("button", { name: "Tabs", exact: true }).click();
-  await options.locator(".snapshot-tabs-panel").waitFor({ state: "visible" });
-  assert.match(await options.locator(".snapshot-tabs-panel").innerText(), /Release guide/);
-  assert.match(await options.locator(".snapshot-tabs-panel").innerText(), /Status board/);
+  assert.equal(await options.locator("#snapshot-list .snapshot-item").count(), 20);
+  const scrollMetrics = await options.locator("#snapshot-list .snapshot-scroll").evaluate(el => ({
+    clientHeight: el.clientHeight,
+    scrollHeight: el.scrollHeight,
+  }));
+  assert.ok(scrollMetrics.clientHeight <= 422 && scrollMetrics.scrollHeight > scrollMetrics.clientHeight, "Snapshot list should scroll within max-height");
+  await options.locator("#snapshot-list").getByRole("button", { name: "Show 3 older snapshots", exact: true }).click();
+  assert.equal(await options.locator("#snapshot-list .snapshot-item").count(), 23);
+  await options.locator("#snapshot-list .snapshot-item").first().getByRole("button", { name: "Tabs", exact: true }).click();
+  await options.locator(".snapshot-tabs-panel").first().waitFor({ state: "visible" });
+  assert.match(await options.locator(".snapshot-tabs-panel").first().innerText(), /Release guide/);
+  assert.match(await options.locator(".snapshot-tabs-panel").first().innerText(), /Status board/);
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await worker.evaluate(() => chrome.storage.local.remove("tabReaper.sessionSnapshots"));

@@ -1167,6 +1167,41 @@ function buildSnapshotItemEl(
   return item;
 }
 
+const INITIAL_SNAPSHOT_RENDER_LIMIT = 20;
+
+function buildSnapshotScrollList(
+  items: SnapshotListItem[],
+  options: { showDeviceInRow: boolean; isOwn: boolean; detailsCache: Map<string, SessionSnapshot> },
+): HTMLElement {
+  const scroll = document.createElement("div");
+  scroll.className = "snapshot-scroll";
+
+  const initial = items.slice(0, INITIAL_SNAPSHOT_RENDER_LIMIT);
+  for (const snap of initial) {
+    scroll.appendChild(buildSnapshotItemEl(snap, options));
+  }
+
+  const remaining = items.slice(INITIAL_SNAPSHOT_RENDER_LIMIT);
+  if (remaining.length > 0) {
+    const moreRow = document.createElement("div");
+    moreRow.className = "snapshot-more-row";
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "secondary small";
+    moreBtn.textContent = `Show ${remaining.length} older snapshot${remaining.length === 1 ? "" : "s"}`;
+    moreBtn.addEventListener("click", () => {
+      moreRow.remove();
+      for (const snap of remaining) {
+        scroll.appendChild(buildSnapshotItemEl(snap, options));
+      }
+    });
+    moreRow.appendChild(moreBtn);
+    scroll.appendChild(moreRow);
+  }
+
+  return scroll;
+}
+
 async function refreshSnapshotsUI(): Promise<void> {
   const snapshots = (await chrome.runtime.sendMessage({ type: "get_snapshots" })) as SnapshotListItem[];
   hasStoredSnapshots = Array.isArray(snapshots) && snapshots.length > 0;
@@ -1198,9 +1233,9 @@ async function refreshSnapshotsUI(): Promise<void> {
 
   // Single-device view stays compact with no redundant group headings.
   if (otherGroups.size === 0) {
-    for (const snap of ownSnapshots) {
-      snapshotList.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: true, isOwn: true, detailsCache }));
-    }
+    snapshotList.appendChild(
+      buildSnapshotScrollList(ownSnapshots, { showDeviceInRow: true, isOwn: true, detailsCache }),
+    );
     return;
   }
 
@@ -1239,9 +1274,9 @@ async function refreshSnapshotsUI(): Promise<void> {
     empty.textContent = "No snapshots saved from this browser yet.";
     ownSection.appendChild(empty);
   } else {
-    for (const snap of ownSnapshots) {
-      ownSection.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: false, isOwn: true, detailsCache }));
-    }
+    ownSection.appendChild(
+      buildSnapshotScrollList(ownSnapshots, { showDeviceInRow: false, isOwn: true, detailsCache }),
+    );
   }
   snapshotList.appendChild(ownSection);
 
@@ -1274,9 +1309,9 @@ async function refreshSnapshotsUI(): Promise<void> {
     head.append(titleWrap, meta);
     section.appendChild(head);
 
-    for (const snap of groupSnaps) {
-      section.appendChild(buildSnapshotItemEl(snap, { showDeviceInRow: false, isOwn: false, detailsCache }));
-    }
+    section.appendChild(
+      buildSnapshotScrollList(groupSnaps, { showDeviceInRow: false, isOwn: false, detailsCache }),
+    );
     snapshotList.appendChild(section);
   }
 }

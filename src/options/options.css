@@ -125,7 +125,20 @@ code { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: all; font: 1
 .chip-btn.active { background: var(--tint); border-color: var(--accent); }
 .snapshot-row { padding: 12px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .snapshot-item { border-top: 1px solid var(--line); }
+.snapshot-item:first-child { border-top: 0; }
 .snapshot-item .snapshot-row { border-top: 0; }
+.snapshot-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.snapshot-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
 .snapshot-group + .snapshot-group { margin-top: 18px; }
 .snapshot-group-head {
   display: flex;
