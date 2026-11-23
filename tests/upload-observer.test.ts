@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
   UPLOAD_CHUNK_COOLDOWN_MS,
   UPLOAD_MIN_BYTES,
+  UPLOAD_TEXT_API_MIN_BYTES,
   clearTabUploads,
   createEmptyUploadState,
   getUploadingTabIdsFromState,
+  inspectUploadRequestBody,
   isTabUploading,
-  isUploadRequestBody,
-  isUploadRequestHeaders,
+  isUploadRequest,
   pruneUploadState,
   recordUploadFinish,
   recordUploadStart,
@@ -16,101 +17,196 @@ import {
 
 describe("upload request classification", () => {
   test("ignores GET/HEAD/DELETE/OPTIONS requests regardless of body or headers", () => {
-    expect(isUploadRequestBody("GET", { raw: [{ file: "/tmp/a.bin" }] })).toBe(false);
-    expect(isUploadRequestBody("DELETE", { raw: [{ bytes: new ArrayBuffer(UPLOAD_MIN_BYTES) }] })).toBe(false);
+    expect(inspectUploadRequestBody("GET", { raw: [{ file: "/tmp/a.bin" }] })).toEqual({ kind: "none" });
+    expect(inspectUploadRequestBody("DELETE", { raw: [{ bytes: new ArrayBuffer(UPLOAD_MIN_BYTES) }] })).toEqual({
+      kind: "none",
+    });
     expect(
-      isUploadRequestHeaders("GET", [
+      isUploadRequest("GET", undefined, [
         { name: "Content-Type", value: "multipart/form-data; boundary=abc" },
         { name: "Content-Length", value: String(UPLOAD_MIN_BYTES * 4) },
       ]),
     ).toBe(false);
   });
 
-  test("detects direct file uploads and large binary payloads from requestBody on POST and PUT", () => {
-    expect(isUploadRequestBody("POST", { raw: [{ file: "/Users/me/video.mp4" }] })).toBe(true);
-    expect(isUploadRequestBody("PUT", { raw: [{ file: "/Users/me/archive.zip" }] })).toBe(true);
-    expect(isUploadRequestBody("POST", { raw: [{ bytes: new ArrayBuffer(UPLOAD_MIN_BYTES) }] })).toBe(true);
+  test("classifies requestBody shapes accurately", () => {
+    expect(inspectUploadRequestBody("POST", undefined)).toEqual({ kind: "none" });
+    expect(inspectUploadRequestBody("POST", { raw: [{ file: "/Users/me/video.mp4" }] })).toEqual({ kind: "file" });
+    expect(inspectUploadRequestBody("PUT", { raw: [{ file: "/Users/me/archive.zip" }] })).toEqual({ kind: "file" });
+    expect(inspectUploadRequestBody("POST", { raw: [{ bytes: new ArrayBuffer(512) }] })).toEqual({
+      kind: "raw_bytes",
+      totalBytes: 512,
+    });
     expect(
-      isUploadRequestBody("PUT", {
+      inspectUploadRequestBody("PUT", {
         raw: [{ bytes: new ArrayBuffer(UPLOAD_MIN_BYTES / 2) }, { bytes: new ArrayBuffer(UPLOAD_MIN_BYTES / 2) }],
       }),
+    ).toEqual({ kind: "raw_bytes", totalBytes: UPLOAD_MIN_BYTES });
+    expect(inspectUploadRequestBody("POST", { formData: { q: ["hello"] } })).toEqual({ kind: "form_fields" });
+    expect(inspectUploadRequestBody("POST", { error: "Unknown error." })).toEqual({ kind: "opaque" });
+  });
+
+  test("detects real file, FormData Blob, raw binary, and opaque Blob/slice uploads", () => {
+    expect(isUploadRequest("POST", { kind: "file" }, [])).toBe(true);
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: UPLOAD_MIN_BYTES },
+        [],
+      ),
     ).toBe(true);
-    // Blob / file.slice() / streaming bodies produce requestBody.error in Chromium.
-    expect(isUploadRequestBody("PUT", { error: "Unknown error." })).toBe(true);
-    expect(isUploadRequestBody("POST", { error: "Unknown error." })).toBe(true);
+    expect(
+      isUploadRequest(
+        "PUT",
+        { kind: "raw_bytes", totalBytes: UPLOAD_MIN_BYTES },
+        [{ name: "Content-Type", value: "application/octet-stream" }],
+      ),
+    ).toBe(true);
+    // FormData containing a Blob produces boundary-only raw bytes without formData.
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: 190 },
+        [{ name: "Content-Type", value: "multipart/form-data; boundary=----WebKitFormBoundary123" }],
+      ),
+    ).toBe(true);
+    // PUT/POST Blob or file.slice() chunks emit requestBody.error ("opaque") with binary or omitted Content-Type.
+    expect(isUploadRequest("PUT", { kind: "opaque" }, [])).toBe(true);
+    expect(isUploadRequest("POST", { kind: "opaque" }, [])).toBe(true);
+    expect(
+      isUploadRequest("PUT", { kind: "opaque" }, [{ name: "Content-Type", value: "application/octet-stream" }]),
+    ).toBe(true);
+    expect(
+      isUploadRequest("PUT", { kind: "opaque" }, [{ name: "Content-Type", value: "application/macbinary" }]),
+    ).toBe(true);
+    expect(
+      isUploadRequest("PUT", { kind: "opaque" }, [{ name: "Content-Type", value: "video/mp4" }]),
+    ).toBe(true);
+    // Huge (>= 1 MiB) JSON payloads (e.g. base64 upload inside JSON) are still protected.
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: UPLOAD_TEXT_API_MIN_BYTES },
+        [{ name: "Content-Type", value: "application/json" }],
+      ),
+    ).toBe(true);
   });
 
-  test("ignores small JSON, form-urlencoded, and empty POST/PUT requests", () => {
-    expect(isUploadRequestBody("POST", undefined)).toBe(false);
-    expect(isUploadRequestBody("POST", { raw: [{ bytes: new ArrayBuffer(512) }] })).toBe(false);
-    expect(isUploadRequestBody("POST", { formData: { q: ["hello"] } })).toBe(false);
-    expect(isUploadRequestBody("PUT", { raw: [{ bytes: new ArrayBuffer(UPLOAD_MIN_BYTES - 1) }] })).toBe(false);
+  test("ignores Gmail/SPA false positives: empty POSTs, text/JSON Blobs, text-only FormData, medium JSON syncs, and small binary RPCs", () => {
+    // fetch(POST, { body: "" }) and xhr.send("") produce requestBody.error + text/plain;charset=UTF-8 in Chromium.
     expect(
-      isUploadRequestHeaders("POST", [
-        { name: "Content-Type", value: "application/json; charset=utf-8" },
-        { name: "Content-Length", value: "128" },
+      isUploadRequest("POST", { kind: "opaque" }, [{ name: "Content-Type", value: "text/plain;charset=UTF-8" }]),
+    ).toBe(false);
+    // Small JSON, form-urlencoded, and protobuf Blob POSTs also produce requestBody.error.
+    expect(
+      isUploadRequest("POST", { kind: "opaque" }, [{ name: "Content-Type", value: "application/json" }]),
+    ).toBe(false);
+    expect(
+      isUploadRequest("POST", { kind: "opaque" }, [{ name: "Content-Type", value: "application/json+protobuf" }]),
+    ).toBe(false);
+    expect(
+      isUploadRequest("POST", { kind: "opaque" }, [
+        { name: "Content-Type", value: "application/x-www-form-urlencoded;charset=UTF-8" },
       ]),
     ).toBe(false);
     expect(
-      isUploadRequestHeaders("POST", [
-        { name: "Content-Type", value: "application/x-www-form-urlencoded" },
+      isUploadRequest("POST", { kind: "opaque" }, [{ name: "Content-Type", value: "application/grpc-web+proto" }]),
+    ).toBe(false);
+    // Text-only FormData sends multipart/form-data but onBeforeRequest parses it into formData.
+    expect(
+      isUploadRequest("POST", { kind: "form_fields" }, [
+        { name: "Content-Type", value: "multipart/form-data; boundary=----WebKitFormBoundary123" },
       ]),
+    ).toBe(false);
+    // Bodyless POST/PUT requests are never uploads.
+    expect(
+      isUploadRequest("POST", { kind: "none" }, [{ name: "Content-Type", value: "application/octet-stream" }]),
+    ).toBe(false);
+    // Medium (< 1 MiB) JSON/text/form-urlencoded sync or log payloads are not file uploads.
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: 80 * 1024 },
+        [{ name: "Content-Type", value: "application/json; charset=utf-8" }],
+      ),
+    ).toBe(false);
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: 80 * 1024 },
+        [{ name: "Content-Type", value: "text/plain;charset=UTF-8" }],
+      ),
+    ).toBe(false);
+    // Small (< 64 KiB) raw binary RPCs with application/octet-stream are not file uploads.
+    expect(
+      isUploadRequest(
+        "POST",
+        { kind: "raw_bytes", totalBytes: 256 },
+        [{ name: "Content-Type", value: "application/octet-stream" }],
+      ),
+    ).toBe(false);
+    expect(
+      isUploadRequest(
+        "PUT",
+        { kind: "raw_bytes", totalBytes: UPLOAD_MIN_BYTES - 1 },
+        [],
+      ),
     ).toBe(false);
   });
 
-  test("detects multipart, binary, media, tus, Content-Range, and large Content-Length headers on POST/PUT/PATCH", () => {
+  test("detects header-only tus, Content-Range, binary, media, and raw binary PATCH uploads", () => {
     expect(
-      isUploadRequestHeaders("POST", [
+      isUploadRequest("POST", undefined, [
         { name: "Content-Type", value: "multipart/form-data; boundary=----WebKitFormBoundary123" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "content-type", value: "application/offset+octet-stream" },
         { name: "upload-offset", value: "0" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PUT", [
+      isUploadRequest("PUT", undefined, [
         { name: "Content-Range", value: "bytes 0-99999/200000" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PUT", [
+      isUploadRequest("PUT", undefined, [
         { name: "Content-Type", value: "application/octet-stream" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PUT", [
+      isUploadRequest("PUT", undefined, [
         { name: "Content-Type", value: "video/mp4" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "Content-Length", value: String(UPLOAD_MIN_BYTES) },
       ]),
     ).toBe(true);
     // Raw binary PATCH (e.g. Uint8Array / untyped Blob) omits Content-Type and Content-Length in webRequest.
-    expect(isUploadRequestHeaders("PATCH", [])).toBe(true);
-    expect(isUploadRequestHeaders("PATCH", undefined)).toBe(true);
+    expect(isUploadRequest("PATCH", undefined, [])).toBe(true);
+    expect(isUploadRequest("PATCH", undefined, undefined)).toBe(true);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "Accept", value: "*/*" },
       ]),
     ).toBe(true);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "Content-Type", value: "application/json" },
         { name: "Content-Length", value: "64" },
       ]),
     ).toBe(false);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "Content-Type", value: "text/plain;charset=UTF-8" },
       ]),
     ).toBe(false);
     expect(
-      isUploadRequestHeaders("PATCH", [
+      isUploadRequest("PATCH", undefined, [
         { name: "Content-Length", value: "12" },
       ]),
     ).toBe(false);

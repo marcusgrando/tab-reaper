@@ -1,8 +1,10 @@
 import { createAsyncQueue, loadConfig } from "../shared/config.ts";
 
 export const ACTIVE_UPLOADS_STORAGE_KEY = "tabReaper.activeUploads";
-/** Minimum raw request body or Content-Length size treated as a data upload (64 KiB). */
+/** Minimum binary/untyped request body or Content-Length size treated as a data upload (64 KiB). */
 export const UPLOAD_MIN_BYTES = 64 * 1024;
+/** Minimum text/JSON/form/protobuf payload size treated as an upload (1 MiB) so large API syncs/logs do not trigger. */
+export const UPLOAD_TEXT_API_MIN_BYTES = 1024 * 1024;
 /** Keep a tab protected briefly after an upload request completes to bridge multi-chunk gaps. */
 export const UPLOAD_CHUNK_COOLDOWN_MS = 20_000;
 
@@ -23,6 +25,36 @@ const UPLOAD_EXACT_MEDIA_TYPES = new Set([
   "application/x-gzip",
 ]);
 const UPLOAD_MEDIA_PREFIXES = ["image/", "video/", "audio/"];
+const NON_UPLOAD_EXACT_MEDIA_TYPES = new Set([
+  "application/json",
+  "application/json+protobuf",
+  "application/x-www-form-urlencoded",
+  "application/x-protobuf",
+  "application/protobuf",
+  "application/grpc-web",
+  "application/grpc-web+proto",
+  "application/grpc-web-text",
+  "application/grpc-web-text+proto",
+  "application/xml",
+  "application/graphql",
+  "application/javascript",
+  "application/ecmascript",
+  "application/x-javascript",
+  "application/sdp",
+  "application/x-ndjson",
+  "application/ndjson",
+  "application/csp-report",
+  "application/reports+json",
+  "application/dns-message",
+  "application/ocsp-request",
+]);
+
+export type RequestBodyObservation =
+  | { kind: "none" }
+  | { kind: "file" }
+  | { kind: "form_fields" }
+  | { kind: "raw_bytes"; totalBytes: number }
+  | { kind: "opaque" };
 
 export interface ActiveUploadEntry {
   tabId: number;
@@ -38,60 +70,108 @@ export function createEmptyUploadState(): UploadState {
   return { inFlight: {}, cooldownUntilByTabId: {} };
 }
 
-export function isUploadRequestBody(
-  method: string,
-  requestBody?: chrome.webRequest.WebRequestBody | null,
-): boolean {
-  if (!BODY_METHODS.has(method.toUpperCase()) || !requestBody) return false;
-  // Chromium reports requestBody.error for Blob, file.slice() chunk, and stream bodies on POST/PUT.
-  if (typeof requestBody.error === "string" && requestBody.error.length > 0) return true;
-  if (!Array.isArray(requestBody.raw)) return false;
-  let totalBytes = 0;
-  for (const part of requestBody.raw) {
-    if (typeof part.file === "string" && part.file.length > 0) return true;
-    if (part.bytes && typeof part.bytes.byteLength === "number") {
-      totalBytes += part.bytes.byteLength;
-      if (totalBytes >= UPLOAD_MIN_BYTES) return true;
-    }
-  }
-  return false;
+function isExplicitUploadMediaType(mediaType: string): boolean {
+  return (
+    UPLOAD_EXACT_MEDIA_TYPES.has(mediaType) ||
+    UPLOAD_MEDIA_PREFIXES.some((prefix) => mediaType.startsWith(prefix))
+  );
 }
 
-export function isUploadRequestHeaders(
+function isNonUploadMediaType(mediaType: string): boolean {
+  return (
+    mediaType.startsWith("text/") ||
+    NON_UPLOAD_EXACT_MEDIA_TYPES.has(mediaType) ||
+    mediaType.endsWith("+json") ||
+    mediaType.endsWith("+xml") ||
+    mediaType.endsWith("+protobuf") ||
+    mediaType.endsWith("+proto")
+  );
+}
+
+export function inspectUploadRequestBody(
   method: string,
+  requestBody?: chrome.webRequest.WebRequestBody | null,
+): RequestBodyObservation {
+  if (!BODY_METHODS.has(method.toUpperCase()) || !requestBody) return { kind: "none" };
+  if (Array.isArray(requestBody.raw)) {
+    let totalBytes = 0;
+    for (const part of requestBody.raw) {
+      if (typeof part.file === "string" && part.file.length > 0) return { kind: "file" };
+      if (part.bytes && typeof part.bytes.byteLength === "number") {
+        totalBytes += part.bytes.byteLength;
+      }
+    }
+    return { kind: "raw_bytes", totalBytes };
+  }
+  // Chromium sets requestBody.error for Blobs, file.slice() chunks, streams, and empty string "" bodies.
+  // Defer classification until onBeforeSendHeaders so text/JSON/form-urlencoded payloads can be excluded.
+  if (typeof requestBody.error === "string" && requestBody.error.length > 0) return { kind: "opaque" };
+  if (requestBody.formData && typeof requestBody.formData === "object") return { kind: "form_fields" };
+  return { kind: "none" };
+}
+
+export function isUploadRequest(
+  method: string,
+  body?: RequestBodyObservation,
   headers?: chrome.webRequest.HttpHeader[],
 ): boolean {
   const upperMethod = method.toUpperCase();
   if (!UPLOAD_METHODS.has(upperMethod)) return false;
-  let hasContentType = false;
+  if (body?.kind === "file") return true;
+
+  let hasContentRange = false;
+  let hasUploadOffset = false;
   let contentLength: number | null = null;
+  let mediaType: string | null = null;
   if (Array.isArray(headers)) {
     for (const header of headers) {
       const name = header.name.toLowerCase();
       const rawValue = typeof header.value === "string" ? header.value.trim() : "";
       if (!rawValue) continue;
-      if (name === "content-range" || name === "upload-offset") return true;
-      if (name === "content-length" && /^\d+$/.test(rawValue)) {
+      if (name === "content-range") hasContentRange = true;
+      else if (name === "upload-offset") hasUploadOffset = true;
+      else if (name === "content-length" && /^\d+$/.test(rawValue)) {
         contentLength = Number(rawValue);
-        if (contentLength >= UPLOAD_MIN_BYTES) return true;
-      }
-      if (name === "content-type") {
-        hasContentType = true;
-        const mediaType = rawValue.split(";", 1)[0]!.trim().toLowerCase();
-        if (
-          UPLOAD_EXACT_MEDIA_TYPES.has(mediaType) ||
-          UPLOAD_MEDIA_PREFIXES.some((prefix) => mediaType.startsWith(prefix))
-        ) {
-          return true;
-        }
+      } else if (name === "content-type") {
+        mediaType = rawValue.split(";", 1)[0]!.trim().toLowerCase() || null;
       }
     }
   }
-  // Chromium omits requestBody for PATCH and strips Content-Length from webRequest headers.
-  // TypedArray/Blob PATCH bodies send no Content-Type, while JSON/text/form PATCH requests do.
-  if (upperMethod === "PATCH" && !hasContentType && (contentLength === null || contentLength >= UPLOAD_MIN_BYTES)) {
+
+  if (hasContentRange || hasUploadOffset || mediaType === "application/offset+octet-stream") {
     return true;
   }
+  // Text-only FormData (no File or Blob parts) still sends multipart/form-data; onBeforeRequest parsed formData.
+  if (body?.kind === "form_fields") return false;
+  // FormData containing a Blob produces raw boundary chunks without formData because Chromium omits Blob bytes.
+  if (mediaType === "multipart/form-data") return true;
+
+  if (body?.kind === "opaque") {
+    if (contentLength !== null) {
+      if (contentLength === 0) return false;
+      if (mediaType && isNonUploadMediaType(mediaType)) return contentLength >= UPLOAD_TEXT_API_MIN_BYTES;
+      return contentLength >= UPLOAD_MIN_BYTES || (mediaType !== null && isExplicitUploadMediaType(mediaType));
+    }
+    if (mediaType && isNonUploadMediaType(mediaType)) return false;
+    return true;
+  }
+
+  if (body?.kind === "raw_bytes") {
+    if (mediaType && isNonUploadMediaType(mediaType)) return body.totalBytes >= UPLOAD_TEXT_API_MIN_BYTES;
+    return body.totalBytes >= UPLOAD_MIN_BYTES;
+  }
+
+  // onBeforeRequest ran for POST/PUT and saw no body at all.
+  if (body?.kind === "none" && BODY_METHODS.has(upperMethod)) return false;
+
+  if (contentLength !== null) {
+    if (mediaType && isNonUploadMediaType(mediaType)) return contentLength >= UPLOAD_TEXT_API_MIN_BYTES;
+    return contentLength >= UPLOAD_MIN_BYTES;
+  }
+  if (mediaType) return isExplicitUploadMediaType(mediaType);
+  // Chromium omits requestBody for PATCH and strips Content-Length from webRequest headers.
+  // TypedArray/Blob PATCH bodies send no Content-Type, while JSON/text/form PATCH requests do.
+  if (upperMethod === "PATCH") return true;
   return false;
 }
 
@@ -240,14 +320,24 @@ export async function hasUploadProtectionPermission(): Promise<boolean> {
   }
 }
 
+const PENDING_BODY_TTL_MS = 60_000;
+const PENDING_BODY_PRUNE_THRESHOLD = 256;
+
+interface PendingBodyEntry {
+  tabId: number;
+  body: RequestBodyObservation;
+  seenAt: number;
+}
+
 const enqueue = createAsyncQueue();
 let listenersAttached = false;
 let observerEnabled: boolean | null = null;
 let pendingReconciles = 0;
 let cachedState: UploadState | null = null;
-/** Synchronous in-flight and cooldown indexes so events firing during an async check are seen immediately. */
+/** Synchronous in-flight, cooldown, and pending-body indexes so concurrent checks see events immediately. */
 const knownInFlight = new Map<string, number>();
 const knownCooldownUntil = new Map<number, number>();
+const pendingBodies = new Map<string, PendingBodyEntry>();
 
 export function hasLiveUploadProtectionForTab(tabId: number, now = Date.now()): boolean {
   if (observerEnabled !== true) return false;
@@ -375,28 +465,55 @@ function trackUploadFinish(requestId: string, applyCooldown: boolean): void {
   });
 }
 
+function isSuccessOrResumeStatus(statusCode?: number): boolean {
+  return typeof statusCode === "number" && statusCode >= 200 && statusCode < 400;
+}
+
 function onBeforeRequest(details: chrome.webRequest.WebRequestBodyDetails): void {
   if (observerEnabled === false || details.tabId < 0) return;
-  if (!BODY_METHODS.has(details.method)) return;
-  if (isUploadRequestBody(details.method, details.requestBody)) {
+  const upperMethod = details.method.toUpperCase();
+  if (!BODY_METHODS.has(upperMethod)) return;
+  const body = inspectUploadRequestBody(upperMethod, details.requestBody);
+  if (body.kind === "file") {
+    pendingBodies.delete(details.requestId);
     trackUploadStart(details.requestId, details.tabId);
+    return;
   }
+  const now = Date.now();
+  if (pendingBodies.size >= PENDING_BODY_PRUNE_THRESHOLD) {
+    for (const [id, entry] of pendingBodies.entries()) {
+      if (now - entry.seenAt >= PENDING_BODY_TTL_MS) pendingBodies.delete(id);
+    }
+  }
+  pendingBodies.set(details.requestId, { tabId: details.tabId, body, seenAt: now });
 }
 
 function onBeforeSendHeaders(details: chrome.webRequest.WebRequestHeadersDetails): void {
-  if (observerEnabled === false || details.tabId < 0) return;
-  if (!UPLOAD_METHODS.has(details.method)) return;
+  if (observerEnabled === false || details.tabId < 0) {
+    pendingBodies.delete(details.requestId);
+    return;
+  }
+  const upperMethod = details.method.toUpperCase();
+  if (!UPLOAD_METHODS.has(upperMethod)) return;
   if (knownInFlight.has(details.requestId)) return;
-  if (isUploadRequestHeaders(details.method, details.requestHeaders)) {
+  const pending = pendingBodies.get(details.requestId);
+  if (isUploadRequest(upperMethod, pending?.body, details.requestHeaders)) {
     trackUploadStart(details.requestId, details.tabId);
   }
 }
 
+function onResponseStarted(details: chrome.webRequest.WebResponseCacheDetails): void {
+  pendingBodies.delete(details.requestId);
+  trackUploadFinish(details.requestId, isSuccessOrResumeStatus(details.statusCode));
+}
+
 function onCompleted(details: chrome.webRequest.WebResponseCacheDetails): void {
-  trackUploadFinish(details.requestId, true);
+  pendingBodies.delete(details.requestId);
+  trackUploadFinish(details.requestId, isSuccessOrResumeStatus(details.statusCode));
 }
 
 function onErrorOccurred(details: chrome.webRequest.WebResponseErrorDetails): void {
+  pendingBodies.delete(details.requestId);
   trackUploadFinish(details.requestId, false);
 }
 
@@ -411,6 +528,7 @@ function attachListeners(): void {
   }
   chrome.webRequest.onBeforeRequest.addListener(onBeforeRequest, UPLOAD_REQUEST_FILTER, ["requestBody"]);
   chrome.webRequest.onBeforeSendHeaders.addListener(onBeforeSendHeaders, UPLOAD_REQUEST_FILTER, ["requestHeaders"]);
+  chrome.webRequest.onResponseStarted?.addListener(onResponseStarted, UPLOAD_REQUEST_FILTER);
   chrome.webRequest.onCompleted.addListener(onCompleted, UPLOAD_REQUEST_FILTER);
   chrome.webRequest.onErrorOccurred.addListener(onErrorOccurred, UPLOAD_REQUEST_FILTER);
   listenersAttached = true;
@@ -423,6 +541,7 @@ function detachListeners(): void {
   }
   chrome.webRequest.onBeforeRequest.removeListener(onBeforeRequest);
   chrome.webRequest.onBeforeSendHeaders.removeListener(onBeforeSendHeaders);
+  chrome.webRequest.onResponseStarted?.removeListener(onResponseStarted);
   chrome.webRequest.onCompleted.removeListener(onCompleted);
   chrome.webRequest.onErrorOccurred.removeListener(onErrorOccurred);
   listenersAttached = false;
@@ -466,6 +585,7 @@ export function reconcileUploadObserver(): Promise<void> {
         cachedState = createEmptyUploadState();
         knownInFlight.clear();
         knownCooldownUntil.clear();
+        pendingBodies.clear();
         try {
           await chrome.storage.session.remove(ACTIVE_UPLOADS_STORAGE_KEY);
         } catch {
@@ -513,6 +633,9 @@ export function forgetTabUploads(tabId: number): Promise<void> {
   for (const [requestId, activeTabId] of knownInFlight.entries()) {
     if (activeTabId === tabId) knownInFlight.delete(requestId);
   }
+  for (const [requestId, entry] of pendingBodies.entries()) {
+    if (entry.tabId === tabId) pendingBodies.delete(requestId);
+  }
   knownCooldownUntil.delete(tabId);
   return enqueue(async () => {
     if (!observerEnabled) return;
@@ -526,6 +649,9 @@ export function migrateTabUploads(oldTabId: number, newTabId: number): Promise<v
   if ((observerEnabled === false && pendingReconciles === 0) || oldTabId === newTabId) return Promise.resolve();
   for (const [requestId, activeTabId] of knownInFlight.entries()) {
     if (activeTabId === oldTabId) knownInFlight.set(requestId, newTabId);
+  }
+  for (const entry of pendingBodies.values()) {
+    if (entry.tabId === oldTabId) entry.tabId = newTabId;
   }
   const existingCooldown = knownCooldownUntil.get(oldTabId);
   if (existingCooldown !== undefined) {

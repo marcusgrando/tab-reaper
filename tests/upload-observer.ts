@@ -62,6 +62,84 @@ const server = Bun.serve({
               signal: ctrl.signal,
             }).catch(() => "aborted");
           };
+          window.startEmptyStringPost = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            return fetch("/hold/" + id, { method: "POST", body: "", signal: ctrl.signal }).catch(() => "aborted");
+          };
+          window.startEmptyXhrPost = (id) => {
+            return new Promise((resolve) => {
+              const xhr = new XMLHttpRequest();
+              window.controllers[id] = { abort: () => xhr.abort() };
+              xhr.open("POST", "/hold/" + id);
+              xhr.onloadend = () => resolve("done");
+              xhr.send("");
+            });
+          };
+          window.startJsonBlobPost = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            return fetch("/hold/" + id, {
+              method: "POST",
+              body: new Blob([JSON.stringify({ sync: true })], { type: "application/json" }),
+              signal: ctrl.signal,
+            }).catch(() => "aborted");
+          };
+          window.startTextFormDataPost = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            const fd = new FormData();
+            fd.append("action", "sync");
+            fd.append("token", "abc123");
+            return fetch("/hold/" + id, { method: "POST", body: fd, signal: ctrl.signal }).catch(() => "aborted");
+          };
+          window.startLargeJsonSyncPost = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            return fetch("/hold/" + id, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ payload: "x".repeat(80_000) }),
+              signal: ctrl.signal,
+            }).catch(() => "aborted");
+          };
+          window.startSmallOctetRpcPost = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            return fetch("/hold/" + id, {
+              method: "POST",
+              headers: { "content-type": "application/octet-stream" },
+              body: new Uint8Array(256),
+              signal: ctrl.signal,
+            }).catch(() => "aborted");
+          };
+          window.startFormDataBlobUpload = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            const fd = new FormData();
+            fd.append("name", "screenshot");
+            fd.append("file", new Blob([new Uint8Array(80_000)], { type: "image/png" }), "shot.png");
+            return fetch("/hold/" + id, { method: "POST", body: fd, signal: ctrl.signal }).catch(() => "aborted");
+          };
+          window.startFileSlicePut = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            const file = document.getElementById("hidden-file").files[0];
+            return fetch("/hold/" + id, {
+              method: "PUT",
+              body: file.slice(0, 65_536),
+              signal: ctrl.signal,
+            }).catch(() => "aborted");
+          };
+          window.startFailingBlobPut = (id) => {
+            const ctrl = new AbortController();
+            window.controllers[id] = ctrl;
+            return fetch("/fail/" + id, {
+              method: "PUT",
+              body: new Blob([new Uint8Array(80_000)], { type: "application/octet-stream" }),
+              signal: ctrl.signal,
+            }).catch(() => "aborted");
+          };
           window.startLongGet = (id) => {
             const ctrl = new AbortController();
             window.controllers[id] = ctrl;
@@ -72,8 +150,9 @@ const server = Bun.serve({
         { headers: { "content-type": "text/html" } },
       );
     }
-    if (url.pathname.startsWith("/hold/")) {
-      const id = url.pathname.slice("/hold/".length);
+    if (url.pathname.startsWith("/hold/") || url.pathname.startsWith("/fail/")) {
+      const isFail = url.pathname.startsWith("/fail/");
+      const id = url.pathname.slice(isFail ? "/fail/".length : "/hold/".length);
       if (req.method !== "GET") {
         await req.arrayBuffer().catch(() => {});
       }
@@ -81,7 +160,7 @@ const server = Bun.serve({
         pendingReleases.set(id, resolve);
       });
       pendingReleases.delete(id);
-      return new Response("ok");
+      return new Response(isFail ? "error" : "ok", { status: isFail ? 500 : 200 });
     }
     return new Response("not found", { status: 404 });
   },
@@ -203,10 +282,11 @@ try {
   const afterComplete = await getTab(uploaderUrl);
   assert.equal(afterComplete.hasActiveUpload, true, "completed upload should stay protected during chunk cooldown");
 
-  // 3. Aborted PUT Blob chunk clears protection immediately (no cooldown on error/abort).
+  // 3. Aborted PUT Blob chunk and 500-failing PUT clear protection immediately (no cooldown on error/abort).
   const blobUrl = `${baseUrl}/uploader?mode=blob`;
   const blobTab = await context.newPage();
   await blobTab.goto(blobUrl);
+  await blobTab.setInputFiles("#hidden-file", sampleFile);
   await options.bringToFront();
   await blobTab.evaluate(() => {
     void (window as unknown as { startBlobPut(id: string): Promise<unknown> }).startBlobPut("blob-1");
@@ -219,6 +299,38 @@ try {
   });
   release("blob-1");
   await waitUploadState(blobUrl, false, "aborted upload should clear protection immediately");
+
+  // File slice PUT (untyped Blob slice) and FormData Blob upload must still be detected.
+  await blobTab.evaluate(() => {
+    void (window as unknown as { startFileSlicePut(id: string): Promise<unknown> }).startFileSlicePut("slice-1");
+  });
+  await waitHeld("slice-1");
+  await waitUploadState(blobUrl, true, "PUT file.slice() upload should be detected");
+  await blobTab.evaluate(() => {
+    (window as unknown as { abortRequest(id: string): void }).abortRequest("slice-1");
+  });
+  release("slice-1");
+  await waitUploadState(blobUrl, false, "aborted file.slice() PUT should clear");
+
+  await blobTab.evaluate(() => {
+    void (window as unknown as { startFormDataBlobUpload(id: string): Promise<unknown> }).startFormDataBlobUpload("fd-blob-1");
+  });
+  await waitHeld("fd-blob-1");
+  await waitUploadState(blobUrl, true, "FormData Blob upload should be detected");
+  await blobTab.evaluate(() => {
+    (window as unknown as { abortRequest(id: string): void }).abortRequest("fd-blob-1");
+  });
+  release("fd-blob-1");
+  await waitUploadState(blobUrl, false, "aborted FormData Blob upload should clear");
+
+  // Server 500 on an upload clears protection immediately without applying chunk cooldown.
+  await blobTab.evaluate(() => {
+    void (window as unknown as { startFailingBlobPut(id: string): Promise<unknown> }).startFailingBlobPut("fail-500");
+  });
+  await waitHeld("fail-500");
+  await waitUploadState(blobUrl, true, "in-flight failing upload should protect until response");
+  release("fail-500");
+  await waitUploadState(blobUrl, false, "HTTP 500 upload failure should not apply chunk cooldown");
   await blobTab.close();
 
   // 4. Resumable tus PATCH and raw binary Uint8Array PATCH (without Content-Type) are detected.
@@ -254,28 +366,50 @@ try {
   await waitUploadState(patchUrl, false, "aborted raw binary PATCH should clear");
   await patchTab.close();
 
-  // 5. Small JSON POST + long-lived GET (polling/SSE) must NOT block sleeping.
+  // 5. Normal background SPA/Gmail-style traffic (small JSON POST, empty-string fetch/XHR POST,
+  // JSON Blob POST, text-only FormData, 80 KiB JSON sync POST, small octet-stream RPC, long GET)
+  // must NOT block sleeping (split into waves of 4 to stay under Chromium's 6-connection HTTP/1.1 cap).
   const chatUrl = `${baseUrl}/chat`;
   const chatTab = await context.newPage();
   await chatTab.goto(chatUrl);
   await options.bringToFront();
+
+  const wave1 = ["json-1", "empty-fetch-1", "empty-xhr-1", "json-blob-1"];
   await chatTab.evaluate(() => {
-    void (window as unknown as { startSmallJsonPost(id: string): Promise<unknown> }).startSmallJsonPost("json-1");
-    void (window as unknown as { startLongGet(id: string): Promise<unknown> }).startLongGet("get-1");
+    const w = window as unknown as Record<string, (id: string) => Promise<unknown>>;
+    void w.startSmallJsonPost!("json-1");
+    void w.startEmptyStringPost!("empty-fetch-1");
+    void w.startEmptyXhrPost!("empty-xhr-1");
+    void w.startJsonBlobPost!("json-blob-1");
   });
-  await Promise.all([waitHeld("json-1"), waitHeld("get-1")]);
+  await Promise.all(wave1.map((id) => waitHeld(id)));
+  await Bun.sleep(150);
+  const wave1Status = await getTab(chatUrl);
+  assert.equal(wave1Status.hasActiveUpload, false, "empty POSTs and JSON Blob POST must not look like uploads");
+  for (const id of wave1) release(id);
+  await Bun.sleep(150);
+  assert.equal((await getTab(chatUrl)).hasActiveUpload, false, "completed empty/JSON Blob POSTs must not trigger cooldown");
+
+  const wave2 = ["text-fd-1", "sync-json-1", "rpc-octet-1", "get-1"];
+  await chatTab.evaluate(() => {
+    const w = window as unknown as Record<string, (id: string) => Promise<unknown>>;
+    void w.startTextFormDataPost!("text-fd-1");
+    void w.startLargeJsonSyncPost!("sync-json-1");
+    void w.startSmallOctetRpcPost!("rpc-octet-1");
+    void w.startLongGet!("get-1");
+  });
+  await Promise.all(wave2.map((id) => waitHeld(id)));
   await Bun.sleep(150);
   const chatStatus = await getTab(chatUrl);
-  assert.equal(chatStatus.hasActiveUpload, false, "small JSON POST and long GET must not look like uploads");
+  assert.equal(chatStatus.hasActiveUpload, false, "text-only FormData, 80 KiB JSON sync, small binary RPC, and long GET must not look like uploads");
   assert.equal(chatStatus.protectedReason, null);
   assert.equal(chatStatus.canSleep, true);
   assert.deepEqual(
     await options.evaluate((tabId) => chrome.runtime.sendMessage({ type: "discard_tab", tabId }), chatStatus.id),
     { ok: true },
-    "tab with only small JSON POST / long GET should still sleep",
+    "tab with only background API/sync POSTs and long GET should still sleep",
   );
-  release("json-1");
-  release("get-1");
+  for (const id of wave2) release(id);
 
   // 6. Disabling protectActiveUploads clears active protection immediately.
   await setProtectUploads(false);
