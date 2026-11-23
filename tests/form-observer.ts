@@ -63,10 +63,14 @@ try {
   const debuggerSession = await context.newCDPSession(page);
   const { frameTree } = await debuggerSession.send("Page.getFrameTree");
   let isolatedWorld: number | undefined;
+  const uncaughtExceptions: string[] = [];
   debuggerSession.on("Runtime.executionContextCreated", ({ context }) => {
     if (context.name === "Tab Reaper" && context.auxData?.frameId === frameTree.frame.id) isolatedWorld = context.id;
   });
   debuggerSession.on("Runtime.executionContextsCleared", () => { isolatedWorld = undefined; });
+  debuggerSession.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+    uncaughtExceptions.push(exceptionDetails.exception?.description ?? exceptionDetails.text);
+  });
   await debuggerSession.send("Runtime.enable");
   // Inspect the isolated world even after Chrome withdraws the extension's scripting API.
   // "idle" means installed but not yet authorized by the worker.
@@ -192,12 +196,45 @@ try {
   await title.press("End");
   await title.press("x");
   await expectDirty(true, "edits observed after navigation");
+  await page.reload();
+  await waitForObserver("idle");
+  await debuggerSession.send("Runtime.evaluate", {
+    contextId: isolatedWorld,
+    expression: "delete chrome.runtime",
+  });
+  await title.press("End");
+  await title.press("x");
+  assert.deepEqual(uncaughtExceptions, [], "missing chrome.runtime does not throw");
+  await waitForObserver("missing");
+  await page.reload();
+  await waitForObserver("idle");
+  await debuggerSession.send("Runtime.evaluate", {
+    contextId: isolatedWorld,
+    expression: "delete chrome.runtime.id",
+  });
+  await title.press("End");
+  await title.press("x");
+  assert.deepEqual(uncaughtExceptions, [], "invalidated chrome.runtime.id does not throw");
+  await waitForObserver("missing");
+  await page.reload();
+  await waitForObserver("idle");
+  await debuggerSession.send("Runtime.evaluate", {
+    contextId: isolatedWorld,
+    expression: "chrome.runtime.sendMessage = () => { throw new Error('Extension context invalidated.'); }",
+  });
+  await title.press("End");
+  await title.press("x");
+  await waitForObserver("missing");
+  assert.deepEqual(uncaughtExceptions, [], "synchronous sendMessage failure tears down without unhandled rejections");
+  await page.reload();
+  await waitForObserver("idle");
   await options.evaluate(() => chrome.permissions.remove({ permissions: ["scripting"] }));
   await waitForObserver("missing");
   await page.reload();
   await title.press("x");
   await waitForObserver("missing");
   await expectDirty(false, "revoking page access clears protection");
+  assert.deepEqual(uncaughtExceptions, [], "no uncaught exceptions in page observer");
   console.log("Form protection passed in Chromium.");
 } finally {
   await context?.close();

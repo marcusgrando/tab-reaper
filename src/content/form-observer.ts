@@ -2,8 +2,12 @@ interface Window {
   tabReaperFormObserver?: { readonly dirty: boolean; readonly active: boolean };
 }
 
+function hasRuntime(): boolean {
+  return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+}
+
 function installObserver() {
-  if (window.tabReaperFormObserver) return;
+  if (window.tabReaperFormObserver || !hasRuntime() || !chrome.runtime.onMessage) return;
   const controller = new AbortController();
   // Signature of each field before its pending edit. undefined: no comparable signature.
   const originals = new WeakMap<HTMLElement, string | undefined>();
@@ -12,26 +16,38 @@ function installObserver() {
   let removedEdit = false;
   let active = false;
   let authorizing = false;
-  window.tabReaperFormObserver = {
-    get active() { return active; },
-    get dirty() { return hasPendingEdits(); },
-  };
 
   function stop() {
     active = false;
     controller.abort();
     edited.clear();
     delete window.tabReaperFormObserver;
-    chrome.runtime.onMessage.removeListener(onMessage);
+    try {
+      if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onMessage);
+    } catch {
+      // Extension context may already be invalidated.
+    }
   }
   function onMessage(message: unknown) {
     if (message === "tab-reaper-stop-form-observer") stop();
   }
-  chrome.runtime.onMessage.addListener(onMessage);
+  try {
+    chrome.runtime.onMessage.addListener(onMessage);
+  } catch {
+    return;
+  }
+  window.tabReaperFormObserver = {
+    get active() { return active; },
+    get dirty() { return hasPendingEdits(); },
+  };
 
   // Cheap checks only. Edited fields skip the layout checks in eligible() on later keystrokes.
   function control(event: Event): HTMLElement | undefined {
-    if (!event.isTrusted || !chrome.runtime.id) return;
+    if (!event.isTrusted) return;
+    if (!hasRuntime()) {
+      stop();
+      return;
+    }
     const target = event.composedPath()[0];
     const element = target instanceof HTMLLabelElement ? target.control : target;
     if (!(element instanceof HTMLElement)) return;
@@ -120,12 +136,22 @@ function installObserver() {
   // Frames ask the worker only after their first eligible interaction, so loading a page sends no messages.
   async function authorize() {
     if (active || authorizing) return;
+    if (!hasRuntime()) {
+      stop();
+      return;
+    }
     authorizing = true;
-    // Chrome can retain a registered script after the user revokes scripting alone.
-    const enabled = await chrome.runtime.sendMessage("tab-reaper-form-access").catch(() => false);
-    authorizing = false;
+    let enabled = false;
+    try {
+      // Chrome can retain a registered script after the user revokes scripting alone.
+      enabled = (await chrome.runtime.sendMessage("tab-reaper-form-access")) === true;
+    } catch {
+      enabled = false;
+    } finally {
+      authorizing = false;
+    }
     if (controller.signal.aborted) return;
-    if (enabled === true) active = true;
+    if (enabled) active = true;
     else stop();
   }
 
