@@ -1,7 +1,7 @@
 import { HTTP_HOST_ORIGINS, isInternalUrl, withTimeout } from "../shared/config.ts";
 import type { TabSummary, TabWeightSample } from "../shared/types.ts";
 
-const SAMPLE_CACHE_KEY = "tabReaper.weightSamples";
+const SAMPLE_CACHE_KEY = "tabCurb.weightSamples";
 const SAMPLE_TTL_MS = 2 * 60 * 1000;
 /** Bound per-tab executeScript calls so one hung renderer cannot stall sweeps or the popup. */
 export const SCRIPT_INSPECT_TIMEOUT_MS = 500;
@@ -193,7 +193,7 @@ function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): 
   // Read observer via a Symbol key and built-ins via prototype descriptors/type checks
   // so page DOM clobbering (e.g. <form id="documentPictureInPicture">) cannot spoof state.
   const observer = (globalThis as Record<symbol, { dirty?: unknown } | undefined>)[
-    Symbol.for("tabReaper.formObserver")
+    Symbol.for("tabCurb.formObserver")
   ];
   const hasUnsavedForm = protectUnsavedForms && observer?.dirty === true;
   const isTop = window === window.top;

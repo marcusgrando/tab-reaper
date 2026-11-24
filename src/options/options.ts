@@ -21,7 +21,7 @@ import type {
   SyncFolderCandidate,
   SyncStatus,
   SyncedDeviceInfo,
-  TabReaperConfig,
+  TabCurbConfig,
 } from "../shared/types.ts";
 
 const memoryMode = document.getElementById("memory-mode") as HTMLSelectElement;
@@ -120,17 +120,17 @@ function renderMemoryMode(): void {
     const thresholds = memory.pressureThresholds;
     if (!thresholds) {
       memoryModeHint.textContent =
-        "ChromeOS puts tabs to sleep under memory pressure on its own. Without the Local Companion, Tab Reaper puts tabs to sleep only when Chrome starts or when you ask.";
+        "ChromeOS puts tabs to sleep under memory pressure on its own. Without the Local Companion, TabCurb puts tabs to sleep only when Chrome starts or when you ask.";
       memoryNow.textContent = `${free}.`;
       return;
     }
     memoryModeHint.textContent =
-      "Without the Local Companion, Tab Reaper can't measure Chrome's memory, so it reacts to the computer's memory pressure and there is no budget to set. Install the Local Companion under System to cap Chrome's memory.";
+      "Without the Local Companion, TabCurb can't measure Chrome's memory, so it reacts to the computer's memory pressure and there is no budget to set. Install the Local Companion under System to cap Chrome's memory.";
     memoryNow.textContent =
       `${free} (${PRESSURE_LABELS[memory.pressure ?? "normal"]} pressure). ` +
       `Tabs start sleeping, least recently used first, when free memory drops to ${formatMb(thresholds.moderateBytes)}. ` +
       `At ${formatMb(thresholds.criticalBytes)} the heaviest go first. ` +
-      `If ${MAX_DISCARDS_WITHOUT_RELIEF} tabs sleep without freeing memory, Tab Reaper waits until the pressure ends.`;
+      `If ${MAX_DISCARDS_WITHOUT_RELIEF} tabs sleep without freeing memory, TabCurb waits until the pressure ends.`;
     return;
   }
 
@@ -168,7 +168,7 @@ async function refreshMemoryMode(): Promise<void> {
 const UNDO_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>';
 
-type ConfigKey = keyof TabReaperConfig;
+type ConfigKey = keyof TabCurbConfig;
 
 interface FieldSpec<T> {
   read: () => T;
@@ -177,7 +177,7 @@ interface FieldSpec<T> {
   defaultLabel: string;
 }
 
-type FieldSpecs = { [K in ConfigKey]: FieldSpec<TabReaperConfig[K]> };
+type FieldSpecs = { [K in ConfigKey]: FieldSpec<TabCurbConfig[K]> };
 
 function selectField<T extends string>(
   el: HTMLSelectElement,
@@ -300,7 +300,7 @@ function isConfigKey(key: string | undefined): key is ConfigKey {
   return key !== undefined && key in fieldSpecs;
 }
 
-function writeFieldFrom<K extends ConfigKey>(key: K, config: TabReaperConfig): void {
+function writeFieldFrom<K extends ConfigKey>(key: K, config: TabCurbConfig): void {
   fieldSpecs[key].write(config[key]);
 }
 
@@ -337,10 +337,10 @@ function syncPermissionCheckboxes(): void {
 }
 
 function saveConfigPatch(
-  patch: Partial<TabReaperConfig>,
+  patch: Partial<TabCurbConfig>,
   statusEl: HTMLElement,
   options: { syncFields?: ConfigKey[]; refreshMemory?: boolean; statusText?: string } = {},
-): Promise<TabReaperConfig | null> {
+): Promise<TabCurbConfig | null> {
   const keys = Object.keys(patch) as ConfigKey[];
   const seqs = new Map<ConfigKey, number>();
   for (const key of keys) {
@@ -352,7 +352,7 @@ function saveConfigPatch(
     const res = (await chrome.runtime.sendMessage({
       type: "save_config",
       config: patch,
-    })) as { ok?: boolean; config?: TabReaperConfig };
+    })) as { ok?: boolean; config?: TabCurbConfig };
     if (!res?.ok || !res.config) {
       statusEl.textContent = "Failed to save setting.";
       statusEl.className = "status-text err";
@@ -380,7 +380,7 @@ function saveConfigPatch(
 function scheduleDebouncedSave(
   key: ConfigKey,
   delayMs: number,
-  readPatch: () => Partial<TabReaperConfig> | null,
+  readPatch: () => Partial<TabCurbConfig> | null,
   options: { syncFields?: ConfigKey[]; refreshMemory?: boolean } = {},
 ): void {
   cancelDebounce(key);
@@ -414,7 +414,7 @@ for (const btn of resetButtons) {
         ? ["idleEvictionPercent", "sizeEvictionPercent"]
         : [key];
     void saveConfigPatch(
-      { [key]: DEFAULT_CONFIG[key] } as Partial<TabReaperConfig>,
+      { [key]: DEFAULT_CONFIG[key] } as Partial<TabCurbConfig>,
       statusElForKey(key),
       { syncFields, refreshMemory: MEMORY_KEYS.has(key) },
     );
@@ -429,7 +429,7 @@ function syncResetButtons(): void {
   }
 }
 
-function populateForm(config: TabReaperConfig): void {
+function populateForm(config: TabCurbConfig): void {
   displayedConfig = config;
   for (const key of FIELD_KEYS) {
     writeFieldFrom(key, config);
@@ -453,9 +453,9 @@ function buildInstallCommand(extensionId: string): string {
   const versionTag = `v${chrome.runtime.getManifest().version}`;
   const isWindows = /Windows/i.test(navigator.userAgent);
   if (isWindows) {
-    return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/${versionTag}/native-host/install.ps1))) -Version ${versionTag} ${extensionId}`;
+    return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tabcurb/${versionTag}/native-host/install.ps1))) -Version ${versionTag} ${extensionId}`;
   }
-  return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/${versionTag}/native-host/install.sh | TAB_REAPER_VERSION=${versionTag} bash -s -- ${extensionId}`;
+  return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/${versionTag}/native-host/install.sh | TABCURB_VERSION=${versionTag} bash -s -- ${extensionId}`;
 }
 
 let setupVisible = false;
@@ -571,7 +571,7 @@ async function refreshPermissionsUI(): Promise<void> {
   hasUploadPerm = hasUpload;
 
   btnNativePerm.textContent = hasNative ? "Revoke" : "Enable";
-  nativeStatus.textContent = hasNative ? "Permission granted." : "Permission is off. Tab Reaper uses system RAM.";
+  nativeStatus.textContent = hasNative ? "Permission granted." : "Permission is off. TabCurb uses system RAM.";
   nativeStatus.className = `status-text ${hasNative ? "ok" : ""}`;
 
   syncPermissionCheckboxes();
@@ -1379,7 +1379,7 @@ checkUpdates.addEventListener("change", async () => {
   const res = (await chrome.runtime.sendMessage({
     type: "save_config",
     config: { checkForUpdates: checkUpdates.checked },
-  })) as { ok: boolean; config: TabReaperConfig };
+  })) as { ok: boolean; config: TabCurbConfig };
   if (res?.ok) {
     const status = (await chrome.runtime.sendMessage({ type: "get_status", includeTabs: false })) as StatusPayload;
     renderUpdateCheckStatus(status);
@@ -1412,7 +1412,7 @@ function bindInstantCheckbox(el: HTMLInputElement, key: ConfigKey): void {
   el.addEventListener("change", () => {
     syncResetButtons();
     void saveConfigPatch(
-      { [key]: el.checked } as Partial<TabReaperConfig>,
+      { [key]: el.checked } as Partial<TabCurbConfig>,
       statusElForKey(key),
       { syncFields: [key], refreshMemory: MEMORY_KEYS.has(key) },
     );
@@ -1426,7 +1426,7 @@ function bindNumberInput(
   const isThreshold = key === "idleEvictionPercent" || key === "sizeEvictionPercent";
   const syncFields: ConfigKey[] = isThreshold ? ["idleEvictionPercent", "sizeEvictionPercent"] : [key];
   const isMemory = MEMORY_KEYS.has(key);
-  const readValid = (): Partial<TabReaperConfig> | null => {
+  const readValid = (): Partial<TabCurbConfig> | null => {
     if (el.value.trim() === "") return null;
     const value = Number(el.value);
     if (!Number.isFinite(value)) return null;
@@ -1485,7 +1485,7 @@ async function handlePageAccessToggle(
       return;
     }
     const alreadyHasHost = await chrome.permissions.contains(WEIGHTED_EVICTION_PERMS);
-    let patch: Partial<TabReaperConfig> = { [key]: true };
+    let patch: Partial<TabCurbConfig> = { [key]: true };
     if (!alreadyHasHost) {
       const granted = await chrome.permissions.request(WEIGHTED_EVICTION_PERMS);
       if (!granted) {
@@ -1627,7 +1627,7 @@ btnNativeTest.addEventListener("click", async () => {
   }
   if (resp?.ok) {
     setupNativeError = null;
-    nativeStatus.textContent = `Connected: tab-reaper-host v${resp.version} (${resp.platform})`;
+    nativeStatus.textContent = `Connected: tabcurb-host v${resp.version} (${resp.platform})`;
     nativeStatus.className = "status-text ok";
     await Promise.all([refreshMemoryMode(), refreshSyncAndSnapshotsUI()]);
   } else {

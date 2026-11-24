@@ -1,17 +1,17 @@
 {
-  "name": "tab-reaper",
+  "name": "tabcurb",
   "version": "0.9.9",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
     "icons": "bun run scripts/generate-icons.ts",
-    "package": "bun run build && rm -f dist/tab-reaper-extension.zip && (cd dist && zip -qr tab-reaper-extension.zip .)",
+    "package": "bun run build && rm -f dist/tabcurb-extension.zip && (cd dist && zip -qr tabcurb-extension.zip .)",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:ui": "bun run build && bun tests/extension-ui.ts && bun tests/form-observer.ts && bun tests/upload-observer.ts",
-    "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo test --manifest-path native-host/Cargo.toml",
-    "build:host": "CARGO_TARGET_DIR=${HOME}/.cache/tab-reaper/target cargo build --release --manifest-path native-host/Cargo.toml"
+    "test:rust": "CARGO_TARGET_DIR=${HOME}/.cache/tabcurb/target cargo test --manifest-path native-host/Cargo.toml",
+    "build:host": "CARGO_TARGET_DIR=${HOME}/.cache/tabcurb/target cargo build --release --manifest-path native-host/Cargo.toml"
   },
   "devDependencies": {
     "@types/bun": "latest",

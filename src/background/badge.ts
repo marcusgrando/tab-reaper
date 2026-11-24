@@ -58,8 +58,8 @@ export async function updateActionBadge(
   if (!chrome.action?.setBadgeText) return;
   const badge = computeBadge(memory, loadedCount, isOnline, thresholds, updateAvailable);
   const title = updateAvailable
-    ? `Tab Reaper — Update available: v${updateAvailable.latestVersion}`
-    : "Tab Reaper";
+    ? `TabCurb — Update available: v${updateAvailable.latestVersion}`
+    : "TabCurb";
   try {
     await Promise.all([
       chrome.action.setBadgeText({ text: badge.text }),

@@ -62,7 +62,7 @@ try {
 
   // Session recovery caps the initial list at 20 scrollable items with an expand button, and inspects tabs without overflow.
   await worker.evaluate(() => chrome.storage.local.set({
-    "tabReaper.sessionSnapshots": Array.from({ length: 23 }, (_, i) => ({
+    "tabCurb.sessionSnapshots": Array.from({ length: 23 }, (_, i) => ({
       id: `ui-snap-${i + 1}`,
       complete: true,
       capturedAt: Date.now() - (i + 1) * 60_000,
@@ -95,7 +95,7 @@ try {
   assert.match(await options.locator(".snapshot-tabs-panel").first().innerText(), /Status board/);
   await options.setViewportSize({ width: 320, height: 700 });
   assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await worker.evaluate(() => chrome.storage.local.remove("tabReaper.sessionSnapshots"));
+  await worker.evaluate(() => chrome.storage.local.remove("tabCurb.sessionSnapshots"));
 
   const longTitle = "Project notes for the November platform planning meeting with the application and infrastructure teams";
   await options.setViewportSize({ width: 1024, height: 720 });
@@ -190,10 +190,10 @@ try {
 
   // Update banner appears in the popup when a newer release is cached and hides after dismissal.
   await worker.evaluate(() => chrome.storage.local.set({
-    "tabReaper.updateState": {
+    "tabCurb.updateState": {
       checkedAt: Date.now(),
       latestVersion: "99.0.0",
-      releaseUrl: "https://github.com/marcusgrando/tab-reaper/releases/tag/v99.0.0",
+      releaseUrl: "https://github.com/marcusgrando/tabcurb/releases/tag/v99.0.0",
     },
   }));
   const updatePopup = await context.newPage();

@@ -1,11 +1,11 @@
 import type { UpdateAvailableInfo, UpdateCheckStatus } from "../shared/types.ts";
 
-export const UPDATE_STATE_KEY = "tabReaper.updateState";
-export const UPDATE_ALARM = "tab-reaper-update-check";
+export const UPDATE_STATE_KEY = "tabCurb.updateState";
+export const UPDATE_ALARM = "tabcurb-update-check";
 export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_CHECK_PERIOD_MINUTES = 24 * 60;
-export const LATEST_RELEASE_API_URL = "https://api.github.com/repos/marcusgrando/tab-reaper/releases/latest";
-const ALLOWED_RELEASE_URL_PREFIX = "https://github.com/marcusgrando/tab-reaper/releases/";
+export const LATEST_RELEASE_API_URL = "https://api.github.com/repos/marcusgrando/tabcurb/releases/latest";
+const ALLOWED_RELEASE_URL_PREFIX = "https://github.com/marcusgrando/tabcurb/releases/";
 
 export interface UpdateCheckState {
   checkedAt: number;

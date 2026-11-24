@@ -28,7 +28,7 @@ import {
   loadSnapshots,
 } from "../src/background/session.ts";
 import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/shared/config.ts";
-import type { SessionSnapshot, TabReaperConfig } from "../src/shared/types.ts";
+import type { SessionSnapshot, TabCurbConfig } from "../src/shared/types.ts";
 
 describe("folder sync conflict-free algorithms", () => {
   test("pruneSnapshotsGfs keeps all manual snapshots, 20 recent auto, 1/hour for 24h, and 1/day for 30d", () => {
@@ -103,12 +103,12 @@ describe("multi-device single-writer folder sync integration", () => {
   let readPaths: string[];
 
   beforeEach(() => {
-    activeSyncDir = "/iCloud/TabReaper";
+    activeSyncDir = "/iCloud/TabCurb";
     hostHostname = "MacBook";
     storageData = {
-      "tabReaper.deviceIdentity": { deviceId: "dev-mac", deviceName: "MacBook Pro", deviceNameSource: "custom" },
-      "tabReaper.folderSyncOptedIn": true,
-      "tabReaper.activeSyncDir": activeSyncDir,
+      "tabCurb.deviceIdentity": { deviceId: "dev-mac", deviceName: "MacBook Pro", deviceNameSource: "custom" },
+      "tabCurb.folderSyncOptedIn": true,
+      "tabCurb.activeSyncDir": activeSyncDir,
     };
     virtualFs = new Map<string, string>();
     readPaths = [];
@@ -502,7 +502,7 @@ describe("multi-device single-writer folder sync integration", () => {
       }),
     );
 
-    let applied: TabReaperConfig | null = null;
+    let applied: TabCurbConfig | null = null;
     const pullRes = await pullConfigFromSync(
       async () => ({ ...DEFAULT_CONFIG, memoryBudgetGb: 10 }),
       async (cfg) => {
@@ -550,7 +550,7 @@ describe("multi-device single-writer folder sync integration", () => {
     );
 
     await setLocalConfigVersion({ updatedAt: now, deviceId: "dev-mac" });
-    let applied: TabReaperConfig | null = null;
+    let applied: TabCurbConfig | null = null;
     const res = await pullConfigFromSync(
       async () => ({ ...DEFAULT_CONFIG, protectActiveUploads: true, weightedEviction: false }),
       async (cfg) => { applied = cfg; },
@@ -571,7 +571,7 @@ describe("multi-device single-writer folder sync integration", () => {
     let fail = true;
     Object.assign(chrome.runtime, { sendNativeMessage: (host: string, req: { cmd: string; relPath?: string }) =>
       fail && req.cmd === "sync_read" && req.relPath === path ? { ok: false } : send(host, req) });
-    const apply = async (cfg: TabReaperConfig) => { await saveConfig(cfg); };
+    const apply = async (cfg: TabCurbConfig) => { await saveConfig(cfg); };
     expect((await pullConfigFromSync(loadConfig, apply)).ok).toBe(false);
     expect(virtualFs.get(path)).toBe(previous);
     fail = false;
@@ -580,9 +580,9 @@ describe("multi-device single-writer folder sync integration", () => {
   });
 
   test("saves one complete settings record and syncs it with one version", async () => {
-    storageData["tabReaper.config"] = { unusedSetting: true };
+    storageData["tabCurb.config"] = { unusedSetting: true };
     const config = await saveConfig({ memoryBudgetGb: 51 });
-    expect(storageData["tabReaper.config"]).toEqual(config);
+    expect(storageData["tabCurb.config"]).toEqual(config);
     await setLocalConfigVersion({ updatedAt: 200, deviceId: "dev-mac" });
     expect((await pullConfigFromSync(loadConfig, async () => {})).ok).toBe(true);
     const file = JSON.parse(virtualFs.get("devices/dev-mac/config-v2.json")!);
@@ -595,7 +595,7 @@ describe("multi-device single-writer folder sync integration", () => {
       url: "https://example.org/a", active: true, audible: false, discarded: false, pinned: false }], { force: true, label: "Keep in B" });
     const [row] = await listAllSnapshots();
     const filesA = virtualFs;
-    activeSyncDir = "/Dropbox/TabReaper";
+    activeSyncDir = "/Dropbox/TabCurb";
     virtualFs = new Map(filesA);
     await setSyncFolder(activeSyncDir);
     await deleteSnapshot(row!.id, row!.syncDir);
@@ -754,26 +754,26 @@ describe("multi-device single-writer folder sync integration", () => {
 
     // Switch to a brand new empty folder B -> existing local snapshots still upload!
     const folderAFiles = new Map(virtualFs);
-    activeSyncDir = "/Dropbox/TabReaper";
-    storageData["tabReaper.activeSyncDir"] = activeSyncDir;
+    activeSyncDir = "/Dropbox/TabCurb";
+    storageData["tabCurb.activeSyncDir"] = activeSyncDir;
     virtualFs.clear();
     const sync2 = await syncPendingLocalSnapshots(loadSnapshots, now + 200);
     expect(sync2.ok).toBe(true);
     expect(sync2.uploaded).toBe(6);
 
     // Delete snapshot `a` offline while active dir is folder A; syncing folder B must NOT clear folder A's pending delete
-    activeSyncDir = "/iCloud/TabReaper";
-    storageData["tabReaper.activeSyncDir"] = activeSyncDir;
+    activeSyncDir = "/iCloud/TabCurb";
+    storageData["tabCurb.activeSyncDir"] = activeSyncDir;
     hostOnline = false;
     await deleteSnapshot(a!.id);
     hostOnline = true;
-    activeSyncDir = "/Dropbox/TabReaper";
-    storageData["tabReaper.activeSyncDir"] = activeSyncDir;
+    activeSyncDir = "/Dropbox/TabCurb";
+    storageData["tabCurb.activeSyncDir"] = activeSyncDir;
     await syncPendingLocalSnapshots(loadSnapshots, now + 250);
 
     // Return to folder A -> pending delete for folder A drains cleanly
-    activeSyncDir = "/iCloud/TabReaper";
-    storageData["tabReaper.activeSyncDir"] = activeSyncDir;
+    activeSyncDir = "/iCloud/TabCurb";
+    storageData["tabCurb.activeSyncDir"] = activeSyncDir;
     virtualFs = folderAFiles;
     const sync3 = await syncPendingLocalSnapshots(loadSnapshots, now + 300);
     expect(sync3.deleted).toBe(1);
@@ -814,7 +814,7 @@ describe("multi-device single-writer folder sync integration", () => {
     expect((await getSyncStatus()).deviceName).toBe("MacBook Pro");
 
     // Profile with no stored identity adopts the host hostname.
-    delete storageData["tabReaper.deviceIdentity"];
+    delete storageData["tabCurb.deviceIdentity"];
     hostHostname = "Work-MacBook";
     expect((await getSyncStatus()).deviceName).toBe("Work-MacBook");
 
@@ -831,7 +831,7 @@ describe("multi-device single-writer folder sync integration", () => {
   test("lists synced devices, flags same computer installs, and inspects snapshot tabs", async () => {
     const now = 1_700_000_000_000;
     hostHostname = "mnag-note";
-    storageData["tabReaper.deviceIdentity"] = {
+    storageData["tabCurb.deviceIdentity"] = {
       deviceId: "dev-new",
       deviceName: "mnag-note",
       hostname: "mnag-note",
@@ -979,7 +979,7 @@ describe("multi-device single-writer folder sync integration", () => {
   test("adopting an earlier device merges new snapshots and removes the temporary device folder", async () => {
     const now = 1_700_000_000_000;
     hostHostname = "mnag-note";
-    storageData["tabReaper.deviceIdentity"] = {
+    storageData["tabCurb.deviceIdentity"] = {
       deviceId: "dev-temp",
       deviceName: "mnag-note",
       hostname: "mnag-note",
@@ -1032,7 +1032,7 @@ describe("multi-device single-writer folder sync integration", () => {
       deviceName: "mnag-note",
       tabs: [{ url: "https://temp.test/1", title: "Temp", pinned: false, kept: false, windowId: 1, index: 0 }],
     };
-    storageData["tabReaper.sessionSnapshots"] = [tempSnap];
+    storageData["tabCurb.sessionSnapshots"] = [tempSnap];
     expect(await pushSnapshotToSync(tempSnap, now)).toBe(true);
 
     const res = await adoptDeviceHistory("dev-original");

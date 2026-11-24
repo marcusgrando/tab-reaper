@@ -237,7 +237,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tab-reaper-host"
+name = "tabcurb-host"
 version = "0.9.9"
 dependencies = [
  "cap-fs-ext",

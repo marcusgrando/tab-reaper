@@ -9,8 +9,8 @@ import {
   type CachedGroups,
 } from "./session.ts";
 
-export const WINDOW_TABS_SESSION_KEY = "tabReaper.windowTabsCache";
-const WINDOW_ACTIVE_TABS_KEY = "tabReaper.windowActiveTabs";
+export const WINDOW_TABS_SESSION_KEY = "tabCurb.windowTabsCache";
+const WINDOW_ACTIVE_TABS_KEY = "tabCurb.windowActiveTabs";
 const MAX_CACHED_GROUP_TITLE_LEN = 64;
 
 function sanitizeCachedTab(tab: TabSummary): TabSummary | null {

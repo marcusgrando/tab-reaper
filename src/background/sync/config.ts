@@ -1,5 +1,5 @@
 import { sanitizeConfig } from "../../shared/config.ts";
-import type { TabReaperConfig } from "../../shared/types.ts";
+import type { TabCurbConfig } from "../../shared/types.ts";
 import {
   enqueueConfigMutation,
   getActiveSyncDir,
@@ -11,7 +11,7 @@ import {
   writeDeviceMeta,
 } from "./client.ts";
 
-const CONFIG_VERSION_KEY = "tabReaper.configVersion";
+const CONFIG_VERSION_KEY = "tabCurb.configVersion";
 /**
  * Per-device settings never overwritten by Folder Sync:
  * - memoryBudgetMode / memoryBudgetGb: a GB cap sized for one machine's RAM can disable discarding on a smaller one.
@@ -20,7 +20,7 @@ const CONFIG_VERSION_KEY = "tabReaper.configVersion";
  */
 const DEVICE_LOCAL_KEYS = ["memoryBudgetMode", "memoryBudgetGb", "weightedEviction", "protectActiveUploads"] as const;
 
-function withDeviceLocalSettings(synced: TabReaperConfig, local: TabReaperConfig): TabReaperConfig {
+function withDeviceLocalSettings(synced: TabCurbConfig, local: TabCurbConfig): TabCurbConfig {
   const merged = { ...synced };
   for (const key of DEVICE_LOCAL_KEYS) {
     Object.assign(merged, { [key]: local[key] });
@@ -35,7 +35,7 @@ interface ConfigVersion {
 
 export interface SyncedConfigEnvelope extends ConfigVersion {
   schemaVersion: 2;
-  config: TabReaperConfig;
+  config: TabCurbConfig;
 }
 
 function parseConfigVersion(raw: Partial<ConfigVersion> | undefined): ConfigVersion {
@@ -68,8 +68,8 @@ export function resolveLatestConfig(envelopes: SyncedConfigEnvelope[]): SyncedCo
 }
 
 export function pullConfigFromSync(
-  loadCurrentConfig: () => Promise<TabReaperConfig>,
-  applyConfig: (cfg: TabReaperConfig) => Promise<void>,
+  loadCurrentConfig: () => Promise<TabCurbConfig>,
+  applyConfig: (cfg: TabCurbConfig) => Promise<void>,
 ): Promise<{ ok: boolean; updated: boolean }> {
   return enqueueConfigMutation(async () => {
     const syncDir = await getReadySyncDir();

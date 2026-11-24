@@ -1,4 +1,4 @@
-# Tab Reaper interface
+# TabCurb interface
 
 The popup is a keyboard-first tab switcher. Search stays directly above the scrollable tab list. The navy header groups the memory source, usage, budget and tab counts. Settings uses the same navy for section navigation. Labels sit beside numeric values and above longer inputs.
 

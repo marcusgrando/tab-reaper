@@ -5,7 +5,7 @@ test("cached form, sharing, and PiP protection follow live frame results without
   const previous = globalThis.chrome;
   const tab = { id: 1, url: "https://editor.test/", title: "", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
   const metrics = { jsHeapBytes: 2048, domNodes: 38, mediaNodes: 1, weightMultiplier: 1.01, sampledAt: 1000 };
-  const cache = { "tabReaper.weightSamples": {
+  const cache = { "tabCurb.weightSamples": {
     1: { ...metrics, hasUnsavedForm: true }, 2: { ...metrics, hasUnsavedForm: false },
   } };
   const inspections: Array<{ tabId: number; args: boolean[] }> = [];
@@ -44,7 +44,7 @@ test("cached form, sharing, and PiP protection follow live frame results without
     pip = true;
     expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false, isVisible: true, hasPictureInPicture: true });
     // Transient visibility and PiP flags must never be persisted in the 2-minute weight cache.
-    expect(cache["tabReaper.weightSamples"][1]).toEqual({ ...metrics, hasUnsavedForm: false });
+    expect(cache["tabCurb.weightSamples"][1]).toEqual({ ...metrics, hasUnsavedForm: false });
     visible = false;
     pip = false;
     expect(await sample()).toEqual({ ...metrics, hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false });
@@ -63,10 +63,10 @@ test("cached form, sharing, and PiP protection follow live frame results without
 
     // With refreshFormState=false, cached dirty tabs stay eligible for size-band ranking without probing frames,
     // while keeping the cached dirty flag intact as fallback for checkTabLiveProtection.
-    cache["tabReaper.weightSamples"][1] = { ...metrics, hasUnsavedForm: true };
+    cache["tabCurb.weightSamples"][1] = { ...metrics, hasUnsavedForm: true };
     expect((await sampleTabWeights([tab], 1100, true, false)).get(1)).toEqual({ ...metrics, hasUnsavedForm: false });
     expect(inspections).toEqual([]);
-    expect(cache["tabReaper.weightSamples"][1].hasUnsavedForm).toBe(true);
+    expect(cache["tabCurb.weightSamples"][1].hasUnsavedForm).toBe(true);
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }
@@ -79,7 +79,7 @@ test("an unavailable live check preserves a recent observed edit before discard"
     Object.assign(globalThis, { chrome: {
       scripting: { executeScript: async () => { throw new Error("Frame unavailable"); } },
       permissions: { contains: async () => true },
-      storage: { session: { get: async () => ({ "tabReaper.weightSamples": { 1: sample } }) } },
+      storage: { session: { get: async () => ({ "tabCurb.weightSamples": { 1: sample } }) } },
     } });
     expect(await checkTabHasUnsavedForm(1)).toBe(true);
     expect(await checkTabLiveProtection(1, true)).toEqual({
@@ -98,7 +98,7 @@ test("an unavailable live check preserves a recent observed edit before discard"
 test("saving samples drops tabs that were closed", async () => {
   const previous = globalThis.chrome;
   const metrics = { jsHeapBytes: 2048, domNodes: 38, mediaNodes: 0, weightMultiplier: 1.01, hasUnsavedForm: false, sampledAt: 1000 };
-  const cache: Record<string, Record<string, unknown>> = { "tabReaper.weightSamples": { 1: metrics, 7: metrics, 9: metrics } };
+  const cache: Record<string, Record<string, unknown>> = { "tabCurb.weightSamples": { 1: metrics, 7: metrics, 9: metrics } };
   const tab = { id: 1, url: "https://editor.test/", title: "", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
   try {
     Object.assign(globalThis, { chrome: {
@@ -111,7 +111,7 @@ test("saving samples drops tabs that were closed", async () => {
       scripting: { executeScript: async () => [{ frameId: 0, result: { hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false } }] },
     } });
     await sampleTabWeights([tab], 1100);
-    expect(Object.keys(cache["tabReaper.weightSamples"]!).sort()).toEqual(["1", "7"]);
+    expect(Object.keys(cache["tabCurb.weightSamples"]!).sort()).toEqual(["1", "7"]);
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }

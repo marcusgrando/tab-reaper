@@ -1,14 +1,14 @@
 import { createAsyncQueue, isInternalUrl, normalizeUrl } from "../shared/config.ts";
 import type { ActivityState, TabSummary } from "../shared/types.ts";
 
-export const ACTIVITY_STORAGE_KEY = "tabReaper.activity";
+export const ACTIVITY_STORAGE_KEY = "tabCurb.activity";
 /**
  * URL history lives under its own key because it is only read to rebuild recency
  * after Chrome reassigns tab ids. Tab switches rewrite the small per-tab record;
  * the history is rewritten only when a tab closes or Chrome restarts.
  */
-export const URL_HISTORY_STORAGE_KEY = "tabReaper.activityByUrl";
-export const KEPT_TABS_STORAGE_KEY = "tabReaper.keptTabIds";
+export const URL_HISTORY_STORAGE_KEY = "tabCurb.activityByUrl";
+export const KEPT_TABS_STORAGE_KEY = "tabCurb.keptTabIds";
 export const enqueueActivityUpdate = createAsyncQueue();
 const MAX_TRACKED_URLS = 2000;
 /** Hash-state URLs can reach megabytes. They rank as "now" after a restart instead of bloating storage. */

@@ -35,9 +35,9 @@ import {
   toTabSummary,
 } from "./tracker.ts";
 
-export const SNAPSHOTS_STORAGE_KEY = "tabReaper.sessionSnapshots";
-const UNPUBLISHED_MANUAL_IDS = "tabReaper.unpublishedManualIds";
-const LAST_WHOLE_SNAPSHOT_CACHE_KEY = "tabReaper.lastWholeSnapshotCache";
+export const SNAPSHOTS_STORAGE_KEY = "tabCurb.sessionSnapshots";
+const UNPUBLISHED_MANUAL_IDS = "tabCurb.unpublishedManualIds";
+const LAST_WHOLE_SNAPSHOT_CACHE_KEY = "tabCurb.lastWholeSnapshotCache";
 export const MAX_SNAPSHOTS = 5;
 export const SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
 export const MAX_SNAPSHOT_URL_LEN = 4096;

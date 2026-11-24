@@ -2,7 +2,7 @@ import { isInternalUrl, matchesAllowlist } from "../shared/config.ts";
 import type {
   ActivityState,
   MemorySnapshot,
-  TabReaperConfig,
+  TabCurbConfig,
   TabSummary,
   TabWeightSample,
 } from "../shared/types.ts";
@@ -39,7 +39,7 @@ export function getMemoryBand(memory: MemorySnapshot | null, idleRatio: number, 
 
 export function getTabProtectedReason(
   tab: TabSummary,
-  config: TabReaperConfig,
+  config: TabCurbConfig,
   sample?: TabWeightSample,
   hasActiveUpload = false,
 ): string | null {
@@ -68,7 +68,7 @@ export function getTabProtectedReason(
 
 export function isTabProtected(
   tab: TabSummary,
-  config: TabReaperConfig,
+  config: TabCurbConfig,
   sample?: TabWeightSample,
   hasActiveUpload = false,
 ): boolean {
@@ -88,7 +88,7 @@ export interface OpenTabActions {
  */
 export function computeOpenTabActions(
   tab: TabSummary,
-  config: TabReaperConfig,
+  config: TabCurbConfig,
   sample?: TabWeightSample,
   isFocusedActive = false,
   hasActiveUpload = false,
@@ -131,7 +131,7 @@ export interface PlanEvictionsInput {
   activity: ActivityState;
   weights: Map<number, TabWeightSample>;
   uploadingTabIds?: ReadonlySet<number>;
-  config: TabReaperConfig;
+  config: TabCurbConfig;
   memory: MemorySnapshot | null;
   now: number;
   mode: "sweep" | "startup";

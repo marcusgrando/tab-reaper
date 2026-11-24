@@ -3,7 +3,7 @@ interface FormObserverHandle {
   readonly active: boolean;
 }
 
-const OBSERVER_KEY = Symbol.for("tabReaper.formObserver");
+const OBSERVER_KEY = Symbol.for("tabCurb.formObserver");
 const formElementsGetter = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, "elements")?.get;
 
 function getObserverHandle(): FormObserverHandle | undefined {
@@ -43,7 +43,7 @@ function installObserver() {
     }
   }
   function onMessage(message: unknown) {
-    if (message === "tab-reaper-stop-form-observer") stop();
+    if (message === "tabcurb-stop-form-observer") stop();
   }
   try {
     chrome.runtime.onMessage.addListener(onMessage);
@@ -161,7 +161,7 @@ function installObserver() {
     let enabled = false;
     try {
       // Chrome can retain a registered script after the user revokes scripting alone.
-      enabled = (await chrome.runtime.sendMessage("tab-reaper-form-access")) === true;
+      enabled = (await chrome.runtime.sendMessage("tabcurb-form-access")) === true;
     } catch {
       enabled = false;
     } finally {

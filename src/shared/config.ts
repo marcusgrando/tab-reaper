@@ -1,8 +1,8 @@
-import type { TabReaperConfig } from "./types.ts";
+import type { TabCurbConfig } from "./types.ts";
 
-export const CONFIG_STORAGE_KEY = "tabReaper.config";
-export const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
-export const SETUP_PENDING_KEY = "tabReaper.setupPending";
+export const CONFIG_STORAGE_KEY = "tabCurb.config";
+export const REOPEN_OPTIONS_KEY = "tabCurb.reopenOptions";
+export const SETUP_PENDING_KEY = "tabCurb.setupPending";
 export const HTTP_HOST_ORIGINS = ["http://*/*", "https://*/*"];
 
 export function buildQuickUpdateCommand(
@@ -13,14 +13,14 @@ export function buildQuickUpdateCommand(
   const pinnedTag = /^\d+\.\d+\.\d+$/.test(cleanVersion) ? `v${cleanVersion}` : null;
   if (/Windows/i.test(userAgent)) {
     if (pinnedTag) {
-      return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/${pinnedTag}/install.ps1))) -Version ${pinnedTag}`;
+      return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tabcurb/${pinnedTag}/install.ps1))) -Version ${pinnedTag}`;
     }
-    return "irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex";
+    return "irm https://raw.githubusercontent.com/marcusgrando/tabcurb/main/install.ps1 | iex";
   }
   if (pinnedTag) {
-    return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/${pinnedTag}/install.sh | TAB_REAPER_VERSION=${pinnedTag} bash`;
+    return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/${pinnedTag}/install.sh | TABCURB_VERSION=${pinnedTag} bash`;
   }
-  return "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash";
+  return "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/main/install.sh | bash";
 }
 
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -40,7 +40,7 @@ export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<
   });
 }
 
-export const DEFAULT_CONFIG: TabReaperConfig = {
+export const DEFAULT_CONFIG: TabCurbConfig = {
   memoryBudgetMode: "fraction",
   memoryBudgetFraction: 0.5,
   memoryBudgetGb: 4,
@@ -69,7 +69,7 @@ const INTERNAL_SCHEMES = [
   "about:",
 ];
 
-export function sanitizeConfig(raw: Partial<TabReaperConfig> | undefined): TabReaperConfig {
+export function sanitizeConfig(raw: Partial<TabCurbConfig> | undefined): TabCurbConfig {
   const merged = { ...DEFAULT_CONFIG, ...raw };
 
   const memoryBudgetMode = merged.memoryBudgetMode === "fixed_gb" ? "fixed_gb" : "fraction";
@@ -127,7 +127,7 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
  */
 export const MAX_DISCARDS_WITHOUT_RELIEF = 4;
 
-export function computeMemoryBudgetBytes(config: TabReaperConfig, systemTotalBytes: number): number {
+export function computeMemoryBudgetBytes(config: TabCurbConfig, systemTotalBytes: number): number {
   if (config.memoryBudgetMode === "fixed_gb") {
     return Math.round(config.memoryBudgetGb * 1024 * 1024 * 1024);
   }
@@ -251,12 +251,12 @@ export function matchesAllowlist(url: string | undefined, allowlist: string[]): 
   return false;
 }
 
-export async function loadConfig(): Promise<TabReaperConfig> {
+export async function loadConfig(): Promise<TabCurbConfig> {
   const result = await chrome.storage.local.get(CONFIG_STORAGE_KEY);
-  return sanitizeConfig(result[CONFIG_STORAGE_KEY] as Partial<TabReaperConfig> | undefined);
+  return sanitizeConfig(result[CONFIG_STORAGE_KEY] as Partial<TabCurbConfig> | undefined);
 }
 
-export async function saveConfig(partial: Partial<TabReaperConfig>): Promise<TabReaperConfig> {
+export async function saveConfig(partial: Partial<TabCurbConfig>): Promise<TabCurbConfig> {
   const next = sanitizeConfig({ ...await loadConfig(), ...partial });
   await chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: next });
   return next;

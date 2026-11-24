@@ -45,7 +45,7 @@ describe("update semver and resolution", () => {
   });
 
   test("resolves available update unless disabled, older, dismissed, or unsafe URL", () => {
-    const releaseUrl = "https://github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0";
+    const releaseUrl = "https://github.com/marcusgrando/tabcurb/releases/tag/v0.10.0";
     const state = { checkedAt: 1, latestVersion: "0.10.0", releaseUrl };
 
     expect(resolveUpdateAvailable(state, "0.9.0", true)).toEqual({
@@ -59,23 +59,23 @@ describe("update semver and resolution", () => {
     expect(resolveUpdateAvailable({ ...state, dismissedVersion: "0.9.5" }, "0.9.0", true)?.latestVersion).toBe("0.10.0");
     expect(resolveUpdateAvailable({ ...state, releaseUrl: "https://evil.example/v0.10.0" }, "0.9.0", true)).toBeNull();
     // Reject path traversal, encoded dot segments, backslashes, and userinfo spoofing.
-    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/../../../evil/repo")).toBe(false);
-    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/%2e%2e/%2e%2e/evil/repo")).toBe(false);
-    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/..\\..\\evil\\repo")).toBe(false);
-    expect(isSafeReleaseUrl("https://user@github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0")).toBe(false);
-    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0")).toBe(true);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tabcurb/releases/../../../evil/repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tabcurb/releases/%2e%2e/%2e%2e/evil/repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tabcurb/releases/..\\..\\evil\\repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://user@github.com/marcusgrando/tabcurb/releases/tag/v0.10.0")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tabcurb/releases/tag/v0.10.0")).toBe(true);
   });
 
   test("pins quick update command to validated release tag when provided", () => {
     expect(buildQuickUpdateCommand("0.10.0", "Mozilla/5.0 (Macintosh)")).toBe(
-      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/v0.10.0/install.sh | TAB_REAPER_VERSION=v0.10.0 bash",
+      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/v0.10.0/install.sh | TABCURB_VERSION=v0.10.0 bash",
     );
     expect(buildQuickUpdateCommand("0.10.0", "Mozilla/5.0 (Windows NT 10.0)")).toBe(
-      "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/v0.10.0/install.ps1))) -Version v0.10.0",
+      "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tabcurb/v0.10.0/install.ps1))) -Version v0.10.0",
     );
     // Rejects malformed/injected version strings and falls back safely.
     expect(buildQuickUpdateCommand("0.10.0; rm -rf /", "Mozilla/5.0 (Linux)")).toBe(
-      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash",
+      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/main/install.sh | bash",
     );
   });
 });
@@ -93,7 +93,7 @@ describe("checkForUpdate caching and network handling", () => {
         return new Response(
           JSON.stringify({
             tag_name: "v0.10.0",
-            html_url: "https://github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0",
+            html_url: "https://github.com/marcusgrando/tabcurb/releases/tag/v0.10.0",
             draft: false,
             prerelease: false,
           }),
@@ -162,7 +162,7 @@ describe("toolbar badge with update available", () => {
   const update = {
     latestVersion: "0.10.0",
     currentVersion: "0.9.0",
-    releaseUrl: "https://github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0",
+    releaseUrl: "https://github.com/marcusgrando/tabcurb/releases/tag/v0.10.0",
   };
 
   test("replaces memory text with UP while keeping memory-band colors", () => {

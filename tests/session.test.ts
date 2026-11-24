@@ -34,7 +34,7 @@ describe("session snapshots and recovery", () => {
   let nextTabId: number;
 
   beforeEach(() => {
-    storageData = { "tabReaper.folderSyncOptedIn": true };
+    storageData = { "tabCurb.folderSyncOptedIn": true };
     openChromeTabs = [];
     createdTabs = [];
     groupedCalls = [];
@@ -202,7 +202,7 @@ describe("session snapshots and recovery", () => {
     // Simulate QuotaExceededError when storing more than 1 snapshot
     const origSet = chrome.storage.local.set;
     chrome.storage.local.set = (async (obj: Record<string, unknown>) => {
-      const snaps = obj["tabReaper.sessionSnapshots"];
+      const snaps = obj["tabCurb.sessionSnapshots"];
       if (Array.isArray(snaps) && snaps.length > 1) {
         throw new Error("QuotaExceededError");
       }
@@ -219,7 +219,7 @@ describe("session snapshots and recovery", () => {
   });
 
   test("refuses an offline manual save that would evict an unpublished manual snapshot", async () => {
-    storageData["tabReaper.folderSyncOptedIn"] = true;
+    storageData["tabCurb.folderSyncOptedIn"] = true;
     const tabs = Array.from({ length: 170 }, (_, i) =>
       makeTab(i, { url: `https://example.org/${i}/${"a".repeat(3000)}` })
     );
@@ -231,7 +231,7 @@ describe("session snapshots and recovery", () => {
 
   test("restore honors disabled automatic snapshots and reports a missing recovery file", async () => {
     const snap = await captureSessionSnapshot([makeTab(1)], { force: true, skipSync: true });
-    storageData["tabReaper.config"] = { enableSessionSnapshots: false };
+    storageData["tabCurb.config"] = { enableSessionSnapshots: false };
     openChromeTabs = [2, 3, 4].map(id => ({ id, url: makeTab(id).url }));
     await restoreSessionSnapshot(snap!.id);
     expect((await loadSnapshots()).map(s => s.id)).toEqual([snap!.id]);
@@ -270,7 +270,7 @@ describe("session snapshots and recovery", () => {
 
   test("pre-restore capture preserves kept tabs", async () => {
     const snap = await captureSessionSnapshot([makeTab(1)], { force: true });
-    storageData["tabReaper.keptTabIds"] = [3];
+    storageData["tabCurb.keptTabIds"] = [3];
     openChromeTabs = [2, 3, 4].map(id => ({ id, url: makeTab(id).url, windowId: 10 }));
     await restoreSessionSnapshot(snap!.id);
     const pre = (await loadSnapshots()).find(s => s.trigger === "pre_restore");
@@ -344,7 +344,7 @@ describe("session snapshots and recovery", () => {
     const stored = await loadSnapshots();
     expect(await findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS)).not.toBeNull();
 
-    storageData["tabReaper.folderSyncOptedIn"] = false;
+    storageData["tabCurb.folderSyncOptedIn"] = false;
     expect(await findRecoverableSnapshot([makeTab(99)], stored, t0 + SNAPSHOT_INTERVAL_MS)).toBeNull();
   });
 
@@ -400,7 +400,7 @@ describe("session snapshots and recovery", () => {
   });
 
   test("captureSessionSnapshot refuses to persist when folder sync opt-in is disabled or auto snapshots disabled", async () => {
-    storageData["tabReaper.folderSyncOptedIn"] = false;
+    storageData["tabCurb.folderSyncOptedIn"] = false;
     const snap = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3)], {
       now: 1_700_000_000_000,
     });
@@ -408,8 +408,8 @@ describe("session snapshots and recovery", () => {
     expect(await loadSnapshots()).toEqual([]);
 
     // Forced window_closed capture must also be skipped when enableSessionSnapshots is false
-    storageData["tabReaper.folderSyncOptedIn"] = true;
-    storageData["tabReaper.config"] = { enableSessionSnapshots: false };
+    storageData["tabCurb.folderSyncOptedIn"] = true;
+    storageData["tabCurb.config"] = { enableSessionSnapshots: false };
     const closedSnap = await captureSessionSnapshot([makeTab(1), makeTab(2), makeTab(3)], {
       now: 1_700_000_000_000,
       force: true,
@@ -433,7 +433,7 @@ describe("session snapshots and recovery", () => {
         return { id: 500 + createdWinCount, tabs: [firstTab] };
       },
     };
-    storageData["tabReaper.sessionSnapshots"] = [{
+    storageData["tabCurb.sessionSnapshots"] = [{
       id: "many-windows",
       complete: true,
       capturedAt: 1_700_000_000_000,

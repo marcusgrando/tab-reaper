@@ -1,4 +1,4 @@
-# Tab Reaper — Architecture
+# TabCurb — Architecture
 
 ## Purpose
 
@@ -15,8 +15,8 @@ Every capability below has been validated against stable Chrome Manifest V3 APIs
 | Evict heaviest tabs first at the configured size threshold | **Primary (Local Companion):** Native host maps each renderer's `--renderer-client-id` to its OS memory (`PSS` on Linux, `phys_footprint` on macOS, `PrivateUsage` on Windows), matched against `chrome.webNavigation.getAllFrames()` `processId` without injecting scripts into pages. **Fallback (extension-only):** on-demand `chrome.scripting.executeScript` aggregates `performance.memory.usedJSHeapSize` (deduplicated per origin), DOM node count, and `iframe`/`canvas`/`video` count across frames. | Feasible | Shared GPU process VRAM is not split per tab (matching Chrome Task Manager). Without the Local Companion, `usedJSHeapSize` measures V8 heap only (excludes WASM, Workers, WebRTC buffers, GPU textures, decoded images), and restricted pages (`chrome://`, Web Store) fall back to oldest idle first. |
 | Fast, low-memory Chrome startup | `chrome.runtime.onStartup` immediately discards non-protected background tabs (`startupSweep`, default `true`). Only profiles with page access and form protection enabled register an edit observer. | Feasible | Chrome controls the first ~100-300 ms before the service worker wakes. |
 | Protect active, audible, pinned, kept, unsaved-form, and allowlisted tabs | Filter `tab.active`, `tab.audible`, `tab.pinned`, kept state, unsaved form edits, and user domain allowlist before discard. | Feasible | `tabId` resets on browser restart, so `lastActiveAt` is persisted in `chrome.storage.local` and reconciled by URL on startup. |
-| Fast open-tabs palette | `chrome.commands` (`Alt+Shift+K`) opens the Tab Reaper open-tabs palette focused on search. | Feasible | None. |
-| Conflict-free session snapshots | Gated on optional Folder Sync via the local companion (`com.tabreaper.host`). Captures windows, tab order, pinned/kept state, and tab groups. | Feasible | Requires installing the optional native host and selecting a sync folder. |
+| Fast open-tabs palette | `chrome.commands` (`Alt+Shift+K`) opens the TabCurb open-tabs palette focused on search. | Feasible | None. |
+| Conflict-free session snapshots | Gated on optional Folder Sync via the local companion (`com.tabcurb.host`). Captures windows, tab order, pinned/kept state, and tab groups. | Feasible | Requires installing the optional native host and selecting a sync folder. |
 
 ## Tab Lifecycle
 
@@ -25,7 +25,7 @@ Every non-protected tab moves between two states:
 1. **Active (Loaded):** Running in RAM.
 2. **Discarded:** `chrome.tabs.discard(tabId)` destroys the renderer process while keeping the tab stub, title, favicon, and session history in the tab strip.
 
-Tab Reaper does not close or archive tabs to bookmarks.
+TabCurb does not close or archive tabs to bookmarks.
 
 ## Memory and Eviction Engine
 
@@ -42,16 +42,16 @@ With the Native Host, periodic sweeps evaluate Chrome's memory as a percentage o
 2. **From `idleEvictionPercent` up to but excluding `sizeEvictionPercent` (defaults 80% and 100%).** Each pass discards up to two eligible tabs in least-recently-used order, regardless of how recently they were used.
 3. **At or above `sizeEvictionPercent` (default `100%`) of budget:** Discards heaviest loaded tabs first (by JS heap, DOM node count, and media weight) when optional Weighted Eviction is enabled, falling back to oldest idle first when Weighted Eviction is disabled, up to 2 tabs per sweep pass.
 
-On Chrome startup (`startupSweep`, default `true`), Tab Reaper still discards non-protected background tabs immediately so the browser starts with minimal RAM.
+On Chrome startup (`startupSweep`, default `true`), TabCurb still discards non-protected background tabs immediately so the browser starts with minimal RAM.
 
 Each check reads memory again before selecting the next batch. Even after reaching the size threshold, eviction continues across checks until the reading falls below the lower threshold or no eligible tabs remain. The two-tab cap gives Chrome time to release discarded renderers between checks.
 
-Chrome Memory Saver offers three levels with different inactivity periods. Tab Reaper uses explicit memory thresholds so a minimum idle time cannot prevent it from reclaiming memory under pressure. [Chrome Memory Saver](https://support.google.com/chrome/answer/12929150?hl=en)
+Chrome Memory Saver offers three levels with different inactivity periods. TabCurb uses explicit memory thresholds so a minimum idle time cannot prevent it from reclaiming memory under pressure. [Chrome Memory Saver](https://support.google.com/chrome/answer/12929150?hl=en)
 
 ### Memory Measurement Modes
 
 1. **Exact Chrome RAM (Native Host connected):**
-   - Extension calls `chrome.runtime.sendNativeMessage('com.tabreaper.host', { cmd: 'chrome_memory' })`.
+   - Extension calls `chrome.runtime.sendNativeMessage('com.tabcurb.host', { cmd: 'chrome_memory' })`.
    - Native host sums the memory of the browser that launched it: its parent process (past the `cmd.exe` Chrome interposes on Windows) and every descendant, excluding the host. Not by process name, because that also counts Canary, Chrome for Testing and other Chromium browsers. When the launching browser cannot be determined it returns `ok: false` and the extension uses the fallback below. Per-process metric: PSS (Linux `/proc/<pid>/smaps_rollup`, fallback to RSS), `phys_footprint` (macOS `proc_pid_rusage`), or Working Set for total Chrome RAM and `PrivateUsage` per renderer on Windows (`K32GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX`), returning `{ chromeBytes, systemTotalBytes, systemAvailableBytes, renderers }`.
    - For each `--type=renderer` child in the browser tree, the host extracts `--renderer-client-id=<N>` from argv (Linux `/proc/<pid>/cmdline`, macOS `sysctl` `KERN_PROCARGS2` stopping after `argc` so `envp` is never read, Windows `NtQueryInformationProcess` `ProcessCommandLineInformation`) and returns only `{ [clientId]: bytes }`.
    - Budget percentage is `chromeBytes / memoryBudgetBytes`.
@@ -123,7 +123,7 @@ The optional Rust Native Messaging host (`native-host/`) serves both exact Chrom
 
 ### Session Snapshots (Gated on Folder Sync)
 
-Session snapshots are only active when Folder Sync is configured. When enabled, Tab Reaper supports:
+Session snapshots are only active when Folder Sync is configured. When enabled, TabCurb supports:
 - Automatic periodic captures on a configurable interval from `1` to `1440` minutes (up to 24 hours, default `5` minutes) under Settings -> Folder Sync.
 - Window-close recovery snapshots (backed by `src/background/window-cache.ts` in `chrome.storage.session`).
 - Pre-restore safety snapshots captured before restoring another snapshot.
@@ -184,7 +184,7 @@ All values are user-configurable on the Options page:
 ## Project Layout
 
 ```text
-tab-reaper/
+tabcurb/
 ├── ARCHITECTURE.md
 ├── PRIVACY.md
 ├── README.md

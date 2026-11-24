@@ -14,8 +14,8 @@ async function worker() {
     id, index: id - 1, url: `https://old.test/${id}`, title: String(id), windowId: 5, groupId: 7,
     active: false, discarded: false, audible: false, pinned: false,
   }));
-  const localData: Record<string, unknown> = { "tabReaper.folderSyncOptedIn": true };
-  const sessionData: Record<string, unknown> = { "tabReaper.windowTabsCache": { "5": { tabs } } };
+  const localData: Record<string, unknown> = { "tabCurb.folderSyncOptedIn": true };
+  const sessionData: Record<string, unknown> = { "tabCurb.windowTabsCache": { "5": { tabs } } };
   const accessLevels: Array<{ area: string; accessLevel: string }> = [];
   const session = {
     ...area(sessionData),
@@ -69,17 +69,17 @@ test("a cold worker captures the last navigation when its window closes", async 
     Object.assign(chrome.tabGroups, { query: async () => [] });
     const removed = listeners.removed!(1, { isWindowClosing: true, windowId: 5 });
     await Promise.all([removed, listeners.closed!(5)]);
-    const snapshots = localData["tabReaper.sessionSnapshots"] as SessionSnapshot[];
+    const snapshots = localData["tabCurb.sessionSnapshots"] as SessionSnapshot[];
     expect(snapshots[0]?.windows?.[0]?.state).toBe("fullscreen");
     expect(snapshots[0]?.tabs.map(t => t.groupTitle)).toEqual(["Drafts", "Drafts"]);
     expect(snapshots[0]?.tabs.map(t => t.url)).toEqual([tabs[2]!.url, page.url]);
 
     // Without folderSyncOptedIn, closing a window must not save a snapshot.
-    delete localData["tabReaper.sessionSnapshots"];
-    localData["tabReaper.folderSyncOptedIn"] = false;
-    sessionData["tabReaper.windowTabsCache"] = { "6": { tabs: tabs.map(t => ({ ...t, windowId: 6 })) } };
+    delete localData["tabCurb.sessionSnapshots"];
+    localData["tabCurb.folderSyncOptedIn"] = false;
+    sessionData["tabCurb.windowTabsCache"] = { "6": { tabs: tabs.map(t => ({ ...t, windowId: 6 })) } };
     await listeners.closed!(6);
-    expect(localData["tabReaper.sessionSnapshots"]).toBeUndefined();
+    expect(localData["tabCurb.sessionSnapshots"]).toBeUndefined();
   } finally {
     restore();
   }
@@ -89,11 +89,11 @@ test("without page access, successive budget checks discard down to the lower th
   const { listeners, tabs, localData, restore } = await worker();
   try {
     const now = Date.now();
-    localData["tabReaper.folderSyncOptedIn"] = false;
-    localData["tabReaper.config"] = { discardAfterMinutes: 0 };
+    localData["tabCurb.folderSyncOptedIn"] = false;
+    localData["tabCurb.config"] = { discardAfterMinutes: 0 };
     for (let id = 4; id <= 8; id++) tabs.push({ ...tabs[0]!, id, url: `https://old.test/${id}` });
     tabs[7]!.pinned = true;
-    localData["tabReaper.activity"] = {
+    localData["tabCurb.activity"] = {
       byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - tab.id * 1000 }])),
       byUrl: {},
     };
@@ -111,7 +111,7 @@ test("without page access, successive budget checks discard down to the lower th
       get: async (id: number) => tabs[id - 1],
       discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
     });
-    const sweep = () => listeners.alarm!({ name: "tabReaper.sweep" });
+    const sweep = () => listeners.alarm!({ name: "tabCurb.sweep" });
     await sweep();
     expect(discarded).toEqual([7, 6]);
     used = 90;
@@ -133,9 +133,9 @@ test("without the Local Companion, sleeping tabs stops when it frees no memory u
   const MiB = 1024 ** 2;
   try {
     const now = Date.now();
-    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabCurb.folderSyncOptedIn"] = false;
     for (let id = 4; id <= 9; id++) tabs.push({ ...tabs[0]!, id, url: `https://old.test/${id}` });
-    localData["tabReaper.activity"] = {
+    localData["tabCurb.activity"] = {
       byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - tab.id * 1000 }])),
     };
     let available = 700 * MiB;
@@ -150,7 +150,7 @@ test("without the Local Companion, sleeping tabs stops when it frees no memory u
       get: async (id: number) => tabs[id - 1],
       discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
     });
-    const sweep = () => listeners.alarm!({ name: "tabReaper.sweep" });
+    const sweep = () => listeners.alarm!({ name: "tabCurb.sweep" });
 
     available = 1200 * MiB;
     await sweep();
@@ -176,9 +176,9 @@ test("an idle candidate used during form inspection stays open", async () => {
   const page = tabs[0]!;
   const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
   try {
-    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabCurb.folderSyncOptedIn"] = false;
     for (const tab of tabs.slice(1)) tab.pinned = true;
-    localData["tabReaper.activity"] = { byTabId: { 1: { url: page.url, lastActiveAt: 1 } }, byUrl: {} };
+    localData["tabCurb.activity"] = { byTabId: { 1: { url: page.url, lastActiveAt: 1 } }, byUrl: {} };
     Object.assign(chrome.runtime, {
       sendNativeMessage: async () => ({ ok: true, chromeBytes: 85, systemTotalBytes: 200, systemAvailableBytes: 50 }),
     });
@@ -201,10 +201,10 @@ test("an idle candidate used during form inspection stays open", async () => {
 test("Keep acknowledged during restore survives the merge of restored tab IDs", async () => {
   const { listeners, tabs, localData, trustedSender, restore } = await worker();
   const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
-  const key = "tabReaper.keptTabIds";
+  const key = "tabCurb.keptTabIds";
   try {
-    localData["tabReaper.folderSyncOptedIn"] = false;
-    localData["tabReaper.sessionSnapshots"] = [{ id: "backup", capturedAt: 1, tabCount: 1,
+    localData["tabCurb.folderSyncOptedIn"] = false;
+    localData["tabCurb.sessionSnapshots"] = [{ id: "backup", capturedAt: 1, tabCount: 1,
       tabs: [{ url: "https://new.test/", title: "Recovered", pinned: false, kept: true, windowId: 5 }] }];
     Object.assign(chrome.tabs, { query: async () => tabs, create: async () => ({ id: 100 }), get: async (id: number) => tabs[id-1] });
     const get = chrome.storage.local.get.bind(chrome.storage.local);
@@ -230,9 +230,9 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
   const { listeners, tabs, localData, restore } = await worker();
   const calls: string[] = [];
   try {
-    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabCurb.folderSyncOptedIn"] = false;
     Object.assign(chrome, { permissions: { ...chrome.permissions, contains: async () => true }, scripting: {
-      getRegisteredContentScripts: async () => [{ id: "tab-reaper-form-observer" }],
+      getRegisteredContentScripts: async () => [{ id: "tabcurb-form-observer" }],
       executeScript: async () => { calls.push("script"); return []; },
     } });
     Object.assign(chrome.tabs, { query: async () => tabs });
@@ -245,20 +245,20 @@ test("the 30-second alarm skips page sampling and folder I/O below the idle band
       create: async (_name: string, spec: { periodInMinutes: number }) => alarms.push(spec.periodInMinutes) });
     await listeners.installed!();
     calls.length = 0;
-    await listeners.alarm!({ name: "tabReaper.sweep" });
+    await listeners.alarm!({ name: "tabCurb.sweep" });
     await Bun.sleep(0);
     expect(alarms).toEqual([0.5, 1440]);
     expect(calls).toEqual(["chrome_memory"]);
 
     // Re-register listeners as Chrome does when it wakes a new service worker.
-    localData["tabReaper.folderSyncOptedIn"] = true;
-    localData["tabReaper.config"] = { enableSessionSnapshots: false };
-    await listeners.alarm!({ name: "tabReaper.sweep" });
+    localData["tabCurb.folderSyncOptedIn"] = true;
+    localData["tabCurb.config"] = { enableSessionSnapshots: false };
+    await listeners.alarm!({ name: "tabCurb.sweep" });
     await Bun.sleep(0);
     expect(calls).toContain("sync_get_status");
     calls.length = 0;
     await import(`../src/background/index.ts?instance=${crypto.randomUUID()}`);
-    await listeners.alarm!({ name: "tabReaper.sweep" });
+    await listeners.alarm!({ name: "tabCurb.sweep" });
     await Bun.sleep(0);
     expect(calls).toEqual(["chrome_memory"]);
   } finally {
@@ -281,7 +281,7 @@ test("granting page access attaches to already loaded tabs and revocation stops 
     });
     Object.assign(chrome.permissions, { contains: async () => access });
     Object.assign(chrome, { scripting: {
-      getRegisteredContentScripts: async () => registered ? [{ id: "tab-reaper-form-observer" }] : [],
+      getRegisteredContentScripts: async () => registered ? [{ id: "tabcurb-form-observer" }] : [],
       registerContentScripts: async () => { registered = true; },
       executeScript: async ({ target }: { target: { tabId: number } }) => attached.push(target.tabId),
     } });
@@ -299,7 +299,7 @@ test("granting page access attaches to already loaded tabs and revocation stops 
 test("an upload starting while tabs.get is pending prevents discard", async () => {
   const { listeners, tabs, localData, trustedSender, restore } = await worker();
   try {
-    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    localData["tabCurb.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
     let onBeforeRequest: ((details: chrome.webRequest.WebRequestBodyDetails) => void) | undefined;
     const noopEvent = () => ({ addListener: () => {}, removeListener: () => {}, hasListener: () => false });
     Object.assign(chrome.permissions, { contains: async () => true });
@@ -351,7 +351,7 @@ test("an upload starting while tabs.get is pending prevents discard", async () =
     expect(await response).toEqual({ ok: false });
     expect(discarded).toEqual([]);
   } finally {
-    localData["tabReaper.config"] = { protectActiveUploads: false };
+    localData["tabCurb.config"] = { protectActiveUploads: false };
     await listeners.permissionRemoved!({ permissions: ["webRequest"] });
     restore();
   }
@@ -360,8 +360,8 @@ test("an upload starting while tabs.get is pending prevents discard", async () =
 test("an upload starting while expired cooldown cleanup is awaiting prevents discard", async () => {
   const { listeners, tabs, localData, sessionData, trustedSender, restore } = await worker();
   try {
-    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
-    sessionData["tabReaper.activeUploads"] = {
+    localData["tabCurb.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    sessionData["tabCurb.activeUploads"] = {
       inFlight: {},
       cooldownUntilByTabId: { "2": Date.now() - 1000 },
     };
@@ -389,7 +389,7 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
     await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["http://*/*", "https://*/*"] });
 
     // Seed an expired cooldown in the hydrated state, then pause session.remove during checkTabHasActiveUpload.
-    sessionData["tabReaper.activeUploads"] = {
+    sessionData["tabCurb.activeUploads"] = {
       inFlight: {},
       cooldownUntilByTabId: { "2": Date.now() - 1000 },
     };
@@ -400,7 +400,7 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
     const origRemove = chrome.storage.session.remove;
     let interceptRemove = false;
     chrome.storage.session.remove = async (key: string | string[]) => {
-      if (interceptRemove && key === "tabReaper.activeUploads") {
+      if (interceptRemove && key === "tabCurb.activeUploads") {
         interceptRemove = false;
         removeEntered();
         await new Promise<void>((resolve) => { releaseRemove = resolve; });
@@ -419,10 +419,10 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
         onCompleted = fn;
       };
       // Re-attach so our onCompleted capture is registered.
-      localData["tabReaper.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
-      await listeners.storageChanged!({ "tabReaper.config": { oldValue: { protectActiveUploads: true }, newValue: { protectActiveUploads: false } } }, "local");
-      localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
-      await listeners.storageChanged!({ "tabReaper.config": { oldValue: { protectActiveUploads: false }, newValue: { protectActiveUploads: true } } }, "local");
+      localData["tabCurb.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
+      await listeners.storageChanged!({ "tabCurb.config": { oldValue: { protectActiveUploads: true }, newValue: { protectActiveUploads: false } } }, "local");
+      localData["tabCurb.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+      await listeners.storageChanged!({ "tabCurb.config": { oldValue: { protectActiveUploads: false }, newValue: { protectActiveUploads: true } } }, "local");
 
       onBeforeRequest!({
         requestId: "cool-1",
@@ -489,7 +489,7 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
       Date.now = realNow;
     }
   } finally {
-    localData["tabReaper.config"] = { protectActiveUploads: false };
+    localData["tabCurb.config"] = { protectActiveUploads: false };
     await listeners.permissionRemoved!({ permissions: ["webRequest"] });
     restore();
   }
@@ -499,9 +499,9 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
   const { listeners, tabs, localData, restore } = await worker();
   try {
     const now = Date.now();
-    localData["tabReaper.folderSyncOptedIn"] = false;
-    localData["tabReaper.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
-    localData["tabReaper.activity"] = {
+    localData["tabCurb.folderSyncOptedIn"] = false;
+    localData["tabCurb.config"] = { protectActiveUploads: false, protectUnsavedForms: false };
+    localData["tabCurb.activity"] = {
       byTabId: Object.fromEntries(tabs.map((tab) => [tab.id, { url: tab.url, lastActiveAt: now - (10 - tab.id) * 60_000 }])),
       byUrl: {},
     };
@@ -543,12 +543,12 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
     });
 
     // Start the sweep while protectActiveUploads is still false. Tab 1 is oldest and first candidate.
-    const sweepDone = listeners.alarm!({ name: "tabReaper.sweep" });
+    const sweepDone = listeners.alarm!({ name: "tabCurb.sweep" });
     await memoryReached;
 
     // Enable upload protection and start an upload on tab 1 before memory reading completes.
     webRequestPerm = true;
-    localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
+    localData["tabCurb.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
     await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["http://*/*", "https://*/*"] });
     onBeforeRequest!({
       requestId: "mid-sweep-1",
@@ -567,7 +567,7 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
     expect(discarded).not.toContain(1);
     expect(discarded).toEqual([2, 3]);
   } finally {
-    localData["tabReaper.config"] = { protectActiveUploads: false };
+    localData["tabCurb.config"] = { protectActiveUploads: false };
     await listeners.permissionRemoved!({ permissions: ["webRequest"] });
     restore();
   }
@@ -579,9 +579,9 @@ test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs 
   const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
   try {
     const now = Date.now();
-    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabCurb.folderSyncOptedIn"] = false;
     // Form protection disabled must still protect screen-shared and PiP tabs when page access is granted.
-    localData["tabReaper.config"] = { protectUnsavedForms: false };
+    localData["tabCurb.config"] = { protectUnsavedForms: false };
     tabs.push(
       { ...tabs[0]!, id: 4, index: 3, url: "https://old.test/4", title: "4" },
       { ...tabs[0]!, id: 5, index: 4, url: "https://old.test/5", title: "5" },
@@ -593,7 +593,7 @@ test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs 
     // Tab 5: active tab
     (tabs[2] as { autoDiscardable?: boolean }).autoDiscardable = false;
     tabs[4]!.active = true;
-    localData["tabReaper.activity"] = {
+    localData["tabCurb.activity"] = {
       byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - (6 - tab.id) * 60_000 }])),
       byUrl: {},
     };
@@ -635,7 +635,7 @@ test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs 
 
     // Once screen sharing stops on tab 1, the next sweep can discard it.
     sharingTab1 = false;
-    await listeners.alarm!({ name: "tabReaper.sweep" });
+    await listeners.alarm!({ name: "tabCurb.sweep" });
     expect(discarded).toEqual([4, 1]);
   } finally {
     restore();
@@ -649,13 +649,13 @@ test("size-band eviction and status use real OS renderer RAM via webNavigation w
   const message = (body: unknown) => new Promise<any>(resolve => listeners.message!(body, trustedSender, resolve));
   try {
     const now = Date.now();
-    localData["tabReaper.folderSyncOptedIn"] = false;
+    localData["tabCurb.folderSyncOptedIn"] = false;
     tabs.push({ ...tabs[0]!, id: 4, index: 3, url: "https://meet.google.com/abc", title: "Meet" });
     // Tab 1 is active and shares renderer 10 (1000 MiB) with Tab 2.
     // Tab 3 owns renderer 11 (200 MiB).
     // Tab 4 (Meet) owns renderer 12 (1400 MiB).
     tabs[0]!.active = true;
-    localData["tabReaper.activity"] = {
+    localData["tabCurb.activity"] = {
       byTabId: Object.fromEntries(tabs.map(tab => [tab.id, { url: tab.url, lastActiveAt: now - (5 - tab.id) * 60_000 }])),
       byUrl: {},
     };
@@ -706,7 +706,7 @@ test("size-band eviction and status use real OS renderer RAM via webNavigation w
 
     // Size-band sweep discards sole-owner renderers (Tab 4 = 1400 MiB, Tab 3 = 200 MiB)
     // before Tab 2 whose shared renderer is pinned alive by active Tab 1.
-    await listeners.alarm!({ name: "tabReaper.sweep" });
+    await listeners.alarm!({ name: "tabCurb.sweep" });
     expect(discarded).toEqual([4, 3]);
   } finally {
     restore();
@@ -759,10 +759,10 @@ test("onMessage enforces fail-closed UI sender allowlist, validates payloads, an
     expect(badConfig).toMatchObject({ ok: false });
 
     // Content script form-access probe requires matching extension id.
-    expect(sendRaw("tab-reaper-form-access", { id: "wrong-id" }).keepOpen).toBe(false);
+    expect(sendRaw("tabcurb-form-access", { id: "wrong-id" }).keepOpen).toBe(false);
     Object.assign(chrome.permissions, { contains: async () => true });
     const accessOk = await new Promise((resolve) =>
-      listeners.message!("tab-reaper-form-access", { id: trustedSender.id, tab: { id: 1 }, url: "https://site.test/" }, resolve),
+      listeners.message!("tabcurb-form-access", { id: trustedSender.id, tab: { id: 1 }, url: "https://site.test/" }, resolve),
     );
     expect(accessOk).toBe(true);
   } finally {
@@ -795,7 +795,7 @@ test("window-cache sanitizes oversized URLs, titles, group titles, and data: fav
     await listeners.updated!(2, { url: hugeUrlTab.url }, hugeUrlTab);
     await listeners.groupChanged!({ windowId: 5, id: 7, title: hugeGroupTitle, color: "blue", collapsed: false });
 
-    const cached = (sessionData["tabReaper.windowTabsCache"] as Record<string, { tabs: any[]; groups?: Record<number, { title?: string }> }>)["5"]!;
+    const cached = (sessionData["tabCurb.windowTabsCache"] as Record<string, { tabs: any[]; groups?: Record<number, { title?: string }> }>)["5"]!;
     const cachedNormal = cached.tabs.find((t) => t.id === 1);
     expect(cachedNormal).toBeDefined();
     expect(cachedNormal.title.length).toBeLessThanOrEqual(256);

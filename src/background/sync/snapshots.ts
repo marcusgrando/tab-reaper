@@ -30,8 +30,8 @@ import {
   type SyncReadResult,
 } from "./client.ts";
 
-const PENDING_SNAPSHOT_DELETES_BY_DIR_KEY = "tabReaper.pendingSnapshotDeletesByDir";
-const PENDING_SNAPSHOT_PRUNES_BY_DIR_KEY = "tabReaper.pendingSnapshotPrunesByDir";
+const PENDING_SNAPSHOT_DELETES_BY_DIR_KEY = "tabCurb.pendingSnapshotDeletesByDir";
+const PENDING_SNAPSHOT_PRUNES_BY_DIR_KEY = "tabCurb.pendingSnapshotPrunesByDir";
 
 export const GFS_RECENT_LIMIT = 20;
 export const GFS_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;

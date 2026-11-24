@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_SYNC_FILE_BYTES: usize = 800 * 1024; // Stays safely under Chrome's 1 MB native messaging host->extension limit.
-const SYNC_SUBDIR_NAME: &str = "TabReaper";
+const SYNC_SUBDIR_NAME: &str = "TabCurb";
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostConfig {
@@ -144,7 +144,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn host_config_path() -> Result<PathBuf, String> {
-    if let Ok(override_path) = env::var("TAB_REAPER_HOST_CONFIG") {
+    if let Ok(override_path) = env::var("TABCURB_HOST_CONFIG") {
         if !override_path.trim().is_empty() {
             return Ok(PathBuf::from(override_path));
         }
@@ -156,7 +156,7 @@ pub fn host_config_path() -> Result<PathBuf, String> {
         Ok(home
             .join("Library")
             .join("Application Support")
-            .join("TabReaper")
+            .join("TabCurb")
             .join("host.json"))
     }
     #[cfg(target_os = "windows")]
@@ -165,15 +165,15 @@ pub fn host_config_path() -> Result<PathBuf, String> {
             .map(PathBuf::from)
             .or_else(home_dir)
             .ok_or_else(|| "APPDATA not set".to_string())?;
-        Ok(appdata.join("TabReaper").join("host.json"))
+        Ok(appdata.join("TabCurb").join("host.json"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
-            return Ok(PathBuf::from(xdg).join("tab-reaper").join("host.json"));
+            return Ok(PathBuf::from(xdg).join("tabcurb").join("host.json"));
         }
         let home = home_dir().ok_or_else(|| "HOME not set".to_string())?;
-        Ok(home.join(".config").join("tab-reaper").join("host.json"))
+        Ok(home.join(".config").join("tabcurb").join("host.json"))
     }
 }
 
@@ -434,7 +434,7 @@ fn check_writable(dir: &Path) -> bool {
     let Ok(root) = open_root(dir) else {
         return false;
     };
-    let probe = format!(".tab-reaper-probe-{}-{}.tmp", std::process::id(), temp_nanos());
+    let probe = format!(".tabcurb-probe-{}-{}.tmp", std::process::id(), temp_nanos());
     match root.open_with(&probe, DirOptions::new().write(true).create_new(true)) {
         Ok(file) => {
             drop(file);
@@ -683,7 +683,7 @@ pub fn pick_folder_dialog() -> Result<Option<String>, String> {
         let out = Command::new("/usr/bin/osascript")
             .args([
                 "-e",
-                "POSIX path of (choose folder with prompt \"Choose Tab Reaper sync folder\")",
+                "POSIX path of (choose folder with prompt \"Choose TabCurb sync folder\")",
             ])
             .output()
             .map_err(|e| format!("failed to launch folder picker: {e}"))?;
@@ -709,7 +709,7 @@ pub fn pick_folder_dialog() -> Result<Option<String>, String> {
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-$dlg.Description = 'Choose Tab Reaper sync folder'
+$dlg.Description = 'Choose TabCurb sync folder'
 $dlg.UseDescriptionForTitle = $true
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   Write-Output $dlg.SelectedPath
@@ -743,7 +743,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 .args([
                     "--file-selection",
                     "--directory",
-                    "--title=Choose Tab Reaper sync folder",
+                    "--title=Choose TabCurb sync folder",
                 ])
                 .output()
             {
@@ -766,7 +766,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 .args([
                     "--getexistingdirectory",
                     "--title",
-                    "Choose Tab Reaper sync folder",
+                    "Choose TabCurb sync folder",
                 ])
                 .output()
             {
@@ -1161,7 +1161,7 @@ mod tests {
     fn enforces_per_profile_opt_in_and_single_writer_ownership() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-sync-test-{}-{}",
+            "tabcurb-sync-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1170,7 +1170,7 @@ mod tests {
         ));
         let cfg_file = base.join("host.json");
         let sync_dir = base.join("sync-root");
-        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+        env::set_var("TABCURB_HOST_CONFIG", &cfg_file);
 
         let status1 = set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
         assert!(status1.enabled);
@@ -1233,7 +1233,7 @@ mod tests {
         let disabled = set_sync_folder("dev1", None).unwrap();
         assert!(!disabled.enabled);
 
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1241,14 +1241,14 @@ mod tests {
     fn concurrent_profile_updates_preserve_each_opt_out() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-profiles-{}-{}",
+            "tabcurb-profiles-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        env::set_var("TAB_REAPER_HOST_CONFIG", base.join("host.json"));
+        env::set_var("TABCURB_HOST_CONFIG", base.join("host.json"));
         let folder = base.join("backup");
         let path = folder.to_str().unwrap();
         for i in 0..4 {
@@ -1273,7 +1273,7 @@ mod tests {
         for i in 0..4 {
             assert!(approved.contains_key(&format!("new-{i}")));
         }
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
 
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-symlink-test-{}-{}",
+            "tabcurb-symlink-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1297,7 +1297,7 @@ mod tests {
         fs::create_dir_all(&outside_dir).unwrap();
         fs::write(outside_dir.join("secret.json"), r#"{"secret":true}"#).unwrap();
 
-        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+        env::set_var("TABCURB_HOST_CONFIG", &cfg_file);
         set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
 
         fs::create_dir_all(sync_dir.join("devices")).unwrap();
@@ -1314,7 +1314,7 @@ mod tests {
         symlink(&outside_dir, &sync_dir).unwrap();
         assert!(!get_sync_status(Some("dev1")).writable);
 
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1327,12 +1327,12 @@ mod tests {
 
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-readonly-test-{}-{}",
+            "tabcurb-readonly-test-{}-{}",
             std::process::id(),
             temp_nanos()
         ));
         let sync_dir = base.join("sync-root");
-        env::set_var("TAB_REAPER_HOST_CONFIG", base.join("host.json"));
+        env::set_var("TABCURB_HOST_CONFIG", base.join("host.json"));
 
         set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
         fs::set_permissions(&sync_dir, fs::Permissions::from_mode(0o555)).unwrap();
@@ -1344,7 +1344,7 @@ mod tests {
         assert!(set_sync_folder("dev2", Some(sync_dir.to_str().unwrap())).is_err());
 
         fs::set_permissions(&sync_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1367,7 +1367,7 @@ mod tests {
         ));
 
         let base = env::temp_dir().join(format!(
-            "tab-reaper-cloudstorage-test-{}-{}",
+            "tabcurb-cloudstorage-test-{}-{}",
             std::process::id(),
             temp_nanos()
         ));
@@ -1397,13 +1397,13 @@ mod tests {
     fn supports_explicit_cross_device_snapshot_management_and_device_removal() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-device-mgmt-{}-{}",
+            "tabcurb-device-mgmt-{}-{}",
             std::process::id(),
             temp_nanos()
         ));
         let cfg_file = base.join("host.json");
         let sync_dir = base.join("sync-root");
-        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+        env::set_var("TABCURB_HOST_CONFIG", &cfg_file);
 
         let status1 = set_sync_folder("dev1", Some(sync_dir.to_str().unwrap())).unwrap();
         let expected_dir = status1.sync_dir.unwrap();
@@ -1496,7 +1496,7 @@ mod tests {
             assert!(outside.join("keep.txt").exists());
         }
 
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1504,12 +1504,12 @@ mod tests {
     fn rejects_parent_traversal_and_sensitive_directories_as_sync_folder() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = env::temp_dir().join(format!(
-            "tab-reaper-sync-root-sec-{}-{}",
+            "tabcurb-sync-root-sec-{}-{}",
             std::process::id(),
             temp_nanos()
         ));
         let cfg_file = base.join("config").join("host.json");
-        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+        env::set_var("TABCURB_HOST_CONFIG", &cfg_file);
 
         // Parent directory traversal must be rejected before creating anything on disk.
         let escaped = base.join("sub").join("..").join("escaped");
@@ -1526,10 +1526,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert!(set_sync_folder("dev1", Some("/")).is_err());
             assert!(set_sync_folder("dev1", Some("/tmp")).is_err());
-            assert!(set_sync_folder("dev1", Some("/etc/tab-reaper")).is_err());
+            assert!(set_sync_folder("dev1", Some("/etc/tabcurb")).is_err());
 
             // Valid dedicated subfolder succeeds and persists host.json/host.lock with mode 0600.
-            let ok_dir = base.join("TabReaper");
+            let ok_dir = base.join("TabCurb");
             assert!(set_sync_folder("dev1", Some(ok_dir.to_str().unwrap())).is_ok());
             let cfg_mode = fs::metadata(&cfg_file).unwrap().permissions().mode() & 0o777;
             let lock_mode = fs::metadata(cfg_file.with_extension("lock"))
@@ -1547,7 +1547,7 @@ mod tests {
             assert_eq!(dir_mode, 0o700);
         }
 
-        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        env::remove_var("TABCURB_HOST_CONFIG");
         let _ = fs::remove_dir_all(&base);
     }
 }

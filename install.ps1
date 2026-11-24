@@ -3,7 +3,7 @@ param(
     [switch]$Test,
     [switch]$Yes,
     [string]$Version = "latest",
-    [string]$Repo = "marcusgrando/tab-reaper"
+    [string]$Repo = "marcusgrando/tabcurb"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,15 +36,15 @@ function Confirm-YesNo([string]$Question) {
     return ($Reply -eq "" -or $Reply -match '^(y|yes|s|sim)$')
 }
 
-$AppDir = Join-Path $env:LOCALAPPDATA "TabReaper"
+$AppDir = Join-Path $env:LOCALAPPDATA "TabCurb"
 $ExtDir = Join-Path $AppDir "extension"
-$BinPath = Join-Path $AppDir "tab-reaper-host.exe"
-$ManifestPath = Join-Path $AppDir "com.tabreaper.host.json"
+$BinPath = Join-Path $AppDir "tabcurb-host.exe"
+$ManifestPath = Join-Path $AppDir "com.tabcurb.host.json"
 
 $RegistryKeys = @(
-    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tabreaper.host",
-    "HKCU:\Software\Chromium\NativeMessagingHosts\com.tabreaper.host",
-    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.tabreaper.host"
+    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tabcurb.host",
+    "HKCU:\Software\Chromium\NativeMessagingHosts\com.tabcurb.host",
+    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.tabcurb.host"
 )
 
 if ($Uninstall) {
@@ -56,9 +56,9 @@ if ($Uninstall) {
     if (Test-Path $AppDir) {
         Remove-Item -Path $AppDir -Recurse -Force
     }
-    Write-Host "Tab Reaper removed." -ForegroundColor Green
+    Write-Host "TabCurb removed." -ForegroundColor Green
     Write-Host "Removed $AppDir and registry entries."
-    Write-Host "If Tab Reaper is still listed in chrome://extensions, click Remove there."
+    Write-Host "If TabCurb is still listed in chrome://extensions, click Remove there."
     exit 0
 }
 
@@ -152,23 +152,23 @@ $IsUpdate = Test-Path (Join-Path $ExtDir "manifest.json")
 $WinArch = Get-WindowsArch
 
 Write-Host ""
-Write-Host ("Tab Reaper " + $(if ($IsUpdate) { "Updater" } else { "Installer" })) -ForegroundColor White
+Write-Host ("TabCurb " + $(if ($IsUpdate) { "Updater" } else { "Installer" })) -ForegroundColor White
 Write-Host "Platform: windows ($WinArch) | Release: $Version" -ForegroundColor DarkGray
 Write-Host ""
 
 try {
     $SumsPath = Join-Path $TmpDir "SHA256SUMS.txt"
-    $ZipPath = Join-Path $TmpDir "tab-reaper-extension.zip"
-    $HostTmpPath = Join-Path $TmpDir "tab-reaper-host.exe"
+    $ZipPath = Join-Path $TmpDir "tabcurb-extension.zip"
+    $HostTmpPath = Join-Path $TmpDir "tabcurb-host.exe"
     $ExtractDir = Join-Path $TmpDir "extracted"
 
     Write-Step "1/4" "Downloading extension and verifying checksum..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl "SHA256SUMS.txt") -OutFile $SumsPath -UseBasicParsing
-    Invoke-WebRequest -Uri (Get-ReleaseUrl "tab-reaper-extension.zip") -OutFile $ZipPath -UseBasicParsing
-    Test-AssetChecksum $SumsPath "tab-reaper-extension.zip" $ZipPath
+    Invoke-WebRequest -Uri (Get-ReleaseUrl "tabcurb-extension.zip") -OutFile $ZipPath -UseBasicParsing
+    Test-AssetChecksum $SumsPath "tabcurb-extension.zip" $ZipPath
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
-    $HostAsset = "tab-reaper-host-windows-$WinArch.exe"
+    $HostAsset = "tabcurb-host-windows-$WinArch.exe"
     Write-Step "2/4" "Downloading Local Companion ($HostAsset) and verifying checksum..."
     Invoke-WebRequest -Uri (Get-ReleaseUrl $HostAsset) -OutFile $HostTmpPath -UseBasicParsing
     Test-AssetChecksum $SumsPath $HostAsset $HostTmpPath
@@ -194,8 +194,8 @@ try {
 
     Write-Step "3/4" "Registering Local Companion with browsers..."
     $Manifest = @{
-        name            = "com.tabreaper.host"
-        description     = "Tab Reaper exact Chrome memory reporter"
+        name            = "com.tabcurb.host"
+        description     = "TabCurb exact Chrome memory reporter"
         path            = $BinPath
         type            = "stdio"
         allowed_origins = @("chrome-extension://$ExtId/")
@@ -242,7 +242,7 @@ try {
     if ($IsUpdate) {
         Write-Host "Update complete." -ForegroundColor Green
         Write-Host "  1. Open chrome://extensions"
-        Write-Host "  2. Click the Reload icon on the Tab Reaper card."
+        Write-Host "  2. Click the Reload icon on the TabCurb card."
         if ($Interactive -and $Browser) {
             Write-Host ""
             if (Confirm-YesNo "Open $($Browser.Name) at chrome://extensions now?") {
@@ -255,7 +255,7 @@ try {
         Write-Host "  2. Drag the 'extension' folder onto the chrome://extensions page"
         Write-Host "     or click 'Load unpacked' and select:"
         Write-Host "     $ExtDir$CopiedNote"
-        Write-Host "  3. Tab Reaper Settings will open automatically to finish setup in 1 click."
+        Write-Host "  3. TabCurb Settings will open automatically to finish setup in 1 click."
 
         if ($Interactive) {
             Write-Host ""

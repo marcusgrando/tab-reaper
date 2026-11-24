@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Tab Reaper",
+  "name": "TabCurb",
   "version": "0.9.9",
   "description": "Strict Chrome memory budget, banded tab discarding, fast startup, and conflict-free session backup.",
   "incognito": "not_allowed",
@@ -34,7 +34,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Tab Reaper",
+    "default_title": "TabCurb",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -49,7 +49,7 @@
         "default": "Alt+Shift+K",
         "mac": "Alt+Shift+K"
       },
-      "description": "Open Tab Reaper tab palette"
+      "description": "Open TabCurb tab palette"
     }
   }
 }

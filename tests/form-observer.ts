@@ -5,7 +5,7 @@ import path from "node:path";
 import { chromium, type BrowserContext } from "playwright-core";
 import type { StatusPayload } from "../src/shared/types.ts";
 
-const cache = path.join(homedir(), ".cache", "tab-reaper");
+const cache = path.join(homedir(), ".cache", "tabcurb");
 await mkdir(cache, { recursive: true });
 const dir = await mkdtemp(path.join(cache, "form-test-"));
 const extension = path.join(dir, "extension");
@@ -28,7 +28,7 @@ try {
   context = await launch();
   const setup = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
   await setup.evaluate(() => chrome.storage.local.set({
-    "tabReaper.config": { protectUnsavedForms: false, startupSweep: false, memoryBudgetMode: "fixed_gb", memoryBudgetGb: 512 },
+    "tabCurb.config": { protectUnsavedForms: false, startupSweep: false, memoryBudgetMode: "fixed_gb", memoryBudgetGb: 512 },
   }));
   await context.close();
   await writeFile(manifestPath, original);
@@ -65,7 +65,7 @@ try {
   let isolatedWorld: number | undefined;
   const uncaughtExceptions: string[] = [];
   debuggerSession.on("Runtime.executionContextCreated", ({ context }) => {
-    if (context.name === "Tab Reaper" && context.auxData?.frameId === frameTree.frame.id) isolatedWorld = context.id;
+    if (context.name === "TabCurb" && context.auxData?.frameId === frameTree.frame.id) isolatedWorld = context.id;
   });
   debuggerSession.on("Runtime.executionContextsCleared", () => { isolatedWorld = undefined; });
   debuggerSession.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
@@ -80,7 +80,7 @@ try {
     do {
       const read = isolatedWorld && await debuggerSession.send("Runtime.evaluate", {
         contextId: isolatedWorld,
-        expression: "(() => { const obs = globalThis[Symbol.for('tabReaper.formObserver')]; return obs ? (obs.active ? 'active' : 'idle') : 'missing'; })()",
+        expression: "(() => { const obs = globalThis[Symbol.for('tabCurb.formObserver')]; return obs ? (obs.active ? 'active' : 'idle') : 'missing'; })()",
       });
       state = read ? read.result.value : "missing";
       if (state === expected) return;
@@ -96,7 +96,7 @@ try {
     assert.equal((await status(address)).hasUnsavedForm, expected, why);
   const configure = async (enabled: boolean) => {
     await options.evaluate(async protectUnsavedForms => {
-      const key = "tabReaper.config";
+      const key = "tabCurb.config";
       const values = await chrome.storage.local.get(key);
       await chrome.storage.local.set({ [key]: { ...values[key], protectUnsavedForms } });
     }, enabled);
@@ -109,7 +109,7 @@ try {
   await configure(true);
   const storageAccess = await debuggerSession.send("Runtime.evaluate", {
     contextId: isolatedWorld, awaitPromise: true,
-    expression: "chrome.storage.local.get('tabReaper.config').then(() => true, () => false)",
+    expression: "chrome.storage.local.get('tabCurb.config').then(() => true, () => false)",
   });
   assert.equal(storageAccess.result.value, false, "page observer cannot read profile data");
   await expectDirty(false, "app-populated title on an already open page");
@@ -241,7 +241,7 @@ try {
   const clobberObsUrl = "https://clobber-obs.example.test/";
   await context.route(clobberObsUrl, route => route.fulfill({
     contentType: "text/html",
-    body: `<div id="tabReaperFormObserver"></div><input id="draft"><form><input name="elements"><input type="radio" name="grp" id="r1"><input type="radio" name="grp" id="r2"></form>`,
+    body: `<div id="tabCurbFormObserver"></div><input id="draft"><form><input name="elements"><input type="radio" name="grp" id="r1"><input type="radio" name="grp" id="r2"></form>`,
   }));
   await configure(false);
   const clobberObsPage = await context.newPage();
@@ -267,7 +267,7 @@ try {
   const httpPipTab = await status(httpPipUrl);
   assert.equal(httpPipTab.protectedReason, null, "DOM clobbering on http:// must not forge PiP protection");
   assert.equal(httpPipTab.canSleep, true, "DOM-clobbered http:// tab must remain sleepable");
-  await expectDirty(true, "DOM clobbering #tabReaperFormObserver and form[name=elements] must not break form protection", clobberObsUrl);
+  await expectDirty(true, "DOM clobbering #tabCurbFormObserver and form[name=elements] must not break form protection", clobberObsUrl);
 
   hungPage.evaluate(() => { const end = Date.now() + 2500; while (Date.now() < end) {} }).catch(() => {});
   await Bun.sleep(100);

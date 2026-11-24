@@ -1,6 +1,6 @@
 import { HTTP_HOST_ORIGINS, createAsyncQueue, loadConfig } from "../shared/config.ts";
 
-export const ACTIVE_UPLOADS_STORAGE_KEY = "tabReaper.activeUploads";
+export const ACTIVE_UPLOADS_STORAGE_KEY = "tabCurb.activeUploads";
 /** Minimum binary/untyped request body or Content-Length size treated as a data upload (64 KiB). */
 export const UPLOAD_MIN_BYTES = 64 * 1024;
 /** Minimum text/JSON/form/protobuf payload size treated as an upload (1 MiB) so large API syncs/logs do not trigger. */

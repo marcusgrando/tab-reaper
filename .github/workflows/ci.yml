@@ -48,7 +48,7 @@ jobs:
         run: |
           cargo build --release --manifest-path native-host/Cargo.toml
           if [ "${{ runner.os }}" = "Windows" ]; then
-            ./native-host/target/release/tab-reaper-host.exe --once
+            ./native-host/target/release/tabcurb-host.exe --once
           else
-            ./native-host/target/release/tab-reaper-host --once
+            ./native-host/target/release/tabcurb-host --once
           fi

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tab-reaper",
+      "name": "tabcurb",
       "devDependencies": {
         "@types/bun": "latest",
         "@types/chrome": "^0.0.287",

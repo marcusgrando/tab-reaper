@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${TAB_REAPER_REPO:-marcusgrando/tab-reaper}"
-VERSION="${TAB_REAPER_VERSION:-latest}"
+REPO="${TABCURB_REPO:-marcusgrando/tabcurb}"
+VERSION="${TABCURB_VERSION:-latest}"
 UNINSTALL=0
 RUN_TEST=0
 NON_INTERACTIVE=0
@@ -23,10 +23,10 @@ while [ $# -gt 0 ]; do
       ;;
     -h|--help)
       echo "Usage: $0 [--uninstall] [--test] [--yes]"
-      echo "Installs Tab Reaper (extension + Local Companion) into a permanent app directory."
+      echo "Installs TabCurb (extension + Local Companion) into a permanent app directory."
       echo ""
       echo "Options:"
-      echo "  --uninstall          Remove Tab Reaper files and native host manifests"
+      echo "  --uninstall          Remove TabCurb files and native host manifests"
       echo "  --test               Print full JSON output from the companion self-test"
       echo "  -y, --yes            Run without interactive prompts"
       exit 0
@@ -97,7 +97,7 @@ ARCH="$(uname -m)"
 case "$OS" in
   Darwin)
     PLATFORM="darwin"
-    APP_DIR="$HOME/Library/Application Support/TabReaper"
+    APP_DIR="$HOME/Library/Application Support/TabCurb"
     HOST_DIRS=(
       "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
       "$HOME/Library/Application Support/Chromium/NativeMessagingHosts"
@@ -111,7 +111,7 @@ case "$OS" in
     ;;
   Linux)
     PLATFORM="linux"
-    APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tab-reaper"
+    APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tabcurb"
     HOST_DIRS=(
       "$HOME/.config/google-chrome/NativeMessagingHosts"
       "$HOME/.config/chromium/NativeMessagingHosts"
@@ -137,17 +137,17 @@ case "$ARCH" in
 esac
 
 EXT_DIR="$APP_DIR/extension"
-BIN_PATH="$APP_DIR/tab-reaper-host"
+BIN_PATH="$APP_DIR/tabcurb-host"
 
 if [ "$UNINSTALL" -eq 1 ]; then
   for DIR in "${HOST_DIRS[@]}"; do
-    rm -f "$DIR/com.tabreaper.host.json"
+    rm -f "$DIR/com.tabcurb.host.json"
   done
   rm -rf "$APP_DIR"
-  rm -f "$HOME/.local/bin/tab-reaper-host"
-  printf '%sTab Reaper removed.%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
-  echo "Removed $APP_DIR, ~/.local/bin/tab-reaper-host, and native host manifests."
-  echo "If Tab Reaper is still listed in chrome://extensions, click Remove there."
+  rm -f "$HOME/.local/bin/tabcurb-host"
+  printf '%sTabCurb removed.%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
+  echo "Removed $APP_DIR, ~/.local/bin/tabcurb-host, and native host manifests."
+  echo "If TabCurb is still listed in chrome://extensions, click Remove there."
   exit 0
 fi
 
@@ -256,7 +256,7 @@ if [ -f "$EXT_DIR/manifest.json" ]; then
   IS_UPDATE=1
 fi
 
-printf '\n%sTab Reaper %s%s\n' "$C_BOLD" "$([ "$IS_UPDATE" -eq 1 ] && echo "Updater" || echo "Installer")" "$C_RESET"
+printf '\n%sTabCurb %s%s\n' "$C_BOLD" "$([ "$IS_UPDATE" -eq 1 ] && echo "Updater" || echo "Installer")" "$C_RESET"
 printf '%sPlatform: %s (%s) | Release: %s%s\n\n' "$C_DIM" "$PLATFORM" "$ARCH_NAME" "$VERSION" "$C_RESET"
 
 TMP_DIR="$(mktemp -d)"
@@ -264,8 +264,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 step "1/4" "Downloading extension and verifying checksum..."
 curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$TMP_DIR/SHA256SUMS.txt"
-curl -fsSL "$(release_url tab-reaper-extension.zip)" -o "$TMP_DIR/extension.zip"
-verify_checksum "$TMP_DIR/SHA256SUMS.txt" "tab-reaper-extension.zip" "$TMP_DIR/extension.zip"
+curl -fsSL "$(release_url tabcurb-extension.zip)" -o "$TMP_DIR/extension.zip"
+verify_checksum "$TMP_DIR/SHA256SUMS.txt" "tabcurb-extension.zip" "$TMP_DIR/extension.zip"
 
 mkdir -p "$TMP_DIR/extracted"
 unzip -qo "$TMP_DIR/extension.zip" -d "$TMP_DIR/extracted"
@@ -278,11 +278,11 @@ CANON_EXT_DIR="$(cd "$EXT_DIR" && pwd -P)"
 EXT_ID="$(compute_extension_id "$CANON_EXT_DIR")"
 ok "Extension installed to $CANON_EXT_DIR"
 
-HOST_ASSET="tab-reaper-host-${PLATFORM}-${ARCH_NAME}"
+HOST_ASSET="tabcurb-host-${PLATFORM}-${ARCH_NAME}"
 step "2/4" "Installing Local Companion (${HOST_ASSET})..."
-curl -fsSL "$(release_url "$HOST_ASSET")" -o "$TMP_DIR/tab-reaper-host"
-verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$HOST_ASSET" "$TMP_DIR/tab-reaper-host"
-install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
+curl -fsSL "$(release_url "$HOST_ASSET")" -o "$TMP_DIR/tabcurb-host"
+verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$HOST_ASSET" "$TMP_DIR/tabcurb-host"
+install -m 755 "$TMP_DIR/tabcurb-host" "$BIN_PATH"
 ok "Local Companion installed to $BIN_PATH"
 
 json_escape() {
@@ -301,10 +301,10 @@ for i in "${!HOST_DIRS[@]}"; do
   PARENT_DIR="$(dirname "$DIR")"
   if [ -d "$PARENT_DIR" ]; then
     mkdir -p "$DIR"
-    cat > "$DIR/com.tabreaper.host.json" <<EOF
+    cat > "$DIR/com.tabcurb.host.json" <<EOF
 {
-  "name": "com.tabreaper.host",
-  "description": "Tab Reaper exact Chrome memory reporter",
+  "name": "com.tabcurb.host",
+  "description": "TabCurb exact Chrome memory reporter",
   "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
@@ -323,10 +323,10 @@ done
 if [ -z "$REGISTERED_LIST" ]; then
   DIR="${HOST_DIRS[0]}"
   mkdir -p "$DIR"
-  cat > "$DIR/com.tabreaper.host.json" <<EOF
+  cat > "$DIR/com.tabcurb.host.json" <<EOF
 {
-  "name": "com.tabreaper.host",
-  "description": "Tab Reaper exact Chrome memory reporter",
+  "name": "com.tabcurb.host",
+  "description": "TabCurb exact Chrome memory reporter",
   "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
@@ -369,7 +369,7 @@ echo ""
 if [ "$IS_UPDATE" -eq 1 ]; then
   printf '%sUpdate complete.%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
   echo "  1. Open chrome://extensions"
-  echo "  2. Click the Reload icon on the Tab Reaper card."
+  echo "  2. Click the Reload icon on the TabCurb card."
   if [ "$INTERACTIVE" -eq 1 ] && [ -n "$DETECTED_BROWSER_NAME" ]; then
     echo ""
     if prompt_yes_no "Open ${DETECTED_BROWSER_NAME} at chrome://extensions now?"; then
@@ -382,7 +382,7 @@ else
   echo "  2. Drag the 'extension' folder onto the chrome://extensions page"
   echo "     or click 'Load unpacked' and select:"
   echo "     $CANON_EXT_DIR${COPIED_NOTE}"
-  echo "  3. Tab Reaper Settings will open automatically to finish setup in 1 click."
+  echo "  3. TabCurb Settings will open automatically to finish setup in 1 click."
 
   if [ "$INTERACTIVE" -eq 1 ]; then
     echo ""

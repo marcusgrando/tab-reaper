@@ -2,10 +2,10 @@ import { createAsyncQueue } from "../../shared/config.ts";
 import type { DeviceIdentity, SyncFolderCandidate, SyncStatus } from "../../shared/types.ts";
 import { hasNativeMessagingPermission, NATIVE_HOST_NAME } from "../memory.ts";
 
-const DEVICE_IDENTITY_KEY = "tabReaper.deviceIdentity";
-const FOLDER_SYNC_OPTED_IN_KEY = "tabReaper.folderSyncOptedIn";
-const ACTIVE_SYNC_DIR_KEY = "tabReaper.activeSyncDir";
-const LAST_SYNC_AT_KEY = "tabReaper.lastSyncAt";
+const DEVICE_IDENTITY_KEY = "tabCurb.deviceIdentity";
+const FOLDER_SYNC_OPTED_IN_KEY = "tabCurb.folderSyncOptedIn";
+const ACTIVE_SYNC_DIR_KEY = "tabCurb.activeSyncDir";
+const LAST_SYNC_AT_KEY = "tabCurb.lastSyncAt";
 
 const DEFAULT_DEVICE_NAME = "This Computer";
 

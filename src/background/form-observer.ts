@@ -1,7 +1,7 @@
 import { HTTP_HOST_ORIGINS, createAsyncQueue, isInternalUrl, loadConfig, withTimeout } from "../shared/config.ts";
 import { hasHostAccessPermission } from "./sampler.ts";
 
-const scriptId = "tab-reaper-form-observer";
+const scriptId = "tabcurb-form-observer";
 const scriptFile = "form-observer.js";
 const TAB_OP_TIMEOUT_MS = 1000;
 const enqueue = createAsyncQueue();
@@ -36,7 +36,7 @@ export function reconcileFormObserver(refreshOpenTabs = false): Promise<void> {
             TAB_OP_TIMEOUT_MS,
           );
         } else {
-          await withTimeout(chrome.tabs.sendMessage(tab.id, "tab-reaper-stop-form-observer"), TAB_OP_TIMEOUT_MS);
+          await withTimeout(chrome.tabs.sendMessage(tab.id, "tabcurb-stop-form-observer"), TAB_OP_TIMEOUT_MS);
         }
       } catch {
         // Restricted documents, closed tabs, hung renderers, and frames without an observer are expected.

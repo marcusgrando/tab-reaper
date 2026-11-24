@@ -4,13 +4,13 @@ param(
     [switch]$FromSource,
     [switch]$Test,
     [string]$Version = "latest",
-    [string]$Repo = "marcusgrando/tab-reaper"
+    [string]$Repo = "marcusgrando/tabcurb"
 )
 
 $ErrorActionPreference = "Stop"
 
 if (-not $ExtensionId) {
-    Write-Error "Usage: install.ps1 [-FromSource] [-Test] <chrome-extension-id>`nCopy the full 32-character Extension ID from chrome://extensions or Tab Reaper Settings."
+    Write-Error "Usage: install.ps1 [-FromSource] [-Test] <chrome-extension-id>`nCopy the full 32-character Extension ID from chrome://extensions or TabCurb Settings."
     exit 1
 }
 
@@ -19,9 +19,9 @@ if ($ExtensionId -notmatch '^[a-p]{32}$') {
     exit 1
 }
 
-$InstallDir = Join-Path $env:LOCALAPPDATA "TabReaper"
-$BinPath = Join-Path $InstallDir "tab-reaper-host.exe"
-$ManifestPath = Join-Path $InstallDir "com.tabreaper.host.json"
+$InstallDir = Join-Path $env:LOCALAPPDATA "TabCurb"
+$BinPath = Join-Path $InstallDir "tabcurb-host.exe"
+$ManifestPath = Join-Path $InstallDir "com.tabcurb.host.json"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
@@ -77,18 +77,18 @@ function Build-FromSource {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         throw "cargo not found. Install Rust from https://rustup.rs or omit -FromSource to download a prebuilt binary."
     }
-    $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $env:LOCALAPPDATA "TabReaper\target" }
+    $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $env:LOCALAPPDATA "TabCurb\target" }
     New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
-    Write-Host "Building tab-reaper-host (release)..."
+    Write-Host "Building tabcurb-host (release)..."
     $env:CARGO_TARGET_DIR = $TargetDir
     cargo build --release --manifest-path $CargoToml
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed." }
-    Copy-Item -Force (Join-Path $TargetDir "release\tab-reaper-host.exe") $BinPath
+    Copy-Item -Force (Join-Path $TargetDir "release\tabcurb-host.exe") $BinPath
 }
 
 function Download-Prebuilt {
-    $Asset = "tab-reaper-host-windows-$(Get-WindowsArch).exe"
-    $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tab-reaper-host-" + [System.Guid]::NewGuid().ToString("N"))
+    $Asset = "tabcurb-host-windows-$(Get-WindowsArch).exe"
+    $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tabcurb-host-" + [System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
     try {
         $SumsPath = Join-Path $TmpDir "SHA256SUMS.txt"
@@ -114,8 +114,8 @@ if ($FromSource) {
 }
 
 $Manifest = @{
-    name            = "com.tabreaper.host"
-    description     = "Tab Reaper exact Chrome memory reporter"
+    name            = "com.tabcurb.host"
+    description     = "TabCurb exact Chrome memory reporter"
     path            = $BinPath
     type            = "stdio"
     allowed_origins = @("chrome-extension://$ExtensionId/")
@@ -124,9 +124,9 @@ $Manifest = @{
 Set-Content -Path $ManifestPath -Value $Manifest -Encoding UTF8
 
 $RegistryKeys = @(
-    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tabreaper.host",
-    "HKCU:\Software\Chromium\NativeMessagingHosts\com.tabreaper.host",
-    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.tabreaper.host"
+    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tabcurb.host",
+    "HKCU:\Software\Chromium\NativeMessagingHosts\com.tabcurb.host",
+    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.tabcurb.host"
 )
 
 foreach ($Key in $RegistryKeys) {

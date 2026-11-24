@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${TAB_REAPER_REPO:-marcusgrando/tab-reaper}"
-VERSION="${TAB_REAPER_VERSION:-latest}"
+REPO="${TABCURB_REPO:-marcusgrando/tabcurb}"
+VERSION="${TABCURB_VERSION:-latest}"
 FROM_SOURCE=0
 RUN_TEST=0
 EXT_ID=""
@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
       ;;
     -h|--help)
       echo "Usage: $0 [--from-source] [--test] <chrome-extension-id>"
-      echo "Downloads and verifies the prebuilt tab-reaper-host binary from GitHub Releases (or builds locally with --from-source)."
+      echo "Downloads and verifies the prebuilt tabcurb-host binary from GitHub Releases (or builds locally with --from-source)."
       exit 0
       ;;
     *)
@@ -31,18 +31,18 @@ done
 
 if [ -z "$EXT_ID" ]; then
   echo "Usage: $0 [--from-source] [--test] <chrome-extension-id>" >&2
-  echo "Copy the full 32-character Extension ID from chrome://extensions or the Tab Reaper Settings page." >&2
+  echo "Copy the full 32-character Extension ID from chrome://extensions or the TabCurb Settings page." >&2
   exit 1
 fi
 
 if [[ ! "$EXT_ID" =~ ^[a-p]{32}$ ]]; then
   echo "Error: invalid Chrome extension ID '$EXT_ID' (got ${#EXT_ID} chars; expected 32 lowercase letters a-p)." >&2
-  echo "Copy the full ID from chrome://extensions or the Tab Reaper Settings page." >&2
+  echo "Copy the full ID from chrome://extensions or the TabCurb Settings page." >&2
   exit 1
 fi
 
 BIN_DIR="$HOME/.local/bin"
-BIN_PATH="$BIN_DIR/tab-reaper-host"
+BIN_PATH="$BIN_DIR/tabcurb-host"
 mkdir -p "$BIN_DIR"
 
 SCRIPT_DIR=""
@@ -119,11 +119,11 @@ build_from_source() {
     echo "Error: cargo not found. Install Rust from https://rustup.rs or omit --from-source to download a prebuilt binary." >&2
     exit 1
   fi
-  local target_dir="${CARGO_TARGET_DIR:-$HOME/.cache/tab-reaper/target}"
+  local target_dir="${CARGO_TARGET_DIR:-$HOME/.cache/tabcurb/target}"
   mkdir -p "$target_dir"
-  echo "Building tab-reaper-host (release)..."
+  echo "Building tabcurb-host (release)..."
   CARGO_TARGET_DIR="$target_dir" cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
-  install -m 755 "$target_dir/release/tab-reaper-host" "$BIN_PATH"
+  install -m 755 "$target_dir/release/tabcurb-host" "$BIN_PATH"
 }
 
 TMP_DIR=""
@@ -142,17 +142,17 @@ json_escape() {
 }
 
 download_prebuilt() {
-  local asset="tab-reaper-host-${PLATFORM}-${ARCH_NAME}"
+  local asset="tabcurb-host-${PLATFORM}-${ARCH_NAME}"
   TMP_DIR="$(mktemp -d)"
 
   echo "Downloading release checksums..."
   curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$TMP_DIR/SHA256SUMS.txt"
 
   echo "Downloading ${asset} from GitHub Releases..."
-  curl -fsSL "$(release_url "$asset")" -o "$TMP_DIR/tab-reaper-host"
+  curl -fsSL "$(release_url "$asset")" -o "$TMP_DIR/tabcurb-host"
 
-  verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$asset" "$TMP_DIR/tab-reaper-host"
-  install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
+  verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$asset" "$TMP_DIR/tabcurb-host"
+  install -m 755 "$TMP_DIR/tabcurb-host" "$BIN_PATH"
 }
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
@@ -181,10 +181,10 @@ for DIR in "${HOST_DIRS[@]}"; do
   PARENT_DIR="$(dirname "$DIR")"
   if [ -d "$PARENT_DIR" ]; then
     mkdir -p "$DIR"
-    cat > "$DIR/com.tabreaper.host.json" <<EOF
+    cat > "$DIR/com.tabcurb.host.json" <<EOF
 {
-  "name": "com.tabreaper.host",
-  "description": "Tab Reaper exact Chrome memory reporter",
+  "name": "com.tabcurb.host",
+  "description": "TabCurb exact Chrome memory reporter",
   "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
@@ -192,7 +192,7 @@ for DIR in "${HOST_DIRS[@]}"; do
   ]
 }
 EOF
-    echo "Registered native host manifest at $DIR/com.tabreaper.host.json"
+    echo "Registered native host manifest at $DIR/com.tabcurb.host.json"
     REGISTERED=1
   fi
 done
@@ -200,10 +200,10 @@ done
 if [ "$REGISTERED" -eq 0 ]; then
   DIR="${HOST_DIRS[0]}"
   mkdir -p "$DIR"
-  cat > "$DIR/com.tabreaper.host.json" <<EOF
+  cat > "$DIR/com.tabcurb.host.json" <<EOF
 {
-  "name": "com.tabreaper.host",
-  "description": "Tab Reaper exact Chrome memory reporter",
+  "name": "com.tabcurb.host",
+  "description": "TabCurb exact Chrome memory reporter",
   "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
@@ -211,7 +211,7 @@ if [ "$REGISTERED" -eq 0 ]; then
   ]
 }
 EOF
-  echo "Registered native host manifest at $DIR/com.tabreaper.host.json"
+  echo "Registered native host manifest at $DIR/com.tabcurb.host.json"
 fi
 
 if [ "$RUN_TEST" -eq 1 ]; then

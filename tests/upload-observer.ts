@@ -167,7 +167,7 @@ const server = Bun.serve({
 });
 
 const baseUrl = `http://127.0.0.1:${server.port}`;
-const cache = path.join(homedir(), ".cache", "tab-reaper");
+const cache = path.join(homedir(), ".cache", "tabcurb");
 await mkdir(cache, { recursive: true });
 const dir = await mkdtemp(path.join(cache, "upload-test-"));
 const sampleFile = path.join(dir, "clip.bin");
@@ -196,7 +196,7 @@ try {
   const setup = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"));
   await setup.evaluate(() =>
     chrome.storage.local.set({
-      "tabReaper.config": {
+      "tabCurb.config": {
         protectUnsavedForms: false,
         protectActiveUploads: false,
         startupSweep: false,

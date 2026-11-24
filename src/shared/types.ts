@@ -1,6 +1,6 @@
 export type MemoryBudgetMode = "fraction" | "fixed_gb";
 
-export interface TabReaperConfig {
+export interface TabCurbConfig {
   memoryBudgetMode: MemoryBudgetMode;
   /** Fraction of total system RAM when memoryBudgetMode === "fraction" (0.1 to 0.9, default 0.5). */
   memoryBudgetFraction: number;
@@ -27,7 +27,7 @@ export interface TabReaperConfig {
   snapshotIntervalMinutes: number;
   /** Domain or glob patterns excluded from discard. */
   allowlist: string[];
-  /** Check GitHub Releases daily for a newer Tab Reaper version. */
+  /** Check GitHub Releases daily for a newer TabCurb version. */
   checkForUpdates: boolean;
 }
 
@@ -246,7 +246,7 @@ export interface DeviceIdentity {
 }
 
 export interface StatusPayload {
-  config: TabReaperConfig;
+  config: TabCurbConfig;
   memory: MemorySnapshot | null;
   online: boolean;
   loadedCount: number;
@@ -275,7 +275,7 @@ export type BackgroundMessage =
   | { type: "clear_snapshots" }
   | { type: "delete_snapshot"; id: string; syncDir?: string | null; ownerDeviceId?: string }
   | { type: "restore_snapshot"; id: string; targetWindowId?: number; mode?: RestoreMode; relPath?: string }
-  | { type: "save_config"; config: Partial<TabReaperConfig> }
+  | { type: "save_config"; config: Partial<TabCurbConfig> }
   | { type: "test_native_host" }
   | { type: "get_sync_status" }
   | { type: "get_synced_devices" }

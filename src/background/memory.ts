@@ -1,12 +1,12 @@
 import { MAX_DISCARDS_WITHOUT_RELIEF, computeMemoryBudgetBytes } from "../shared/config.ts";
-import type { MemoryPressure, MemorySnapshot, TabReaperConfig } from "../shared/types.ts";
+import type { MemoryPressure, MemorySnapshot, TabCurbConfig } from "../shared/types.ts";
 
-export const NATIVE_HOST_NAME = "com.tabreaper.host";
+export const NATIVE_HOST_NAME = "com.tabcurb.host";
 
 const MiB = 1024 * 1024;
 /** Free memory must rise by this much over the episode's baseline to count as relief. One discarded tab usually frees more. */
 const RELIEF_BYTES = 128 * MiB;
-const PRESSURE_EPISODE_KEY = "tabReaper.pressureEpisode";
+const PRESSURE_EPISODE_KEY = "tabCurb.pressureEpisode";
 
 /**
  * Free-memory thresholds for chrome.system.memory availableCapacity, which reports
@@ -15,7 +15,7 @@ const PRESSURE_EPISODE_KEY = "tabReaper.pressureEpisode";
  * inactive pages, so it sits below 1 GiB on a healthy 8 GiB Mac. Its thresholds
  * are an approximation of the kernel pressure levels, which only native code can read.
  * Linux follows Firefox's critical rule (5% or 200 MiB). ChromeOS discards tabs
- * under pressure itself, so Tab Reaper leaves it alone.
+ * under pressure itself, so TabCurb leaves it alone.
  */
 export function systemPressureThresholds(
   os: string,
@@ -149,7 +149,7 @@ export async function pingNativeHost(): Promise<NativePingResponse> {
   }
 }
 
-export async function getMemorySnapshot(config: TabReaperConfig, now = Date.now()): Promise<MemorySnapshot> {
+export async function getMemorySnapshot(config: TabCurbConfig, now = Date.now()): Promise<MemorySnapshot> {
   const nativeAllowed = await hasNativeMessagingPermission();
   if (nativeAllowed && typeof chrome.runtime.sendNativeMessage === "function") {
     try {

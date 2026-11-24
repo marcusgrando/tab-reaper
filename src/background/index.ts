@@ -13,7 +13,7 @@ import type {
   BackgroundMessage,
   OpenTabInfo,
   StatusPayload,
-  TabReaperConfig,
+  TabCurbConfig,
   TabSummary,
   TabWeightSample,
 } from "../shared/types.ts";
@@ -120,7 +120,7 @@ import {
   updateCachedWindowBounds,
 } from "./window-cache.ts";
 
-const SWEEP_ALARM = "tabReaper.sweep";
+const SWEEP_ALARM = "tabCurb.sweep";
 const SWEEP_PERIOD_MINUTES = 0.5;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let sweepInFlight = false;
@@ -129,8 +129,8 @@ const privateStorage = Promise.all([
   chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }),
   chrome.storage.session?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }),
 ]);
-const LAST_SYNC_ATTEMPT_KEY = "tabReaper.lastSyncAttempt";
-const STARTUP_RECONCILED_KEY = "tabReaper.startupReconciled";
+const LAST_SYNC_ATTEMPT_KEY = "tabCurb.lastSyncAttempt";
+const STARTUP_RECONCILED_KEY = "tabCurb.startupReconciled";
 let startupReconciled = false;
 
 async function isStartupReconciled(): Promise<boolean> {
@@ -217,7 +217,7 @@ async function queryAllTabs(updateCache = true): Promise<TabSummary[]> {
 
 async function discardTabSafely(
   tabId: number,
-  config: TabReaperConfig,
+  config: TabCurbConfig,
   mode: "manual" | "automatic",
   plannedLastActiveAt?: number,
 ): Promise<boolean> {
@@ -297,7 +297,7 @@ async function maybeCheckForUpdate(force = false): Promise<void> {
   await checkForUpdate({ force });
 }
 
-async function refreshActionBadge(existingConfig?: TabReaperConfig): Promise<void> {
+async function refreshActionBadge(existingConfig?: TabCurbConfig): Promise<void> {
   const config = existingConfig ?? (await loadConfig());
   const online = isBrowserOnline();
   const [tabs, memory, updateAvailable] = await Promise.all([
@@ -860,7 +860,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage | string, sender, sendResponse) => {
-  if (message === "tab-reaper-form-access") {
+  if (message === "tabcurb-form-access") {
     if (!chrome.runtime?.id || sender.id !== chrome.runtime.id) return false;
     void Promise.all([loadConfig(), hasHostAccessPermission(), privateStorage])
       .then(([config, access]) => sendResponse(config.protectUnsavedForms && access))
