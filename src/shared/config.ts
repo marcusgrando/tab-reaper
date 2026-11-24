@@ -23,10 +23,17 @@ export function buildQuickUpdateCommand(
   return "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tabcurb/main/install.sh | bash";
 }
 
+export class TimeoutError extends Error {
+  constructor(message = "Operation timed out") {
+    super(message);
+    this.name = "TimeoutError";
+  }
+}
+
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return new Promise<T>((resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("Operation timed out")), timeoutMs);
+    timer = setTimeout(() => reject(new TimeoutError()), timeoutMs);
     promise.then(
       (value) => {
         clearTimeout(timer);

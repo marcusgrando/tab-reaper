@@ -83,10 +83,10 @@ test("an unavailable live check preserves a recent observed edit before discard"
     } });
     expect(await checkTabHasUnsavedForm(1)).toBe(true);
     expect(await checkTabLiveProtection(1, true)).toEqual({
-      hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false,
+      hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false, timedOut: false,
     });
     expect(await checkTabLiveProtection(1, false)).toEqual({
-      hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false,
+      hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false, timedOut: false,
     });
     sample.sampledAt -= 121_000;
     expect(await checkTabHasUnsavedForm(1)).toBe(false);
@@ -187,11 +187,62 @@ test("hung executeScript calls time out without stalling other tabs or discard c
     expect(forms.has(1)).toBe(false);
     expect(forms.get(2)?.hasUnsavedForm).toBe(true);
 
-    // Without a cached draft, a hung tab does not stay permanently undiscardable.
+    // Live pre-discard protection fails closed (timedOut: true) when inspection times out
+    // so a momentarily busy page or slow third-party iframe never loses drafts, PiP, or sharing.
     const t2 = Date.now();
     const live = await checkTabLiveProtection(1, true, 40);
     expect(Date.now() - t2).toBeLessThan(500);
-    expect(live).toEqual({ hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false });
+    expect(live).toEqual({ hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false, timedOut: true });
+  } finally {
+    Object.assign(globalThis, { chrome: previous });
+  }
+});
+
+test("slow third-party subframe falls back to main frame for ranking/status while keeping live discard fail-closed", async () => {
+  const previous = globalThis.chrome;
+  const tabWithSlowAd = { id: 1, url: "https://editor.test/", title: "Editor", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
+  const cache: Record<string, Record<string, unknown>> = {};
+  let topFrameDirty = true;
+  try {
+    Object.assign(globalThis, { chrome: {
+      permissions: { contains: async () => true },
+      tabs: { query: async () => [{ id: 1 }] },
+      storage: { session: {
+        get: async () => structuredClone(cache),
+        set: async (update: typeof cache) => Object.assign(cache, structuredClone(update)),
+      } },
+      scripting: { executeScript: ({ target, args }: { target: { tabId: number; allFrames?: boolean; frameIds?: number[] }; args: boolean[] }) => {
+        if (target.allFrames) return new Promise(() => {}); // Hung cross-origin ad iframe blocks allFrames.
+        if (target.frameIds?.includes(0)) {
+          const includeMetrics = args[0] === true;
+          const protectForms = args[1] !== false;
+          const base = { hasUnsavedForm: protectForms && topFrameDirty, isVisible: true, hasPictureInPicture: false };
+          return Promise.resolve([{
+            frameId: 0,
+            result: includeMetrics ? { ...base, jsHeapBytes: 4096, domNodes: 25, mediaNodes: 1, origin: "https://editor.test" } : base,
+          }]);
+        }
+        return Promise.resolve([]);
+      } },
+    } });
+
+    const weights = await sampleTabWeights([tabWithSlowAd], 4000, true, true, 40);
+    expect(weights.get(1)).toMatchObject({
+      jsHeapBytes: 4096,
+      domNodes: 25,
+      mediaNodes: 1,
+      hasUnsavedForm: true,
+      isVisible: true,
+    });
+
+    const forms = await sampleTabFormsOnly([tabWithSlowAd], 4000, true, 40);
+    expect(forms.get(1)).toMatchObject({ hasUnsavedForm: true, isVisible: true });
+
+    // Even when the main frame itself has no draft, a hung subframe still marks timedOut: true
+    // because the subframe could contain an unsaved form or Picture-in-Picture video.
+    topFrameDirty = false;
+    const live = await checkTabLiveProtection(1, true, 40);
+    expect(live).toEqual({ hasUnsavedForm: false, isVisible: true, hasPictureInPicture: false, timedOut: true });
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }

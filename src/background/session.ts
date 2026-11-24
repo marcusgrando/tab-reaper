@@ -10,6 +10,7 @@ import type {
   TabSummary,
 } from "../shared/types.ts";
 import {
+  MAX_RESTORE_TABS,
   adoptSyncedDevice,
   configureSyncFolder,
   getActiveSyncDir,
@@ -679,7 +680,24 @@ export async function restoreSessionSnapshot(
     if (!snapshot && options.relPath) {
       snapshot = await readSyncedSnapshot(options.relPath);
     }
-    if (!snapshot || snapshot.id !== snapshotId) throw new Error("Snapshot unavailable. Wait for the backup folder to sync and try again.");
+    if (!snapshot || snapshot.id !== snapshotId || !Array.isArray(snapshot.tabs)) {
+      throw new Error("Snapshot unavailable. Wait for the backup folder to sync and try again.");
+    }
+    if (snapshot.tabs.length > MAX_RESTORE_TABS) {
+      throw new Error(`Snapshot exceeds the maximum restore limit (${MAX_RESTORE_TABS} tabs).`);
+    }
+
+    const tabsByWindow = new Map<number, SnapshotTab[]>();
+    let restorableCount = 0;
+    for (const item of snapshot.tabs) {
+      if (!isHttpUrl(item.url)) continue;
+      if (++restorableCount > MAX_RESTORE_TABS) {
+        throw new Error(`Snapshot exceeds the maximum restore limit (${MAX_RESTORE_TABS} tabs).`);
+      }
+      const list = tabsByWindow.get(item.windowId) ?? [];
+      list.push(item);
+      tabsByWindow.set(item.windowId, list);
+    }
 
     const [currentTabs, kept] = await Promise.all([chrome.tabs.query({}), loadKeptTabIds()]);
     const openUrls = new Set<string>();
@@ -710,14 +728,6 @@ export async function restoreSessionSnapshot(
     let restored = 0;
     let skippedExisting = 0;
     let windowsCreated = 0;
-
-    const tabsByWindow = new Map<number, SnapshotTab[]>();
-    for (const item of snapshot.tabs) {
-      if (!isHttpUrl(item.url)) continue;
-      const list = tabsByWindow.get(item.windowId) ?? [];
-      list.push(item);
-      tabsByWindow.set(item.windowId, list);
-    }
 
     const canCreateWindows = typeof chrome.windows?.create === "function";
     const resolvedMode: RestoreMode =

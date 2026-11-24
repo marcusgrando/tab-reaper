@@ -210,6 +210,55 @@ export function pruneUploadState(
   return { inFlight: nextInFlight, cooldownUntilByTabId: cooldownChanged ? nextCooldowns : state.cooldownUntilByTabId };
 }
 
+type CapacityDecision = { allow: true; evictRequestId?: string } | { allow: false };
+
+function decideInFlightCapacity(
+  entries: Iterable<[string, ActiveUploadEntry]>,
+  incomingTabId: number,
+): CapacityDecision {
+  let total = 0;
+  const countsByTab = new Map<number, number>();
+  const oldestByTab = new Map<number, { requestId: string; startedAt: number }>();
+
+  for (const [requestId, entry] of entries) {
+    total++;
+    countsByTab.set(entry.tabId, (countsByTab.get(entry.tabId) ?? 0) + 1);
+    const prevOldest = oldestByTab.get(entry.tabId);
+    if (
+      !prevOldest ||
+      entry.startedAt < prevOldest.startedAt ||
+      (entry.startedAt === prevOldest.startedAt && requestId < prevOldest.requestId)
+    ) {
+      oldestByTab.set(entry.tabId, { requestId, startedAt: entry.startedAt });
+    }
+  }
+
+  const incomingCount = countsByTab.get(incomingTabId) ?? 0;
+  if (incomingCount >= MAX_TRACKED_UPLOADS_PER_TAB) return { allow: false };
+  if (total < MAX_TRACKED_INFLIGHT_UPLOADS) return { allow: true };
+
+  // At the global cap, evict the oldest entry from the fullest tab that holds more than
+  // both 1 entry and the incoming tab so noisy tabs cannot starve other tabs' protection.
+  let maxCount = 0;
+  let victim: { requestId: string; startedAt: number } | null = null;
+  for (const [tabId, count] of countsByTab.entries()) {
+    if (count <= 1 || count <= incomingCount) continue;
+    const candidate = oldestByTab.get(tabId);
+    if (!candidate) continue;
+    if (
+      count > maxCount ||
+      (count === maxCount &&
+        (!victim ||
+          candidate.startedAt < victim.startedAt ||
+          (candidate.startedAt === victim.startedAt && candidate.requestId < victim.requestId)))
+    ) {
+      maxCount = count;
+      victim = candidate;
+    }
+  }
+  return victim ? { allow: true, evictRequestId: victim.requestId } : { allow: false };
+}
+
 export function recordUploadStart(
   state: UploadState,
   requestId: string,
@@ -217,14 +266,15 @@ export function recordUploadStart(
   now: number,
 ): UploadState {
   if (tabId < 0 || requestId in state.inFlight) return state;
-  const entries = Object.values(state.inFlight);
-  if (entries.length >= MAX_TRACKED_INFLIGHT_UPLOADS) return state;
-  let tabCount = 0;
-  for (const entry of entries) {
-    if (entry.tabId === tabId && ++tabCount >= MAX_TRACKED_UPLOADS_PER_TAB) return state;
+  const decision = decideInFlightCapacity(Object.entries(state.inFlight), tabId);
+  if (!decision.allow) return state;
+  const nextInFlight = { ...state.inFlight };
+  if (decision.evictRequestId) {
+    delete nextInFlight[decision.evictRequestId];
   }
+  nextInFlight[requestId] = { tabId, startedAt: now };
   return {
-    inFlight: { ...state.inFlight, [requestId]: { tabId, startedAt: now } },
+    inFlight: nextInFlight,
     cooldownUntilByTabId: state.cooldownUntilByTabId,
   };
 }
@@ -345,7 +395,7 @@ let observerEnabled: boolean | null = null;
 let pendingReconciles = 0;
 let cachedState: UploadState | null = null;
 /** Synchronous in-flight, cooldown, and pending-body indexes so concurrent checks see events immediately. */
-const knownInFlight = new Map<string, number>();
+const knownInFlight = new Map<string, ActiveUploadEntry>();
 const knownCooldownUntil = new Map<number, number>();
 const pendingBodies = new Map<string, PendingBodyEntry>();
 /** Coalesced storage mutations prevent request floods from building an unbounded storage-write backlog. */
@@ -361,8 +411,8 @@ export function hasLiveUploadProtectionForTab(tabId: number, now = Date.now()): 
     if (cooldownUntil > now) return true;
     knownCooldownUntil.delete(tabId);
   }
-  for (const activeTabId of knownInFlight.values()) {
-    if (activeTabId === tabId) return true;
+  for (const entry of knownInFlight.values()) {
+    if (entry.tabId === tabId) return true;
   }
   return false;
 }
@@ -404,7 +454,7 @@ async function loadState(now: number): Promise<UploadState> {
     const hydrated = pruneUploadState(sanitizeStoredUploadState(stored[ACTIVE_UPLOADS_STORAGE_KEY]), now);
     cachedState = hydrated;
     // Union hydrated entries without clearing so concurrent events queued before hydration survive.
-    for (const [id, entry] of Object.entries(hydrated.inFlight)) knownInFlight.set(id, entry.tabId);
+    for (const [id, entry] of Object.entries(hydrated.inFlight)) knownInFlight.set(id, entry);
     for (const [tabKey, until] of Object.entries(hydrated.cooldownUntilByTabId)) {
       const tabId = Number(tabKey);
       if (Number.isFinite(tabId) && until > now) {
@@ -425,7 +475,7 @@ async function saveState(state: UploadState, previous?: UploadState): Promise<vo
       if (!(id in state.inFlight)) knownInFlight.delete(id);
     }
   }
-  for (const [id, entry] of Object.entries(state.inFlight)) knownInFlight.set(id, entry.tabId);
+  for (const [id, entry] of Object.entries(state.inFlight)) knownInFlight.set(id, entry);
   for (const [tabKey, until] of Object.entries(state.cooldownUntilByTabId)) {
     const tabId = Number(tabKey);
     if (Number.isFinite(tabId)) {
@@ -468,11 +518,12 @@ function schedulePersist(): void {
     const now = Date.now();
     const loaded = await loadState(now);
     let next = pruneUploadState(loaded, now);
-    for (const [requestId, entry] of starts) {
-      next = recordUploadStart(next, requestId, entry.tabId, entry.startedAt);
-    }
+    // Apply finishes before starts so a tab at the per-tab cap can free a slot in the same batch.
     for (const [requestId, fin] of finishes) {
       next = recordUploadFinish(next, requestId, fin.now, fin.applyCooldown);
+    }
+    for (const [requestId, entry] of starts) {
+      next = recordUploadStart(next, requestId, entry.tabId, entry.startedAt);
     }
     if (cooldowns.length > 0) {
       let nextCooldowns = next.cooldownUntilByTabId;
@@ -492,28 +543,29 @@ function schedulePersist(): void {
   });
 }
 
-function canTrackInFlightForTab(tabId: number): boolean {
-  if (knownInFlight.size >= MAX_TRACKED_INFLIGHT_UPLOADS) return false;
-  let count = 0;
-  for (const activeTabId of knownInFlight.values()) {
-    if (activeTabId === tabId && ++count >= MAX_TRACKED_UPLOADS_PER_TAB) return false;
-  }
-  return true;
-}
-
 function trackUploadStart(requestId: string, tabId: number): void {
   pendingBodies.delete(requestId);
-  if (tabId < 0 || knownInFlight.has(requestId) || !canTrackInFlightForTab(tabId)) return;
+  if (tabId < 0 || knownInFlight.has(requestId)) return;
+  const decision = decideInFlightCapacity(knownInFlight.entries(), tabId);
+  if (!decision.allow) return;
   const now = Date.now();
-  knownInFlight.set(requestId, tabId);
+  if (decision.evictRequestId) {
+    knownInFlight.delete(decision.evictRequestId);
+    const hadPendingEvictedStart = pendingStarts.delete(decision.evictRequestId);
+    if (!hadPendingEvictedStart) {
+      pendingFinishes.set(decision.evictRequestId, { now, applyCooldown: false });
+    }
+  }
+  const entry: ActiveUploadEntry = { tabId, startedAt: now };
+  knownInFlight.set(requestId, entry);
   pendingFinishes.delete(requestId);
-  pendingStarts.set(requestId, { tabId, startedAt: now });
+  pendingStarts.set(requestId, entry);
   schedulePersist();
 }
 
 function trackUploadFinish(requestId: string, applyCooldown: boolean): void {
   if (observerEnabled === false) return;
-  const activeTabId = knownInFlight.get(requestId);
+  const activeTabId = knownInFlight.get(requestId)?.tabId;
   const hadPendingStart = pendingStarts.delete(requestId);
   if (cachedState !== null && activeTabId === undefined && !hadPendingStart) return;
   const now = Date.now();
@@ -684,7 +736,7 @@ export async function getUploadingTabIds(now = Date.now()): Promise<Set<number>>
     const pruned = pruneUploadState(current, now);
     if (pruned !== current) await saveState(pruned, current);
     const ids = getUploadingTabIdsFromState(pruned, now);
-    for (const activeTabId of knownInFlight.values()) ids.add(activeTabId);
+    for (const entry of knownInFlight.values()) ids.add(entry.tabId);
     for (const [tabId, until] of knownCooldownUntil.entries()) {
       if (until > now) ids.add(tabId);
       else knownCooldownUntil.delete(tabId);
@@ -706,8 +758,8 @@ export async function checkTabHasActiveUpload(tabId: number, now = Date.now()): 
 
 export function forgetTabUploads(tabId: number): Promise<void> {
   if (observerEnabled === false && pendingReconciles === 0) return Promise.resolve();
-  for (const [requestId, activeTabId] of knownInFlight.entries()) {
-    if (activeTabId === tabId) knownInFlight.delete(requestId);
+  for (const [requestId, entry] of knownInFlight.entries()) {
+    if (entry.tabId === tabId) knownInFlight.delete(requestId);
   }
   for (const [requestId, entry] of pendingStarts.entries()) {
     if (entry.tabId === tabId) pendingStarts.delete(requestId);
@@ -727,8 +779,8 @@ export function forgetTabUploads(tabId: number): Promise<void> {
 
 export function migrateTabUploads(oldTabId: number, newTabId: number): Promise<void> {
   if ((observerEnabled === false && pendingReconciles === 0) || oldTabId === newTabId) return Promise.resolve();
-  for (const [requestId, activeTabId] of knownInFlight.entries()) {
-    if (activeTabId === oldTabId) knownInFlight.set(requestId, newTabId);
+  for (const [requestId, entry] of knownInFlight.entries()) {
+    if (entry.tabId === oldTabId) knownInFlight.set(requestId, { ...entry, tabId: newTabId });
   }
   for (const entry of pendingStarts.values()) {
     if (entry.tabId === oldTabId) entry.tabId = newTabId;

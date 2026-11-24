@@ -800,9 +800,115 @@ test("window-cache sanitizes oversized URLs, titles, group titles, and data: fav
     expect(cachedNormal).toBeDefined();
     expect(cachedNormal.title.length).toBeLessThanOrEqual(256);
     expect(cachedNormal.favIconUrl).toBeUndefined();
-    // Tab 2 navigated to an oversized URL (> 4096 chars) so it must not remain in session cache.
-    expect(cached.tabs.find((t) => t.id === 2)).toBeUndefined();
+    // Tab 2 navigated to an oversized URL (> 4096 chars): keep only a minimal index placeholder with stripped URL/title/favicon.
+    const cachedHuge = cached.tabs.find((t) => t.id === 2);
+    expect(cachedHuge).toBeDefined();
+    expect(cachedHuge.url).toBe("");
+    expect(cachedHuge.title).toBe("");
+    expect(cachedHuge.favIconUrl).toBeUndefined();
+    expect(cachedHuge.index).toBe(1);
     expect(cached.groups?.[7]?.title?.length).toBeLessThanOrEqual(64);
+  } finally {
+    restore();
+  }
+});
+
+test("window-cache preserves tab order across middle insertions and removals of uncacheable tabs", async () => {
+  const { listeners, tabs, localData, sessionData, restore } = await worker();
+  try {
+    // Allow onCreated's background event sweep to exit cleanly without rescanning window 5.
+    Object.assign(chrome.tabs, { query: async () => [] });
+    Object.assign(chrome, {
+      permissions: { contains: async () => false },
+      system: { memory: { getInfo: async () => ({ capacity: 8192 * 1024 ** 2, availableCapacity: 4096 * 1024 ** 2 }) } },
+    });
+    Object.assign(chrome.runtime, { getPlatformInfo: async () => ({ os: "linux" }) });
+    // Initial window 5 has tabs [1@0, 2@1, 3@2].
+    // Create tab 4 in the middle (index 1) with empty url + pendingUrl (like Chrome onCreated for a new tab link).
+    const insertedTab = {
+      id: 4, index: 1, url: "", pendingUrl: "https://middle.test/", title: "",
+      windowId: 5, groupId: -1, active: false, discarded: false, audible: false, pinned: false,
+    };
+    await listeners.created!(insertedTab);
+    // Tab 4 navigates to its final URL.
+    await listeners.updated!(4, { url: "https://middle.test/" }, { ...insertedTab, url: "https://middle.test/", title: "Middle" });
+    // Create and immediately remove a chrome://newtab at index 2; remaining order must stay intact.
+    const ntp = {
+      id: 5, index: 2, url: "chrome://newtab/", title: "New Tab",
+      windowId: 5, groupId: -1, active: false, discarded: false, audible: false, pinned: false,
+    };
+    await listeners.created!(ntp);
+    await listeners.removed!(5, { isWindowClosing: false, windowId: 5 });
+
+    Object.assign(chrome.windows, { getAll: async () => [] });
+    Object.assign(chrome.tabGroups, { query: async () => [] });
+    await listeners.closed!(5);
+
+    const snapshots = localData["tabCurb.sessionSnapshots"] as SessionSnapshot[];
+    expect(snapshots[0]?.tabs.map((t) => t.url)).toEqual([
+      tabs[0]!.url,
+      "https://middle.test/",
+      tabs[1]!.url,
+      tabs[2]!.url,
+    ]);
+
+    // A window with only 1 HTTP tab + 1 uncacheable placeholder must not trigger a closed-window snapshot.
+    delete localData["tabCurb.sessionSnapshots"];
+    sessionData["tabCurb.windowTabsCache"] = {
+      "8": {
+        tabs: [
+          { ...tabs[0]!, id: 81, windowId: 8, index: 0 },
+          { id: 82, windowId: 8, index: 1, url: "", title: "", active: false, audible: false, pinned: false, discarded: false },
+        ],
+      },
+    };
+    await listeners.closed!(8);
+    expect(localData["tabCurb.sessionSnapshots"]).toBeUndefined();
+  } finally {
+    restore();
+  }
+});
+
+test("discardTabSafely fails closed on inspection timeout while automatic sweeps still discard other healthy tabs", async () => {
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
+  const discarded: number[] = [];
+  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
+  try {
+    const now = Date.now();
+    localData["tabCurb.folderSyncOptedIn"] = false;
+    localData["tabCurb.activity"] = {
+      byTabId: Object.fromEntries(tabs.map((tab) => [tab.id, { url: tab.url, lastActiveAt: now - (4 - tab.id) * 60_000 }])),
+      byUrl: {},
+    };
+    tabs[2]!.active = true;
+    Object.assign(chrome.runtime, {
+      sendNativeMessage: async () => ({ ok: true, chromeBytes: 90, systemTotalBytes: 200, systemAvailableBytes: 50 }),
+    });
+    Object.assign(chrome, {
+      permissions: { contains: async () => true },
+      scripting: {
+        executeScript: ({ target }: { target: { tabId: number; allFrames?: boolean; frameIds?: number[] } }) => {
+          // Tab 1 has a slow cross-origin iframe that stalls allFrames: true while its top frame is responsive.
+          if (target.tabId === 1 && target.allFrames) return new Promise(() => {});
+          return Promise.resolve([
+            { frameId: 0, result: { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false } },
+          ]);
+        },
+      },
+    });
+    Object.assign(chrome.tabs, {
+      query: async () => tabs,
+      get: async (id: number) => tabs[id - 1],
+      discard: async (id: number) => { tabs[id - 1]!.discarded = true; discarded.push(id); },
+    });
+
+    // Manual discard refuses tab 1 because allFrames inspection timed out.
+    expect(await message({ type: "discard_tab", tabId: 1 })).toEqual({ ok: false });
+    expect(discarded).toEqual([]);
+
+    // Automatic sweep skips timed-out tab 1 and still discards healthy candidate tab 2.
+    await listeners.alarm!({ name: "tabCurb.sweep" });
+    expect(discarded).toEqual([2]);
   } finally {
     restore();
   }

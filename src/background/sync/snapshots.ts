@@ -38,6 +38,7 @@ export const GFS_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const GFS_DAILY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_SNAPSHOT_PARTS = 256;
 export const MAX_INDEX_PARTS = 256;
+export const MAX_RESTORE_TABS = 2000;
 
 const INDEX_PART_NAME_RE = new RegExp(`^${UUID_PATTERN}-p[1-9]\\d*\\.json$`);
 
@@ -185,6 +186,21 @@ export function pruneSnapshotsGfs<T extends RetentionEntry>(
   return { keep, drop };
 }
 
+function isValidIndexEntry(entry: unknown): entry is SnapshotIndexEntry {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const e = entry as Partial<SnapshotIndexEntry>;
+  return (
+    typeof e.id === "string" &&
+    e.id.length > 0 &&
+    typeof e.relPath === "string" &&
+    typeof e.capturedAt === "number" &&
+    Number.isFinite(e.capturedAt) &&
+    typeof e.tabCount === "number" &&
+    Number.isSafeInteger(e.tabCount) &&
+    e.tabCount >= 0
+  );
+}
+
 async function readSnapshotIndex(
   syncDir: string,
   readerId: string,
@@ -195,7 +211,10 @@ async function readSnapshotIndex(
   if (result.status !== "ok") return result;
   const index = result.value;
   if (index?.deviceId !== ownerId || !Array.isArray(index.snapshots)) return { status: "error" };
-  if (index.generation === undefined && index.partCount === undefined) return result;
+  const validInitial = index.snapshots.filter(isValidIndexEntry);
+  if (index.generation === undefined && index.partCount === undefined) {
+    return { status: "ok", value: { ...index, snapshots: validInitial } };
+  }
   const { generation, partCount } = index;
   if (
     typeof generation !== "string" ||
@@ -208,14 +227,14 @@ async function readSnapshotIndex(
     return { status: "error" };
   }
 
-  const snapshots = [...index.snapshots];
+  const snapshots = [...validInitial];
   for (let i = 1; i < partCount; i++) {
     const path: string = `${base}/index-parts/${generation}-p${i}.json`;
     const part: SnapshotIndexPart | null = await syncReadJson<SnapshotIndexPart>(syncDir, readerId, path);
     if (!part || part.generation !== generation || part.partIndex !== i || !Array.isArray(part.snapshots)) {
       return { status: "error" };
     }
-    snapshots.push(...part.snapshots);
+    snapshots.push(...part.snapshots.filter(isValidIndexEntry));
   }
   return { status: "ok", value: { ...index, snapshots } };
 }
@@ -613,8 +632,8 @@ export async function listSyncedSnapshots(): Promise<SnapshotListItem[]> {
     if (index.status !== "ok") continue;
     const idx = index.value;
     for (const entry of idx.snapshots) {
+      if (!isValidIndexEntry(entry) || !isOwnedSnapshotRelPath(idx.deviceId, entry.relPath)) continue;
       if (idx.deviceId === identity.deviceId && pendingSet.has(entry.id)) continue;
-      if (typeof entry?.relPath !== "string" || !isOwnedSnapshotRelPath(idx.deviceId, entry.relPath)) continue;
       if (!isValidPartCount(entry.partCount)) continue;
       results.push({
         id: entry.id,
@@ -866,24 +885,43 @@ export async function findDeviceSnapshotEntry(
 export async function readSyncedSnapshot(relPath: string): Promise<SessionSnapshot | null> {
   const syncDir = await getReadySyncDir(false);
   if (!syncDir) return null;
+  const match = /^devices\/([^/]+)\/snapshots\/[^/]+\.json$/.exec(relPath);
+  if (!match || !isOwnedSnapshotRelPath(match[1]!, relPath)) return null;
+  const ownerId = match[1]!;
   const { deviceId } = await loadDeviceIdentity();
-  return readSnapshotFiles(syncDir, deviceId, relPath);
+  const indexRead = await readSnapshotIndex(syncDir, deviceId, ownerId);
+  if (indexRead.status !== "ok") return null;
+  const entry = indexRead.value.snapshots.find((s) => s.relPath === relPath);
+  if (!entry || entry.tabCount > MAX_RESTORE_TABS || !isValidPartCount(entry.partCount)) return null;
+  const snapshot = await readSnapshotFiles(syncDir, deviceId, relPath);
+  if (!snapshot || entry.id !== snapshot.id || entry.tabCount !== snapshot.tabCount) return null;
+  return snapshot;
 }
 
 async function readSnapshotFiles(syncDir: string, deviceId: string, relPath: string): Promise<SessionSnapshot | null> {
   const primary = await syncReadJson<SyncedSnapshotEnvelope>(syncDir, deviceId, relPath);
   if (!primary || !Array.isArray(primary.tabs)) return null;
   if (!isValidPartCount(primary.partCount)) return null;
+  if (
+    typeof primary.tabCount !== "number" ||
+    !Number.isSafeInteger(primary.tabCount) ||
+    primary.tabCount < 0 ||
+    primary.tabCount > MAX_RESTORE_TABS
+  ) {
+    return null;
+  }
 
   const partCount = typeof primary.partCount === "number" && primary.partCount > 1 ? primary.partCount : 1;
   if (partCount === 1) return primary.tabs.length === primary.tabCount ? primary : null;
 
   const allTabs = [...primary.tabs];
+  if (allTabs.length > MAX_RESTORE_TABS) return null;
   for (let i = 1; i < partCount; i++) {
     const part = await syncReadJson<SyncedSnapshotPart>(syncDir, deviceId, snapshotPartRelPath(relPath, i));
     if (!part || part.snapshotId !== primary.id || part.partIndex !== i || !Array.isArray(part.tabs)) {
       return null;
     }
+    if (allTabs.length + part.tabs.length > MAX_RESTORE_TABS) return null;
     allTabs.push(...part.tabs);
   }
   return allTabs.length === primary.tabCount ? { ...primary, tabs: allTabs } : null;

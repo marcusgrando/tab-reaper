@@ -453,4 +453,28 @@ describe("session snapshots and recovery", () => {
     expect(createdWinCount).toBeLessThanOrEqual(50);
     expect(res.restored).toBe(60);
   });
+
+  test("refuses to restore snapshots exceeding MAX_RESTORE_TABS without creating tabs or windows", async () => {
+    const tooMany = 2001;
+    storageData["tabCurb.sessionSnapshots"] = [{
+      id: "tab-bomb",
+      complete: true,
+      capturedAt: 1_700_000_000_000,
+      tabCount: tooMany,
+      windowCount: 1,
+      tabs: Array.from({ length: tooMany }, (_, i) => ({
+        url: `https://bomb-${i}.example.test/`,
+        title: `Tab ${i}`,
+        pinned: false,
+        kept: false,
+        windowId: 1,
+        index: i,
+      })),
+    }];
+
+    await expect(
+      restoreSessionSnapshot("tab-bomb", { mode: "current_window", targetWindowId: 31 }),
+    ).rejects.toThrow(/maximum restore limit/i);
+    expect(createdTabs).toHaveLength(0);
+  });
 });

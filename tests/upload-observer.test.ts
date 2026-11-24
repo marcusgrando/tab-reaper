@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ACTIVE_UPLOADS_STORAGE_KEY,
   MAX_TRACKED_INFLIGHT_UPLOADS,
   MAX_TRACKED_UPLOADS_PER_TAB,
   UPLOAD_CHUNK_COOLDOWN_MS,
   UPLOAD_INFLIGHT_MAX_AGE_MS,
   UPLOAD_MIN_BYTES,
   UPLOAD_TEXT_API_MIN_BYTES,
+  bootstrapUploadObserver,
+  checkTabHasActiveUpload,
   clearTabUploads,
   createEmptyUploadState,
   getUploadingTabIdsFromState,
@@ -13,6 +16,7 @@ import {
   isTabUploading,
   isUploadRequest,
   pruneUploadState,
+  reconcileUploadObserver,
   recordUploadFinish,
   recordUploadStart,
   replaceUploadTabId,
@@ -299,6 +303,131 @@ describe("upload state machine", () => {
       globalState = recordUploadStart(globalState, `g-${i}`, 100 + Math.floor(i / 2), t0 + i);
     }
     expect(Object.keys(globalState.inFlight)).toHaveLength(MAX_TRACKED_INFLIGHT_UPLOADS);
+  });
+
+  test("evicts oldest entry from the fullest tab at the global cap so noisy tabs cannot starve other tabs", () => {
+    let state = createEmptyUploadState();
+    const noisyTabCount = MAX_TRACKED_INFLIGHT_UPLOADS / MAX_TRACKED_UPLOADS_PER_TAB;
+    for (let tab = 1; tab <= noisyTabCount; tab++) {
+      for (let i = 0; i < MAX_TRACKED_UPLOADS_PER_TAB; i++) {
+        state = recordUploadStart(state, `t${tab}-r${i}`, tab, t0 + tab * 1000 + i);
+      }
+    }
+    expect(Object.keys(state.inFlight)).toHaveLength(MAX_TRACKED_INFLIGHT_UPLOADS);
+
+    // A 9th tab must still get protected by evicting the oldest entry from the fullest tab (tab 1).
+    state = recordUploadStart(state, "victim-legit-1", 99, t0 + 99_000);
+    expect(Object.keys(state.inFlight)).toHaveLength(MAX_TRACKED_INFLIGHT_UPLOADS);
+    expect(isTabUploading(state, 99, t0 + 99_000)).toBe(true);
+    expect(state.inFlight["t1-r0"]).toBeUndefined();
+    expect(isTabUploading(state, 1, t0 + 99_000)).toBe(true);
+
+    // When 256 distinct tabs each hold only 1 upload, a 257th tab does not strip another tab's sole protection.
+    let distinctState = createEmptyUploadState();
+    for (let tab = 1; tab <= MAX_TRACKED_INFLIGHT_UPLOADS; tab++) {
+      distinctState = recordUploadStart(distinctState, `solo-${tab}`, tab, t0 + tab);
+    }
+    const afterOverflow = recordUploadStart(distinctState, "solo-overflow", 999, t0 + 9999);
+    expect(afterOverflow).toBe(distinctState);
+  });
+
+  test("persists a replacement upload started in the same batch as a finish at the per-tab cap", async () => {
+    const previous = globalThis.chrome;
+    const sessionData: Record<string, unknown> = {};
+    const localData: Record<string, unknown> = { "tabCurb.config": { protectActiveUploads: true } };
+    let onBeforeRequest: ((details: any) => void) | undefined;
+    let onCompleted: ((details: any) => void) | undefined;
+    try {
+      Object.assign(globalThis, {
+        chrome: {
+          permissions: { contains: async () => true },
+          tabs: { query: async () => [{ id: 70 }, { id: 71 }] },
+          storage: {
+            local: {
+              get: async (key: string) => ({ [key]: localData[key] }),
+              set: async (vals: Record<string, unknown>) => Object.assign(localData, vals),
+            },
+            session: {
+              get: async (key: string) => ({ [key]: structuredClone(sessionData[key]) }),
+              set: async (vals: Record<string, unknown>) => Object.assign(sessionData, structuredClone(vals)),
+              remove: async (key: string) => { delete sessionData[key]; },
+            },
+          },
+          webRequest: {
+            onBeforeRequest: {
+              addListener: (fn: any) => { onBeforeRequest = fn; },
+              removeListener: () => { onBeforeRequest = undefined; },
+              hasListener: (fn: any) => onBeforeRequest === fn,
+            },
+            onBeforeSendHeaders: { addListener: () => {}, removeListener: () => {} },
+            onResponseStarted: { addListener: () => {}, removeListener: () => {} },
+            onCompleted: {
+              addListener: (fn: any) => { onCompleted = fn; },
+              removeListener: () => { onCompleted = undefined; },
+            },
+            onErrorOccurred: { addListener: () => {}, removeListener: () => {} },
+          },
+        },
+      });
+      bootstrapUploadObserver();
+      await reconcileUploadObserver();
+
+      // Fill tab 70 to the per-tab cap and flush to session storage.
+      for (let i = 0; i < MAX_TRACKED_UPLOADS_PER_TAB; i++) {
+        onBeforeRequest!({
+          requestId: `batch-${i}`,
+          tabId: 70,
+          method: "POST",
+          requestBody: { raw: [{ file: `/tmp/f-${i}.bin` }] },
+        });
+      }
+      expect(await checkTabHasActiveUpload(70)).toBe(true);
+
+      // In the same event turn, finish batch-0 and start batch-replacement.
+      onCompleted!({ requestId: "batch-0", tabId: 70, statusCode: 200 });
+      onBeforeRequest!({
+        requestId: "batch-replacement",
+        tabId: 70,
+        method: "POST",
+        requestBody: { raw: [{ file: "/tmp/replacement.bin" }] },
+      });
+      // Drain the queued persistence batch.
+      expect(await checkTabHasActiveUpload(70)).toBe(true);
+
+      const stored = sessionData[ACTIVE_UPLOADS_STORAGE_KEY] as { inFlight: Record<string, unknown> } | undefined;
+      expect(stored?.inFlight["batch-0"]).toBeUndefined();
+      expect(stored?.inFlight["batch-replacement"]).toBeDefined();
+
+      // Fill the remaining 7 tabs to hit the 256 global cap, then verify a 9th tab (tab 99) evicts
+      // an entry from the fullest tab and persists both the eviction and tab 99's upload.
+      const openTabs = [{ id: 70 }, { id: 71 }, { id: 72 }, { id: 73 }, { id: 74 }, { id: 75 }, { id: 76 }, { id: 77 }, { id: 99 }];
+      Object.assign(chrome.tabs, { query: async () => openTabs });
+      for (let tabId = 71; tabId <= 77; tabId++) {
+        for (let i = 0; i < MAX_TRACKED_UPLOADS_PER_TAB; i++) {
+          onBeforeRequest!({
+            requestId: `fill-${tabId}-${i}`,
+            tabId,
+            method: "POST",
+            requestBody: { raw: [{ file: `/tmp/fill-${tabId}-${i}.bin` }] },
+          });
+        }
+      }
+      expect(await checkTabHasActiveUpload(77)).toBe(true);
+      onBeforeRequest!({
+        requestId: "fair-tab-99",
+        tabId: 99,
+        method: "POST",
+        requestBody: { raw: [{ file: "/tmp/fair.bin" }] },
+      });
+      expect(await checkTabHasActiveUpload(99)).toBe(true);
+      const storedAfterFair = sessionData[ACTIVE_UPLOADS_STORAGE_KEY] as { inFlight: Record<string, unknown> } | undefined;
+      expect(Object.keys(storedAfterFair?.inFlight ?? {})).toHaveLength(MAX_TRACKED_INFLIGHT_UPLOADS);
+      expect(storedAfterFair?.inFlight["fair-tab-99"]).toBeDefined();
+    } finally {
+      localData["tabCurb.config"] = { protectActiveUploads: false };
+      await reconcileUploadObserver();
+      Object.assign(globalThis, { chrome: previous });
+    }
   });
 
   test("expires orphaned in-flight entries older than UPLOAD_INFLIGHT_MAX_AGE_MS", () => {

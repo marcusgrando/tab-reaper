@@ -17,6 +17,7 @@ export {
   GFS_DAILY_WINDOW_MS,
   GFS_HOURLY_WINDOW_MS,
   GFS_RECENT_LIMIT,
+  MAX_RESTORE_TABS,
   adoptSyncedDevice,
   deleteSyncedSnapshot,
   findDeviceSnapshotEntry,

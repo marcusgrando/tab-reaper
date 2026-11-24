@@ -1128,5 +1128,79 @@ describe("multi-device single-writer folder sync integration", () => {
       snapshots: [],
     }));
     expect((await listSyncedSnapshots()).some((s) => s.deviceId === "dev-bad-idx")).toBe(false);
+
+    // Null or malformed entries in the current device's index must be skipped without crashing listing.
+    virtualFs.set("devices/dev-mac/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-mac",
+      deviceName: "Mac",
+      updatedAt: now,
+      snapshots: [
+        null,
+        "broken",
+        { id: "missing-relpath" },
+        {
+          id: "own-valid",
+          complete: true,
+          capturedAt: now,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "manual",
+          relPath: "devices/dev-mac/snapshots/own-valid.json",
+        },
+        {
+          id: "mismatched-count",
+          complete: true,
+          capturedAt: now - 500,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "manual",
+          relPath: "devices/dev-mac/snapshots/mismatched.json",
+        },
+        {
+          id: "too-many-tabs",
+          complete: true,
+          capturedAt: now - 600,
+          tabCount: 2001,
+          windowCount: 1,
+          trigger: "manual",
+          relPath: "devices/dev-mac/snapshots/too-many.json",
+        },
+      ],
+    }));
+    virtualFs.set("devices/dev-mac/snapshots/own-valid.json", JSON.stringify({
+      id: "own-valid",
+      complete: true,
+      capturedAt: now,
+      tabCount: 1,
+      tabs: [{ url: "https://own.test/", title: "Own", pinned: false, kept: false, windowId: 1 }],
+    }));
+    virtualFs.set("devices/dev-mac/snapshots/mismatched.json", JSON.stringify({
+      id: "mismatched-count",
+      complete: true,
+      capturedAt: now - 500,
+      tabCount: 3,
+      tabs: [
+        { url: "https://a.test/", title: "A", pinned: false, kept: false, windowId: 1 },
+        { url: "https://b.test/", title: "B", pinned: false, kept: false, windowId: 1 },
+        { url: "https://c.test/", title: "C", pinned: false, kept: false, windowId: 1 },
+      ],
+    }));
+    virtualFs.set("devices/dev-mac/snapshots/too-many.json", JSON.stringify({
+      id: "too-many-tabs",
+      complete: true,
+      capturedAt: now - 600,
+      tabCount: 2001,
+      tabs: Array.from({ length: 2001 }, (_, i) => ({
+        url: `https://many-${i}.test/`, title: `T${i}`, pinned: false, kept: false, windowId: 1,
+      })),
+    }));
+
+    const ownListed = await listSyncedSnapshots();
+    expect(ownListed.map((s) => s.id)).toContain("own-valid");
+    expect(await readSyncedSnapshot("devices/dev-mac/snapshots/own-valid.json")).not.toBeNull();
+    // Mismatched index vs file tabCount and snapshots above MAX_RESTORE_TABS must be rejected.
+    expect(await readSyncedSnapshot("devices/dev-mac/snapshots/mismatched.json")).toBeNull();
+    expect(await readSyncedSnapshot("devices/dev-mac/snapshots/too-many.json")).toBeNull();
   });
 });

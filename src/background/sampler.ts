@@ -1,10 +1,11 @@
-import { HTTP_HOST_ORIGINS, isInternalUrl, withTimeout } from "../shared/config.ts";
+import { HTTP_HOST_ORIGINS, TimeoutError, isInternalUrl, withTimeout } from "../shared/config.ts";
 import type { TabSummary, TabWeightSample } from "../shared/types.ts";
 
 const SAMPLE_CACHE_KEY = "tabCurb.weightSamples";
 const SAMPLE_TTL_MS = 2 * 60 * 1000;
 /** Bound per-tab executeScript calls so one hung renderer cannot stall sweeps or the popup. */
 export const SCRIPT_INSPECT_TIMEOUT_MS = 500;
+const TOP_FRAME_FALLBACK_TIMEOUT_MS = 250;
 
 interface RawLiveState {
   hasUnsavedForm: boolean;
@@ -23,12 +24,14 @@ export interface LiveTabProtection {
   hasUnsavedForm: boolean;
   isVisible: boolean;
   hasPictureInPicture: boolean;
+  timedOut: boolean;
 }
 
 interface LiveTabInspection {
   hasUnsavedForm: boolean | undefined;
   isVisible: boolean;
   hasPictureInPicture: boolean;
+  timedOut: boolean;
 }
 
 const FALLBACK_DOM_NODE_BYTES = 2048;
@@ -237,7 +240,7 @@ export async function checkTabLiveProtection(
   timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
 ): Promise<LiveTabProtection> {
   if (!chrome.scripting?.executeScript || !(await hasHostAccessPermission())) {
-    return { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false };
+    return { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false, timedOut: false };
   }
   const live = await inspectLiveTabState(tabId, protectUnsavedForms, timeoutMs);
   let hasUnsavedForm = false;
@@ -253,6 +256,7 @@ export async function checkTabLiveProtection(
     hasUnsavedForm,
     isVisible: live.isVisible,
     hasPictureInPicture: live.hasPictureInPicture,
+    timedOut: live.timedOut,
   };
 }
 
@@ -260,37 +264,68 @@ export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
   return (await checkTabLiveProtection(tabId, true)).hasUnsavedForm;
 }
 
-async function inspectLiveTabState(
+async function executeInspectScript(
   tabId: number,
+  includeMetrics: boolean,
   protectUnsavedForms: boolean,
-  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
-): Promise<LiveTabInspection> {
+  timeoutMs: number,
+): Promise<{ results: chrome.scripting.InjectionResult[] | null; timedOut: boolean }> {
   try {
     const results = await withTimeout(
       chrome.scripting.executeScript({
         target: { tabId, allFrames: true },
         func: inspectPageInTab,
-        args: [false, protectUnsavedForms],
+        args: [includeMetrics, protectUnsavedForms],
       }),
       timeoutMs,
     );
-    const frames = results
-      .map(frame => frame?.result as Partial<RawLiveState> | undefined)
-      .filter((res): res is Partial<RawLiveState> => Boolean(res && typeof res === "object"));
-    const hasUnsavedForm = frames.some(frame => frame.hasUnsavedForm === true)
-      ? true
-      : frames.length > 0 && frames.length === results.length && frames.every(frame => frame.hasUnsavedForm === false)
-        ? false
-        : undefined;
-    return {
-      hasUnsavedForm,
-      isVisible: frames.some(frame => frame.isVisible === true),
-      hasPictureInPicture: frames.some(frame => frame.hasPictureInPicture === true),
-    };
-  } catch {
-    // Keep a previously observed draft protected until a successful recheck or cache expiry.
-    return { hasUnsavedForm: undefined, isVisible: false, hasPictureInPicture: false };
+    return { results, timedOut: false };
+  } catch (err) {
+    if (!(err instanceof TimeoutError)) {
+      return { results: null, timedOut: false };
+    }
+    // A slow third-party subframe can stall allFrames; probe the main frame separately so
+    // ranking and popup badges still reflect top-frame state while keeping timedOut true.
+    try {
+      const topResults = await withTimeout(
+        chrome.scripting.executeScript({
+          target: { tabId, frameIds: [0] },
+          func: inspectPageInTab,
+          args: [includeMetrics, protectUnsavedForms],
+        }),
+        Math.min(timeoutMs, TOP_FRAME_FALLBACK_TIMEOUT_MS),
+      );
+      return { results: topResults, timedOut: true };
+    } catch {
+      return { results: null, timedOut: true };
+    }
   }
+}
+
+async function inspectLiveTabState(
+  tabId: number,
+  protectUnsavedForms: boolean,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
+): Promise<LiveTabInspection> {
+  const { results, timedOut } = await executeInspectScript(tabId, false, protectUnsavedForms, timeoutMs);
+  if (!results) {
+    // Keep a previously observed draft protected until a successful recheck or cache expiry.
+    return { hasUnsavedForm: undefined, isVisible: false, hasPictureInPicture: false, timedOut };
+  }
+  const frames = results
+    .map(frame => frame?.result as Partial<RawLiveState> | undefined)
+    .filter((res): res is Partial<RawLiveState> => Boolean(res && typeof res === "object"));
+  const hasUnsavedForm = frames.some(frame => frame.hasUnsavedForm === true)
+    ? true
+    : !timedOut && frames.length > 0 && frames.length === results.length && frames.every(frame => frame.hasUnsavedForm === false)
+      ? false
+      : undefined;
+  return {
+    hasUnsavedForm,
+    isVisible: frames.some(frame => frame.isVisible === true),
+    hasPictureInPicture: frames.some(frame => frame.hasPictureInPicture === true),
+    timedOut,
+  };
 }
 
 async function sampleSingleTab(
@@ -300,62 +335,52 @@ async function sampleSingleTab(
   timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
 ): Promise<{ cacheable: TabWeightSample; live: Pick<LiveTabProtection, "isVisible" | "hasPictureInPicture"> } | null> {
   if (!chrome.scripting?.executeScript) return null;
-  try {
-    const results = await withTimeout(
-      chrome.scripting.executeScript({
-        target: { tabId, allFrames: true },
-        func: inspectPageInTab,
-        args: [true, protectUnsavedForms],
-      }),
-      timeoutMs,
-    );
-    const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
-    const topMetrics = topFrame?.result as Partial<RawPageMetrics> | undefined;
-    if (!topMetrics || typeof topMetrics !== "object") return null;
+  const { results } = await executeInspectScript(tabId, true, protectUnsavedForms, timeoutMs);
+  if (!results) return null;
+  const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
+  const topMetrics = topFrame?.result as Partial<RawPageMetrics> | undefined;
+  if (!topMetrics || typeof topMetrics !== "object") return null;
 
-    const frames = results
-      .map(frame => frame?.result as Partial<RawPageMetrics> | undefined)
-      .filter((res): res is Partial<RawPageMetrics> => Boolean(res && typeof res === "object"));
-    const hasUnsavedForm = frames.some(frame => Boolean(frame.hasUnsavedForm));
-    const isVisible = frames.some(frame => frame.isVisible === true);
-    const hasPictureInPicture = frames.some(frame => frame.hasPictureInPicture === true);
+  const frames = results
+    .map(frame => frame?.result as Partial<RawPageMetrics> | undefined)
+    .filter((res): res is Partial<RawPageMetrics> => Boolean(res && typeof res === "object"));
+  const hasUnsavedForm = frames.some(frame => Boolean(frame.hasUnsavedForm));
+  const isVisible = frames.some(frame => frame.isVisible === true);
+  const hasPictureInPicture = frames.some(frame => frame.hasPictureInPicture === true);
 
-    // Same-origin frames share a V8 isolate, so deduplicate JS heap per concrete origin while
-    // summing cross-origin iframes (and never double-counting opaque srcdoc/about:blank frames).
-    const heapByOrigin = new Map<string, number>();
-    let domNodes = 0;
-    let mediaNodes = 0;
-    for (const frame of frames) {
-      if (typeof frame.domNodes === "number" && frame.domNodes > 0) domNodes += frame.domNodes;
-      if (typeof frame.mediaNodes === "number" && frame.mediaNodes > 0) mediaNodes += frame.mediaNodes;
-      const heap = typeof frame.jsHeapBytes === "number" && frame.jsHeapBytes > 0 ? frame.jsHeapBytes : 0;
-      const origin = typeof frame.origin === "string" && frame.origin !== "" && frame.origin !== "null" ? frame.origin : null;
-      if (heap > 0 && origin) {
-        heapByOrigin.set(origin, Math.max(heapByOrigin.get(origin) ?? 0, heap));
-      }
+  // Same-origin frames share a V8 isolate, so deduplicate JS heap per concrete origin while
+  // summing cross-origin iframes (and never double-counting opaque srcdoc/about:blank frames).
+  const heapByOrigin = new Map<string, number>();
+  let domNodes = 0;
+  let mediaNodes = 0;
+  for (const frame of frames) {
+    if (typeof frame.domNodes === "number" && frame.domNodes > 0) domNodes += frame.domNodes;
+    if (typeof frame.mediaNodes === "number" && frame.mediaNodes > 0) mediaNodes += frame.mediaNodes;
+    const heap = typeof frame.jsHeapBytes === "number" && frame.jsHeapBytes > 0 ? frame.jsHeapBytes : 0;
+    const origin = typeof frame.origin === "string" && frame.origin !== "" && frame.origin !== "null" ? frame.origin : null;
+    if (heap > 0 && origin) {
+      heapByOrigin.set(origin, Math.max(heapByOrigin.get(origin) ?? 0, heap));
     }
-    let jsHeapBytes = 0;
-    if (heapByOrigin.size > 0) {
-      for (const bytes of heapByOrigin.values()) jsHeapBytes += bytes;
-    } else if (typeof topMetrics.jsHeapBytes === "number" && topMetrics.jsHeapBytes > 0) {
-      jsHeapBytes = topMetrics.jsHeapBytes;
-    }
-
-    const aggregated = { jsHeapBytes, domNodes, mediaNodes };
-    return {
-      cacheable: {
-        jsHeapBytes,
-        domNodes,
-        mediaNodes,
-        weightMultiplier: computeWeightMultiplier(aggregated),
-        hasUnsavedForm,
-        sampledAt: now,
-      },
-      live: { isVisible, hasPictureInPicture },
-    };
-  } catch {
-    return null;
   }
+  let jsHeapBytes = 0;
+  if (heapByOrigin.size > 0) {
+    for (const bytes of heapByOrigin.values()) jsHeapBytes += bytes;
+  } else if (typeof topMetrics.jsHeapBytes === "number" && topMetrics.jsHeapBytes > 0) {
+    jsHeapBytes = topMetrics.jsHeapBytes;
+  }
+
+  const aggregated = { jsHeapBytes, domNodes, mediaNodes };
+  return {
+    cacheable: {
+      jsHeapBytes,
+      domNodes,
+      mediaNodes,
+      weightMultiplier: computeWeightMultiplier(aggregated),
+      hasUnsavedForm,
+      sampledAt: now,
+    },
+    live: { isVisible, hasPictureInPicture },
+  };
 }
 
 async function loadSampleCache(): Promise<Record<string, TabWeightSample>> {

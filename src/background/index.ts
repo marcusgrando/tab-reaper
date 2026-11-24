@@ -231,6 +231,11 @@ async function discardTabSafely(
     return false;
   }
   const liveProtection = await checkTabLiveProtection(tabId, config.protectUnsavedForms);
+  // Fail closed when live inspection times out so a busy tab or slow third-party iframe
+  // never loses unsaved forms, Picture-in-Picture, or screen sharing.
+  if (liveProtection.timedOut) {
+    return false;
+  }
   const liveSample: TabWeightSample = {
     jsHeapBytes: 0,
     domNodes: 0,

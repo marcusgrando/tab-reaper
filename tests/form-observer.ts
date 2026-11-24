@@ -257,11 +257,18 @@ try {
   await clobberObsPage.locator("#draft").fill("edited");
   assert.deepEqual(clobberExceptions, [], "DOM clobbering must not cause uncaught exceptions in form-observer");
 
-  // Security regression: a hung background tab must not freeze get_status beyond the script timeout.
+  // Security regression: a hung background tab or slow cross-origin iframe must not freeze
+  // get_status beyond the script timeout, and live discard must fail closed to preserve drafts.
   const hungUrl = "https://hung-tab.example.test/";
-  await context.route(hungUrl, route => route.fulfill({ contentType: "text/html", body: "<h1>busy</h1>" }));
+  const hungFrameUrl = "https://hung-ad.example.test/";
+  await context.route(hungUrl, route => route.fulfill({
+    contentType: "text/html",
+    body: `<input id="draft"><iframe src="${hungFrameUrl}"></iframe>`,
+  }));
+  await context.route(hungFrameUrl, route => route.fulfill({ contentType: "text/html", body: "<div>ad</div>" }));
   const hungPage = await context.newPage();
   await hungPage.goto(hungUrl);
+  await hungPage.locator("#draft").fill("unsaved draft");
   await options.bringToFront();
 
   const httpPipTab = await status(httpPipUrl);
@@ -269,16 +276,57 @@ try {
   assert.equal(httpPipTab.canSleep, true, "DOM-clobbered http:// tab must remain sleepable");
   await expectDirty(true, "DOM clobbering #tabCurbFormObserver and form[name=elements] must not break form protection", clobberObsUrl);
 
-  hungPage.evaluate(() => { const end = Date.now() + 2500; while (Date.now() < end) {} }).catch(() => {});
+  // 1) Slow cross-origin iframe stalls allFrames while main frame stays responsive:
+  //    get_status must still see the main-frame draft quickly and discard_tab must fail closed.
+  const adFrame = hungPage.frames().find(f => f.url() === hungFrameUrl);
+  assert.ok(adFrame, "cross-origin ad iframe must be loaded");
+  const hungTabId = await options.evaluate(async (targetUrl: string) => {
+    const found = await chrome.tabs.query({ url: targetUrl });
+    return found[0]?.id;
+  }, hungUrl);
+  assert.equal(typeof hungTabId, "number", "hung tab id must be resolvable");
+  adFrame.evaluate(() => { const end = Date.now() + 2500; while (Date.now() < end) {} }).catch(() => {});
   await Bun.sleep(100);
+  const iframeStatusStart = Date.now();
+  const iframeStatus = await status(hungUrl);
+  const iframeStatusMs = Date.now() - iframeStatusStart;
+  assert.ok(iframeStatusMs < 1500, `Expected get_status to time out slow iframe quickly, took ${iframeStatusMs}ms`);
+  assert.equal(iframeStatus.hasUnsavedForm, true, "main-frame draft must stay visible when a cross-origin iframe stalls");
+  const iframeDiscard = await options.evaluate(tabId => chrome.runtime.sendMessage({ type: "discard_tab", tabId }), hungTabId);
+  assert.deepEqual(iframeDiscard, { ok: false }, "discard_tab must fail closed when a subframe stalls");
+  await Bun.sleep(2500);
+
+  // 2) Busy main thread on an unsampled tab with a fresh draft:
+  //    discard_tab must fail closed (never discarding the draft) and get_status must stay bounded.
+  const busyMainUrl = "https://busy-main.example.test/";
+  await context.route(busyMainUrl, route => route.fulfill({ contentType: "text/html", body: `<input id="draft">` }));
+  const busyMainPage = await context.newPage();
+  await busyMainPage.goto(busyMainUrl);
+  await busyMainPage.locator("#draft").fill("fresh unsampled draft");
+  await options.bringToFront();
+  const busyMainTabId = await options.evaluate(async (targetUrl: string) => {
+    const found = await chrome.tabs.query({ url: targetUrl });
+    return found[0]?.id;
+  }, busyMainUrl);
+  assert.equal(typeof busyMainTabId, "number", "busy main tab id must be resolvable");
+  busyMainPage.evaluate(() => { const end = Date.now() + 2500; while (Date.now() < end) {} }).catch(() => {});
+  await Bun.sleep(100);
+  const discardStart = Date.now();
+  const busyDiscard = await options.evaluate(tabId => chrome.runtime.sendMessage({ type: "discard_tab", tabId }), busyMainTabId);
+  const discardMs = Date.now() - discardStart;
+  assert.deepEqual(busyDiscard, { ok: false }, "discard_tab must fail closed when the main thread times out");
+  assert.ok(discardMs < 1500, `Expected discard_tab timeout to stay bounded, took ${discardMs}ms`);
   const statusStart = Date.now();
   await options.evaluate(() => chrome.runtime.sendMessage({ type: "get_status" }));
   const elapsedMs = Date.now() - statusStart;
   assert.ok(elapsedMs < 1500, `Expected get_status to time out hung tab quickly, took ${elapsedMs}ms`);
+  const stillLoaded = await options.evaluate(async (tabId: number) => !(await chrome.tabs.get(tabId)).discarded, busyMainTabId!);
+  assert.equal(stillLoaded, true, "busy tab with unsaved draft must remain loaded");
   await Bun.sleep(2500);
   await httpPipPage.close();
   await clobberObsPage.close();
   await hungPage.close();
+  await busyMainPage.close();
   await page.bringToFront();
   await page.reload();
   await waitForObserver("idle");

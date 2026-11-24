@@ -444,6 +444,37 @@ fn check_writable(dir: &Path) -> bool {
     }
 }
 
+/// Resolves the deepest existing ancestor to its canonical path and appends any
+/// not-yet-created trailing segments so symlinked forbidden destinations are
+/// rejected before `create_dir_all` can create directories inside them.
+fn projected_canonical_path(path: &Path) -> Result<PathBuf, String> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if current.exists() {
+            let mut resolved = fs::canonicalize(&current)
+                .map_err(|e| format!("cannot resolve sync folder: {e}"))?;
+            if !resolved.is_dir() {
+                return Err("sync path is not a directory".to_string());
+            }
+            for seg in missing.into_iter().rev() {
+                resolved.push(seg);
+            }
+            return Ok(resolved);
+        }
+        if fs::symlink_metadata(&current).is_ok() {
+            return Err("sync folder path contains a broken symbolic link".to_string());
+        }
+        let Some(name) = current.file_name().map(|s| s.to_os_string()) else {
+            return Err("cannot resolve sync folder ancestor".to_string());
+        };
+        missing.push(name);
+        if !current.pop() {
+            return Err("cannot resolve sync folder ancestor".to_string());
+        }
+    }
+}
+
 pub fn set_sync_folder(device_id: &str, raw_path: Option<&str>) -> Result<SyncStatus, String> {
     let dev = validate_device_id(device_id)?;
     let _lock = lock_config(true)?;
@@ -457,6 +488,8 @@ pub fn set_sync_folder(device_id: &str, raw_path: Option<&str>) -> Result<SyncSt
 
     let expanded = expand_tilde(raw)?;
     validate_sync_root_path(&expanded)?;
+    let projected = projected_canonical_path(&expanded)?;
+    validate_sync_root_path(&projected)?;
     fs::create_dir_all(&expanded).map_err(|e| format!("cannot create sync folder: {e}"))?;
     let canonical =
         fs::canonicalize(&expanded).map_err(|e| format!("cannot resolve sync folder: {e}"))?;
@@ -677,6 +710,26 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
     out
 }
 
+#[cfg(any(target_os = "linux", test))]
+const LINUX_PICKER_DIRS: &[&str] = &[
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/run/current-system/sw/bin",
+    "/run/current-system/profile/bin",
+];
+
+#[cfg(any(target_os = "linux", test))]
+fn find_linux_picker_in_dirs(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
+    for dir in dirs {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn pick_folder_dialog() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -735,10 +788,8 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "linux")]
     {
-        for bin in ["/usr/bin/zenity", "/bin/zenity"] {
-            if !Path::new(bin).is_file() {
-                continue;
-            }
+        let dirs: Vec<&Path> = LINUX_PICKER_DIRS.iter().map(Path::new).collect();
+        if let Some(bin) = find_linux_picker_in_dirs("zenity", &dirs) {
             if let Ok(out) = Command::new(bin)
                 .args([
                     "--file-selection",
@@ -758,10 +809,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 return Ok(None);
             }
         }
-        for bin in ["/usr/bin/kdialog", "/bin/kdialog"] {
-            if !Path::new(bin).is_file() {
-                continue;
-            }
+        if let Some(bin) = find_linux_picker_in_dirs("kdialog", &dirs) {
             if let Ok(out) = Command::new(bin)
                 .args([
                     "--getexistingdirectory",
@@ -1545,9 +1593,56 @@ mod tests {
             assert_eq!(cfg_mode, 0o600);
             assert_eq!(lock_mode, 0o600);
             assert_eq!(dir_mode, 0o700);
+
+            // Symlink pointing into a forbidden system path must be rejected BEFORE creating any subdirectory.
+            use std::os::unix::fs::symlink;
+            if Path::new("/dev/shm").is_dir() {
+                let shm_link = base.join("shm-link");
+                symlink("/dev/shm", &shm_link).unwrap();
+                let probe_name = format!("tabcurb-sec-probe-{}-{}", std::process::id(), temp_nanos());
+                let via_symlink = shm_link.join(&probe_name);
+                let result = set_sync_folder("dev1", Some(via_symlink.to_str().unwrap()));
+                let leaked_in_shm = Path::new("/dev/shm").join(&probe_name);
+                let created_in_shm = leaked_in_shm.exists();
+                if created_in_shm {
+                    let _ = fs::remove_dir_all(&leaked_in_shm);
+                }
+                assert!(result.is_err());
+                assert!(
+                    !created_in_shm,
+                    "set_sync_folder must not create directories under forbidden canonical targets"
+                );
+            }
         }
 
         env::remove_var("TABCURB_HOST_CONFIG");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_linux_folder_picker_from_extended_trusted_dirs() {
+        let base = env::temp_dir().join(format!(
+            "tabcurb-picker-test-{}-{}",
+            std::process::id(),
+            temp_nanos()
+        ));
+        let nix_bin = base.join("run/current-system/sw/bin");
+        let local_bin = base.join("usr/local/bin");
+        fs::create_dir_all(&nix_bin).unwrap();
+        fs::create_dir_all(&local_bin).unwrap();
+        let fake_zenity = nix_bin.join("zenity");
+        fs::write(&fake_zenity, b"#!/bin/sh\n").unwrap();
+
+        let search = [local_bin.as_path(), nix_bin.as_path()];
+        assert_eq!(
+            find_linux_picker_in_dirs("zenity", &search),
+            Some(fake_zenity)
+        );
+        assert_eq!(find_linux_picker_in_dirs("kdialog", &search), None);
+        assert!(LINUX_PICKER_DIRS.contains(&"/usr/local/bin"));
+        assert!(LINUX_PICKER_DIRS.contains(&"/run/current-system/sw/bin"));
+
         let _ = fs::remove_dir_all(&base);
     }
 }

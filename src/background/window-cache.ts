@@ -13,8 +13,22 @@ export const WINDOW_TABS_SESSION_KEY = "tabCurb.windowTabsCache";
 const WINDOW_ACTIVE_TABS_KEY = "tabCurb.windowActiveTabs";
 const MAX_CACHED_GROUP_TITLE_LEN = 64;
 
-function sanitizeCachedTab(tab: TabSummary): TabSummary | null {
-  if (!isHttpUrl(tab.url) || tab.url.length > MAX_SNAPSHOT_URL_LEN) return null;
+function sanitizeCachedTab(tab: TabSummary): TabSummary {
+  if (!isHttpUrl(tab.url) || tab.url.length > MAX_SNAPSHOT_URL_LEN) {
+    // Keep a minimal position placeholder so middle insertions, moves, and removals preserve
+    // exact tab indices without storing oversized or non-HTTP URLs, titles, or favicons.
+    return {
+      id: tab.id,
+      url: "",
+      title: "",
+      active: Boolean(tab.active),
+      audible: false,
+      pinned: Boolean(tab.pinned),
+      discarded: Boolean(tab.discarded),
+      windowId: tab.windowId,
+      index: tab.index,
+    };
+  }
   const title = tab.title.length > MAX_SNAPSHOT_TITLE_LEN ? tab.title.slice(0, MAX_SNAPSHOT_TITLE_LEN) : tab.title;
   const favIconUrl =
     isHttpUrl(tab.favIconUrl) && tab.favIconUrl.length <= MAX_SNAPSHOT_FAVICON_LEN ? tab.favIconUrl : undefined;
@@ -76,11 +90,6 @@ export async function cacheWindowTabs(tabs: TabSummary[], inserted = false): Pro
   for (const tab of tabs) {
     const known = byWindow.get(tab.windowId) ?? new Map((windows[tab.windowId]?.tabs ?? []).map((t) => [t.id, t]));
     const sanitized = sanitizeCachedTab(tab);
-    if (!sanitized) {
-      known.delete(tab.id);
-      byWindow.set(tab.windowId, known);
-      continue;
-    }
     if (inserted && sanitized.index !== undefined && !known.has(sanitized.id)) {
       for (const other of known.values()) {
         if (other.index !== undefined && other.index >= sanitized.index) other.index++;
@@ -215,10 +224,14 @@ export async function popClosedWindow(windowId: number): Promise<CachedWindow | 
   const final = windows[windowId];
   delete windows[windowId];
   const activeTabId = activeByWindow[String(windowId)];
-  if (final && typeof activeTabId === "number") {
-    for (const tab of final.tabs) {
-      tab.active = tab.id === activeTabId;
+  if (final) {
+    if (typeof activeTabId === "number") {
+      for (const tab of final.tabs) {
+        tab.active = tab.id === activeTabId;
+      }
     }
+    // Strip index-tracking placeholders so closed-window capture only sees restorable HTTP(S) tabs.
+    final.tabs = final.tabs.filter((tab) => isHttpUrl(tab.url));
   }
   if (String(windowId) in activeByWindow) {
     delete activeByWindow[String(windowId)];

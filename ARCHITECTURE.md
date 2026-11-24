@@ -157,7 +157,7 @@ Each native file request carries the directory selected at the start of the oper
   - `manifest.json` declares an explicit strict `content_security_policy.extension_pages` (`default-src 'self'`, `object-src 'none'`, `base-uri 'none'`, `form-action 'none'`, `frame-ancestors 'none'`, `connect-src https://api.github.com`), declares no `externally_connectable` and no `web_accessible_resources`, and sets `"incognito": "not_allowed"`.
   - Both `chrome.storage.local` and `chrome.storage.session` restrict access to `TRUSTED_CONTEXTS`.
   - `chrome.runtime.onMessage` enforces a fail-closed sender allowlist (matching extension ID, extension origin, top-level `popup.html` or `options.html` only) and validates message parameter types before dispatching.
-  - Per-tab `chrome.scripting.executeScript` calls run with a 500 ms timeout so a hung renderer cannot stall sweeps, discarding, or the tab palette. In-page inspection reads built-in DOM APIs via prototype descriptors and stores the form observer handle on a `Symbol` key so DOM clobbering cannot spoof protections or break observation.
+  - Per-tab `chrome.scripting.executeScript` calls run with a 500 ms timeout so a hung renderer cannot stall sweeps, discarding, or the tab palette. When `allFrames` inspection times out, ranking and the tab palette fall back to the main frame (`frameIds: [0]`), and the final pre-discard check fails closed (skipping that tab for the pass) rather than discarding an unverified page with unsaved forms, PiP, or screen sharing. In-page inspection reads built-in DOM APIs via prototype descriptors and stores the form observer handle on a `Symbol` key so DOM clobbering cannot spoof protections or break observation.
 
 ## Configuration Defaults
 
