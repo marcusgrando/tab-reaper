@@ -1619,7 +1619,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    #[cfg(unix)]
     #[test]
     fn resolves_linux_folder_picker_from_extended_trusted_dirs() {
         let base = env::temp_dir().join(format!(
