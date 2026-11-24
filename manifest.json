@@ -23,8 +23,12 @@
     "webRequest"
   ],
   "optional_host_permissions": [
-    "<all_urls>"
+    "http://*/*",
+    "https://*/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; connect-src https://api.github.com;"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

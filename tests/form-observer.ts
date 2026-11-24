@@ -80,7 +80,7 @@ try {
     do {
       const read = isolatedWorld && await debuggerSession.send("Runtime.evaluate", {
         contextId: isolatedWorld,
-        expression: "window.tabReaperFormObserver ? (window.tabReaperFormObserver.active ? 'active' : 'idle') : 'missing'",
+        expression: "(() => { const obs = globalThis[Symbol.for('tabReaper.formObserver')]; return obs ? (obs.active ? 'active' : 'idle') : 'missing'; })()",
       });
       state = read ? read.result.value : "missing";
       if (state === expected) return;
@@ -228,6 +228,61 @@ try {
   assert.deepEqual(uncaughtExceptions, [], "synchronous sendMessage failure tears down without unhandled rejections");
   await page.reload();
   await waitForObserver("idle");
+
+  // Security regressions: DOM clobbering cannot forge PiP, block observer install, or crash radio forms.
+  const httpPipUrl = "http://clobber-pip.example.test/";
+  await context.route(httpPipUrl, route => route.fulfill({
+    contentType: "text/html",
+    body: `<form id="documentPictureInPicture"><input name="window"></form>`,
+  }));
+  const httpPipPage = await context.newPage();
+  await httpPipPage.goto(httpPipUrl);
+
+  const clobberObsUrl = "https://clobber-obs.example.test/";
+  await context.route(clobberObsUrl, route => route.fulfill({
+    contentType: "text/html",
+    body: `<div id="tabReaperFormObserver"></div><input id="draft"><form><input name="elements"><input type="radio" name="grp" id="r1"><input type="radio" name="grp" id="r2"></form>`,
+  }));
+  await configure(false);
+  const clobberObsPage = await context.newPage();
+  const cdpClobber = await context.newCDPSession(clobberObsPage);
+  const clobberExceptions: string[] = [];
+  cdpClobber.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+    clobberExceptions.push(exceptionDetails.exception?.description ?? exceptionDetails.text);
+  });
+  await cdpClobber.send("Runtime.enable");
+  await clobberObsPage.goto(clobberObsUrl);
+  await configure(true);
+  await clobberObsPage.locator("#r1").click();
+  await clobberObsPage.locator("#draft").fill("edited");
+  assert.deepEqual(clobberExceptions, [], "DOM clobbering must not cause uncaught exceptions in form-observer");
+
+  // Security regression: a hung background tab must not freeze get_status beyond the script timeout.
+  const hungUrl = "https://hung-tab.example.test/";
+  await context.route(hungUrl, route => route.fulfill({ contentType: "text/html", body: "<h1>busy</h1>" }));
+  const hungPage = await context.newPage();
+  await hungPage.goto(hungUrl);
+  await options.bringToFront();
+
+  const httpPipTab = await status(httpPipUrl);
+  assert.equal(httpPipTab.protectedReason, null, "DOM clobbering on http:// must not forge PiP protection");
+  assert.equal(httpPipTab.canSleep, true, "DOM-clobbered http:// tab must remain sleepable");
+  await expectDirty(true, "DOM clobbering #tabReaperFormObserver and form[name=elements] must not break form protection", clobberObsUrl);
+
+  hungPage.evaluate(() => { const end = Date.now() + 2500; while (Date.now() < end) {} }).catch(() => {});
+  await Bun.sleep(100);
+  const statusStart = Date.now();
+  await options.evaluate(() => chrome.runtime.sendMessage({ type: "get_status" }));
+  const elapsedMs = Date.now() - statusStart;
+  assert.ok(elapsedMs < 1500, `Expected get_status to time out hung tab quickly, took ${elapsedMs}ms`);
+  await Bun.sleep(2500);
+  await httpPipPage.close();
+  await clobberObsPage.close();
+  await hungPage.close();
+  await page.bringToFront();
+  await page.reload();
+  await waitForObserver("idle");
+
   await options.evaluate(() => chrome.permissions.remove({ permissions: ["scripting"] }));
   await waitForObserver("missing");
   await page.reload();

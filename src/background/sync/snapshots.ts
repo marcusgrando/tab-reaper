@@ -36,6 +36,8 @@ const PENDING_SNAPSHOT_PRUNES_BY_DIR_KEY = "tabReaper.pendingSnapshotPrunesByDir
 export const GFS_RECENT_LIMIT = 20;
 export const GFS_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const GFS_DAILY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const MAX_SNAPSHOT_PARTS = 256;
+export const MAX_INDEX_PARTS = 256;
 
 const INDEX_PART_NAME_RE = new RegExp(`^${UUID_PATTERN}-p[1-9]\\d*\\.json$`);
 
@@ -200,7 +202,8 @@ async function readSnapshotIndex(
     !UUID_RE.test(generation) ||
     typeof partCount !== "number" ||
     !Number.isSafeInteger(partCount) ||
-    partCount < 2
+    partCount < 2 ||
+    partCount > MAX_INDEX_PARTS
   ) {
     return { status: "error" };
   }
@@ -267,9 +270,18 @@ async function publishSnapshotIndex(
   return true;
 }
 
+function isValidPartCount(partCount: unknown, maxParts = MAX_SNAPSHOT_PARTS): boolean {
+  if (partCount === undefined) return true;
+  return typeof partCount === "number" && Number.isSafeInteger(partCount) && partCount >= 1 && partCount <= maxParts;
+}
+
 function snapshotEntryPaths(entry: { relPath: string; partCount?: number }): string[] {
+  const count =
+    typeof entry.partCount === "number" && Number.isSafeInteger(entry.partCount) && entry.partCount > 1
+      ? Math.min(entry.partCount, MAX_SNAPSHOT_PARTS)
+      : 1;
   const paths = [];
-  for (let i = 1; i < (entry.partCount ?? 1); i++) paths.push(snapshotPartRelPath(entry.relPath, i));
+  for (let i = 1; i < count; i++) paths.push(snapshotPartRelPath(entry.relPath, i));
   paths.push(entry.relPath);
   return paths;
 }
@@ -538,7 +550,7 @@ async function listSnapshotPaths(syncDir: string, deviceId: string): Promise<Set
 
 function hasListedFiles(entry: SnapshotIndexEntry, paths: Set<string>): boolean {
   const count = entry.partCount ?? 1;
-  return Number.isSafeInteger(count) && count >= 1 && count <= paths.size &&
+  return Number.isSafeInteger(count) && count >= 1 && count <= MAX_SNAPSHOT_PARTS && count <= paths.size &&
     snapshotEntryPaths(entry).every(path => paths.has(path));
 }
 
@@ -602,6 +614,8 @@ export async function listSyncedSnapshots(): Promise<SnapshotListItem[]> {
     const idx = index.value;
     for (const entry of idx.snapshots) {
       if (idx.deviceId === identity.deviceId && pendingSet.has(entry.id)) continue;
+      if (typeof entry?.relPath !== "string" || !isOwnedSnapshotRelPath(idx.deviceId, entry.relPath)) continue;
+      if (!isValidPartCount(entry.partCount)) continue;
       results.push({
         id: entry.id,
         capturedAt: entry.capturedAt,
@@ -859,6 +873,7 @@ export async function readSyncedSnapshot(relPath: string): Promise<SessionSnapsh
 async function readSnapshotFiles(syncDir: string, deviceId: string, relPath: string): Promise<SessionSnapshot | null> {
   const primary = await syncReadJson<SyncedSnapshotEnvelope>(syncDir, deviceId, relPath);
   if (!primary || !Array.isArray(primary.tabs)) return null;
+  if (!isValidPartCount(primary.partCount)) return null;
 
   const partCount = typeof primary.partCount === "number" && primary.partCount > 1 ? primary.partCount : 1;
   if (partCount === 1) return primary.tabs.length === primary.tabCount ? primary : null;

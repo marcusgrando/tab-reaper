@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { SessionSnapshot } from "../src/shared/types.ts";
 
 async function worker() {
-  type Listener = (...args: any[]) => Promise<void>;
+  type Listener = (...args: any[]) => any;
   const listeners: Record<string, Listener> = {};
   const event = (name: string) => ({ addListener(fn: Listener) { listeners[name] = fn; } });
   const area = (data: Record<string, unknown>) => ({
@@ -16,20 +16,44 @@ async function worker() {
   }));
   const localData: Record<string, unknown> = { "tabReaper.folderSyncOptedIn": true };
   const sessionData: Record<string, unknown> = { "tabReaper.windowTabsCache": { "5": { tabs } } };
-  const session = area(sessionData);
+  const accessLevels: Array<{ area: string; accessLevel: string }> = [];
+  const session = {
+    ...area(sessionData),
+    setAccessLevel: async (opts: { accessLevel: string }) => { accessLevels.push({ area: "session", ...opts }); },
+  };
+  const extId = "testextensionidabcdefghijklmnop";
+  const trustedSender = {
+    id: extId,
+    origin: `chrome-extension://${extId}`,
+    url: `chrome-extension://${extId}/popup.html`,
+    frameId: 0,
+  };
   const previous = globalThis.chrome;
   Object.assign(globalThis, { chrome: {
-    storage: { local: { ...area(localData), setAccessLevel: async () => {} }, session, onChanged: event("storageChanged") },
+    storage: {
+      local: {
+        ...area(localData),
+        setAccessLevel: async (opts: { accessLevel: string }) => { accessLevels.push({ area: "local", ...opts }); },
+      },
+      session,
+      onChanged: event("storageChanged"),
+    },
     permissions: { onAdded: event("permissionAdded"), onRemoved: event("permissionRemoved") },
     tabs: { onMoved: event("moved"), onDetached: event("detached"), onAttached: event("attached"), onUpdated: event("updated"), onRemoved: event("removed"), onCreated: event("created"), onActivated: event("activated") },
     tabGroups: { onUpdated: event("groupChanged"), query: async () => [{ id: 7, title: "Research", color: "green", collapsed: true, windowId: 5 }] },
     windows: { onBoundsChanged: event("bounds"), onRemoved: event("closed"), getAll: async () => [{ id: 5, state: "maximized", focused: true }] },
-    runtime: { onInstalled: event("installed"), onStartup: event("startup"), onMessage: event("message") },
+    runtime: {
+      id: extId,
+      getURL: (p: string) => `chrome-extension://${extId}/${p.replace(/^\//, "")}`,
+      onInstalled: event("installed"),
+      onStartup: event("startup"),
+      onMessage: event("message"),
+    },
     alarms: { get: async () => ({}), create: async () => {}, onAlarm: event("alarm") },
   } });
   // Each import registers fresh worker listeners against this test's Chrome API.
   await import(`../src/background/index.ts?instance=${crypto.randomUUID()}`);
-  return { listeners, tabs, localData, sessionData, restore: () => Object.assign(globalThis, { chrome: previous }) };
+  return { listeners, tabs, localData, sessionData, accessLevels, trustedSender, restore: () => Object.assign(globalThis, { chrome: previous }) };
 }
 
 test("a cold worker captures the last navigation when its window closes", async () => {
@@ -147,10 +171,10 @@ test("without the Local Companion, sleeping tabs stops when it frees no memory u
 });
 
 test("an idle candidate used during form inspection stays open", async () => {
-  const { listeners, tabs, localData, restore } = await worker();
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
   const discarded: number[] = [];
   const page = tabs[0]!;
-  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, {}, resolve));
+  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
   try {
     localData["tabReaper.folderSyncOptedIn"] = false;
     for (const tab of tabs.slice(1)) tab.pinned = true;
@@ -175,8 +199,8 @@ test("an idle candidate used during form inspection stays open", async () => {
 });
 
 test("Keep acknowledged during restore survives the merge of restored tab IDs", async () => {
-  const { listeners, tabs, localData, restore } = await worker();
-  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, {}, resolve));
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
+  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
   const key = "tabReaper.keptTabIds";
   try {
     localData["tabReaper.folderSyncOptedIn"] = false;
@@ -261,7 +285,7 @@ test("granting page access attaches to already loaded tabs and revocation stops 
       registerContentScripts: async () => { registered = true; },
       executeScript: async ({ target }: { target: { tabId: number } }) => attached.push(target.tabId),
     } });
-    await listeners.permissionAdded!({ permissions: ["scripting"], origins: ["<all_urls>"] });
+    await listeners.permissionAdded!({ permissions: ["scripting"], origins: ["http://*/*", "https://*/*"] });
     expect(registered).toBe(true);
     expect(attached).toEqual([1]);
     access = false;
@@ -273,7 +297,7 @@ test("granting page access attaches to already loaded tabs and revocation stops 
 });
 
 test("an upload starting while tabs.get is pending prevents discard", async () => {
-  const { listeners, tabs, localData, restore } = await worker();
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
   try {
     localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
     let onBeforeRequest: ((details: chrome.webRequest.WebRequestBodyDetails) => void) | undefined;
@@ -304,11 +328,11 @@ test("an upload starting while tabs.get is pending prevents discard", async () =
       },
       discard: async (id: number) => { discarded.push(id); return { ...tabs[id - 1], discarded: true }; },
     });
-    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["http://*/*", "https://*/*"] });
     expect(onBeforeRequest).toBeDefined();
 
     const response = new Promise<{ ok?: boolean }>((resolve) => {
-      listeners.message!({ type: "discard_tab", tabId: 2 }, {}, resolve);
+      listeners.message!({ type: "discard_tab", tabId: 2 }, trustedSender, resolve);
     });
     await getReached;
     // Start an upload on tab 2 while tabs.get is still pending inside discardTabSafely.
@@ -334,7 +358,7 @@ test("an upload starting while tabs.get is pending prevents discard", async () =
 });
 
 test("an upload starting while expired cooldown cleanup is awaiting prevents discard", async () => {
-  const { listeners, tabs, localData, sessionData, restore } = await worker();
+  const { listeners, tabs, localData, sessionData, trustedSender, restore } = await worker();
   try {
     localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
     sessionData["tabReaper.activeUploads"] = {
@@ -362,7 +386,7 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
       get: async (id: number) => tabs[id - 1],
       discard: async (id: number) => { discarded.push(id); return { ...tabs[id - 1], discarded: true }; },
     });
-    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["http://*/*", "https://*/*"] });
 
     // Seed an expired cooldown in the hydrated state, then pause session.remove during checkTabHasActiveUpload.
     sessionData["tabReaper.activeUploads"] = {
@@ -430,7 +454,7 @@ test("an upload starting while expired cooldown cleanup is awaiting prevents dis
       fakeNow = base + 30_000;
       interceptRemove = true;
       const response = new Promise<{ ok?: boolean }>((resolve) => {
-        listeners.message!({ type: "discard_tab", tabId: 2 }, {}, resolve);
+        listeners.message!({ type: "discard_tab", tabId: 2 }, trustedSender, resolve);
       });
       await removeReached;
       // Start AND complete a brand-new chunk on tab 2 while session.remove is paused.
@@ -525,7 +549,7 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
     // Enable upload protection and start an upload on tab 1 before memory reading completes.
     webRequestPerm = true;
     localData["tabReaper.config"] = { protectActiveUploads: true, protectUnsavedForms: false };
-    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["<all_urls>"] });
+    await listeners.permissionAdded!({ permissions: ["webRequest"], origins: ["http://*/*", "https://*/*"] });
     onBeforeRequest!({
       requestId: "mid-sweep-1",
       tabId: 1,
@@ -550,9 +574,9 @@ test("enabling upload protection while a sweep is awaiting memory prevents disca
 });
 
 test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs across sweeps even with form protection off", async () => {
-  const { listeners, tabs, localData, restore } = await worker();
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
   const discarded: number[] = [];
-  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, {}, resolve));
+  const message = (body: unknown) => new Promise(resolve => listeners.message!(body, trustedSender, resolve));
   try {
     const now = Date.now();
     localData["tabReaper.folderSyncOptedIn"] = false;
@@ -619,10 +643,10 @@ test("protects screen-shared, picture-in-picture, and non-auto-discardable tabs 
 });
 
 test("size-band eviction and status use real OS renderer RAM via webNavigation without page access", async () => {
-  const { listeners, tabs, localData, restore } = await worker();
+  const { listeners, tabs, localData, trustedSender, restore } = await worker();
   const MiB = 1024 ** 2;
   const discarded: number[] = [];
-  const message = (body: unknown) => new Promise<any>(resolve => listeners.message!(body, {}, resolve));
+  const message = (body: unknown) => new Promise<any>(resolve => listeners.message!(body, trustedSender, resolve));
   try {
     const now = Date.now();
     localData["tabReaper.folderSyncOptedIn"] = false;
@@ -684,6 +708,101 @@ test("size-band eviction and status use real OS renderer RAM via webNavigation w
     // before Tab 2 whose shared renderer is pinned alive by active Tab 1.
     await listeners.alarm!({ name: "tabReaper.sweep" });
     expect(discarded).toEqual([4, 3]);
+  } finally {
+    restore();
+  }
+});
+
+test("onMessage enforces fail-closed UI sender allowlist, validates payloads, and restricts both storage areas", async () => {
+  const { listeners, accessLevels, trustedSender, restore } = await worker();
+  try {
+    expect(accessLevels).toEqual([
+      { area: "local", accessLevel: "TRUSTED_CONTEXTS" },
+      { area: "session", accessLevel: "TRUSTED_CONTEXTS" },
+    ]);
+
+    const sendRaw = (body: unknown, sender: unknown) => {
+      let replied = false;
+      let reply: unknown;
+      const keepOpen = listeners.message!(body, sender, (res: unknown) => {
+        replied = true;
+        reply = res;
+      });
+      return { keepOpen, replied, reply };
+    };
+
+    // Fail-closed: missing sender.tab with missing/foreign URL or origin must be rejected.
+    expect(sendRaw({ type: "clear_snapshots" }, {}).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { id: trustedSender.id }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { id: trustedSender.id, origin: "https://evil.test", url: "https://evil.test/" }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { ...trustedSender, id: "otherextensionidabcdefghijklmnop" }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { ...trustedSender, origin: "https://evil.test" }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { ...trustedSender, frameId: 1 }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { ...trustedSender, url: `chrome-extension://${trustedSender.id}/background.js` }).keepOpen).toBe(false);
+    expect(sendRaw({ type: "clear_snapshots" }, { ...trustedSender, url: `chrome-extension://${trustedSender.id}/popup.html/evil` }).keepOpen).toBe(false);
+    expect(sendRaw(null, trustedSender).keepOpen).toBe(false);
+    expect(sendRaw([], trustedSender).keepOpen).toBe(false);
+
+    // Valid options.html with query string + hash and popup.html are accepted.
+    const optionsSender = {
+      ...trustedSender,
+      tab: { id: 99 },
+      url: `chrome-extension://${trustedSender.id}/options.html?setup=1#protections`,
+    };
+    const clearRes = await new Promise((resolve) => listeners.message!({ type: "clear_snapshots" }, optionsSender, resolve));
+    expect(clearRes).toEqual({ ok: true });
+
+    // Invalid payload fields from a trusted sender fail cleanly instead of forwarding bad types.
+    const badTabId = await new Promise((resolve) => listeners.message!({ type: "close_tab", tabId: "1" }, trustedSender, resolve));
+    expect(badTabId).toMatchObject({ ok: false });
+    const badConfig = await new Promise((resolve) => listeners.message!({ type: "save_config", config: null }, trustedSender, resolve));
+    expect(badConfig).toMatchObject({ ok: false });
+
+    // Content script form-access probe requires matching extension id.
+    expect(sendRaw("tab-reaper-form-access", { id: "wrong-id" }).keepOpen).toBe(false);
+    Object.assign(chrome.permissions, { contains: async () => true });
+    const accessOk = await new Promise((resolve) =>
+      listeners.message!("tab-reaper-form-access", { id: trustedSender.id, tab: { id: 1 }, url: "https://site.test/" }, resolve),
+    );
+    expect(accessOk).toBe(true);
+  } finally {
+    restore();
+  }
+});
+
+test("window-cache sanitizes oversized URLs, titles, group titles, and data: favicons", async () => {
+  const { listeners, sessionData, restore } = await worker();
+  try {
+    const bigDataFavicon = "data:image/svg+xml;base64," + "A".repeat(10_000);
+    const hugeTitle = "T".repeat(1000);
+    const hugeGroupTitle = "G".repeat(200);
+    const hugeUrl = `https://huge.test/#${"x".repeat(5000)}`;
+    const normalTab = {
+      id: 1, index: 0, url: "https://clean.test/page", title: hugeTitle,
+      favIconUrl: bigDataFavicon, windowId: 5, groupId: 7,
+      active: true, discarded: false, audible: false, pinned: false,
+    };
+    const hugeUrlTab = {
+      id: 2, index: 1, url: hugeUrl, title: "Mega URL",
+      favIconUrl: "https://clean.test/icon.png", windowId: 5, groupId: -1,
+      active: false, discarded: false, audible: false, pinned: false,
+    };
+
+    Object.assign(chrome.tabGroups, {
+      query: async () => [{ id: 7, title: hugeGroupTitle, color: "blue", collapsed: false, windowId: 5 }],
+    });
+    await listeners.updated!(1, { url: normalTab.url }, normalTab);
+    await listeners.updated!(2, { url: hugeUrlTab.url }, hugeUrlTab);
+    await listeners.groupChanged!({ windowId: 5, id: 7, title: hugeGroupTitle, color: "blue", collapsed: false });
+
+    const cached = (sessionData["tabReaper.windowTabsCache"] as Record<string, { tabs: any[]; groups?: Record<number, { title?: string }> }>)["5"]!;
+    const cachedNormal = cached.tabs.find((t) => t.id === 1);
+    expect(cachedNormal).toBeDefined();
+    expect(cachedNormal.title.length).toBeLessThanOrEqual(256);
+    expect(cachedNormal.favIconUrl).toBeUndefined();
+    // Tab 2 navigated to an oversized URL (> 4096 chars) so it must not remain in session cache.
+    expect(cached.tabs.find((t) => t.id === 2)).toBeUndefined();
+    expect(cached.groups?.[7]?.title?.length).toBeLessThanOrEqual(64);
   } finally {
     restore();
   }

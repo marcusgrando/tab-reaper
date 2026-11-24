@@ -201,16 +201,39 @@ fn read_host_config() -> Result<HostConfig, String> {
     }
 }
 
+fn ensure_private_dir_all(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn open_private_file(path: &Path, options: &mut OpenOptions) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
+}
+
 // Lock a stable sibling because replacing host.json also replaces its inode.
 fn lock_config(exclusive: bool) -> Result<fs::File, String> {
     let path = host_config_path()?.with_extension("lock");
-    fs::create_dir_all(path.parent().ok_or("missing config parent")?).map_err(|e| e.to_string())?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    ensure_private_dir_all(path.parent().ok_or("missing config parent")?)
+        .map_err(|e| e.to_string())?;
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(false);
+    let file = open_private_file(&path, &mut opts)
         .map_err(|e| format!("open host config lock: {e}"))?;
     if exclusive {
         file.lock()
@@ -282,17 +305,16 @@ pub fn save_host_config(cfg: &HostConfig) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Err("host config has no parent dir".to_string());
     };
-    fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
+    ensure_private_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
     let tmp = parent.join(format!(
         ".tmp.{}.{}.host.json",
         std::process::id(),
         temp_nanos()
     ));
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|e| format!("create host config tmp: {e}"))?;
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    let mut f =
+        open_private_file(&tmp, &mut opts).map_err(|e| format!("create host config tmp: {e}"))?;
     if let Err(err) = f.write_all(json.as_bytes()).and_then(|_| f.sync_all()) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("write host config: {err}"));
@@ -310,15 +332,102 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() {
         return Err("path is empty".to_string());
     }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        let home = home_dir().ok_or_else(|| "cannot expand ~: HOME not set".to_string())?;
-        return Ok(home.join(rest));
+    if trimmed.contains('\0') {
+        return Err("path contains disallowed characters".to_string());
     }
-    let path = PathBuf::from(trimmed);
-    if !path.is_absolute() {
-        return Err("sync folder path must be absolute".to_string());
+    let path = if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = home_dir().ok_or_else(|| "cannot expand ~: HOME not set".to_string())?;
+        home.join(rest)
+    } else {
+        let p = PathBuf::from(trimmed);
+        if !p.is_absolute() {
+            return Err("sync folder path must be absolute".to_string());
+        }
+        p
+    };
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err("parent directory traversal is not allowed in sync folder path".to_string());
     }
     Ok(path)
+}
+
+fn validate_sync_root_path(path: &Path) -> Result<(), String> {
+    if path.parent().is_none() {
+        return Err("cannot use filesystem root as sync folder".to_string());
+    }
+    if let Some(home) = home_dir() {
+        if path == home || fs::canonicalize(&home).ok().as_deref() == Some(path) {
+            return Err(
+                "cannot use home directory directly as sync folder; choose a subfolder".to_string(),
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        const FORBIDDEN_EXACT: &[&str] = &[
+            "/tmp",
+            "/private/tmp",
+            "/var",
+            "/private/var",
+            "/home",
+            "/Users",
+        ];
+        const FORBIDDEN_PREFIXES: &[&str] = &[
+            "/etc",
+            "/private/etc",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/boot",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/System",
+        ];
+        if FORBIDDEN_EXACT.iter().any(|p| path == Path::new(p))
+            || FORBIDDEN_PREFIXES.iter().any(|p| path.starts_with(p))
+        {
+            return Err("cannot use a system or shared root directory as sync folder".to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let norm = path
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        for var in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(val) = env::var_os(var) {
+                let prefix = val
+                    .to_string_lossy()
+                    .trim_end_matches('\\')
+                    .to_ascii_lowercase();
+                if !prefix.is_empty()
+                    && (norm == prefix || norm.starts_with(&format!(r"{prefix}\")))
+                {
+                    return Err("cannot use a system directory as sync folder".to_string());
+                }
+            }
+        }
+        for var in ["APPDATA", "LOCALAPPDATA", "TEMP", "TMP"] {
+            if let Some(val) = env::var_os(var) {
+                let exact = val
+                    .to_string_lossy()
+                    .trim_end_matches('\\')
+                    .to_ascii_lowercase();
+                if !exact.is_empty() && norm == exact {
+                    return Err(
+                        "cannot use this directory directly as sync folder; choose a subfolder"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_writable(dir: &Path) -> bool {
@@ -347,9 +456,11 @@ pub fn set_sync_folder(device_id: &str, raw_path: Option<&str>) -> Result<SyncSt
     };
 
     let expanded = expand_tilde(raw)?;
+    validate_sync_root_path(&expanded)?;
     fs::create_dir_all(&expanded).map_err(|e| format!("cannot create sync folder: {e}"))?;
     let canonical =
         fs::canonicalize(&expanded).map_err(|e| format!("cannot resolve sync folder: {e}"))?;
+    validate_sync_root_path(&canonical)?;
     if !canonical.is_dir() {
         return Err("sync path is not a directory".to_string());
     }
@@ -569,7 +680,7 @@ pub fn detect_cloud_folders() -> Vec<FolderCandidate> {
 pub fn pick_folder_dialog() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
-        let out = Command::new("osascript")
+        let out = Command::new("/usr/bin/osascript")
             .args([
                 "-e",
                 "POSIX path of (choose folder with prompt \"Choose Tab Reaper sync folder\")",
@@ -604,7 +715,11 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   Write-Output $dlg.SelectedPath
 }
 "#;
-        let out = Command::new("powershell")
+        let powershell = env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let out = Command::new(powershell)
             .args(["-NoProfile", "-STA", "-Command", script])
             .output()
             .map_err(|e| format!("failed to launch folder picker: {e}"))?;
@@ -620,41 +735,51 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(out) = Command::new("zenity")
-            .args([
-                "--file-selection",
-                "--directory",
-                "--title=Choose Tab Reaper sync folder",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return Ok(if picked.is_empty() {
-                    None
-                } else {
-                    Some(picked)
-                });
+        for bin in ["/usr/bin/zenity", "/bin/zenity"] {
+            if !Path::new(bin).is_file() {
+                continue;
             }
-            return Ok(None);
+            if let Ok(out) = Command::new(bin)
+                .args([
+                    "--file-selection",
+                    "--directory",
+                    "--title=Choose Tab Reaper sync folder",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    return Ok(if picked.is_empty() {
+                        None
+                    } else {
+                        Some(picked)
+                    });
+                }
+                return Ok(None);
+            }
         }
-        if let Ok(out) = Command::new("kdialog")
-            .args([
-                "--getexistingdirectory",
-                "--title",
-                "Choose Tab Reaper sync folder",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return Ok(if picked.is_empty() {
-                    None
-                } else {
-                    Some(picked)
-                });
+        for bin in ["/usr/bin/kdialog", "/bin/kdialog"] {
+            if !Path::new(bin).is_file() {
+                continue;
             }
-            return Ok(None);
+            if let Ok(out) = Command::new(bin)
+                .args([
+                    "--getexistingdirectory",
+                    "--title",
+                    "Choose Tab Reaper sync folder",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    return Ok(if picked.is_empty() {
+                        None
+                    } else {
+                        Some(picked)
+                    });
+                }
+                return Ok(None);
+            }
         }
         Err(
             "No supported folder picker (zenity/kdialog) found; enter a folder path manually."
@@ -1369,6 +1494,57 @@ mod tests {
                 serde_json::from_str(&crate::handle_request(&sym_del.to_string())).unwrap();
             assert_eq!(reply["ok"], false);
             assert!(outside.join("keep.txt").exists());
+        }
+
+        env::remove_var("TAB_REAPER_HOST_CONFIG");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rejects_parent_traversal_and_sensitive_directories_as_sync_folder() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = env::temp_dir().join(format!(
+            "tab-reaper-sync-root-sec-{}-{}",
+            std::process::id(),
+            temp_nanos()
+        ));
+        let cfg_file = base.join("config").join("host.json");
+        env::set_var("TAB_REAPER_HOST_CONFIG", &cfg_file);
+
+        // Parent directory traversal must be rejected before creating anything on disk.
+        let escaped = base.join("sub").join("..").join("escaped");
+        assert!(set_sync_folder("dev1", Some(escaped.to_str().unwrap())).is_err());
+        assert!(!base.join("sub").exists());
+
+        // Home directory itself must be rejected.
+        if let Some(home) = home_dir() {
+            assert!(set_sync_folder("dev1", Some(home.to_str().unwrap())).is_err());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(set_sync_folder("dev1", Some("/")).is_err());
+            assert!(set_sync_folder("dev1", Some("/tmp")).is_err());
+            assert!(set_sync_folder("dev1", Some("/etc/tab-reaper")).is_err());
+
+            // Valid dedicated subfolder succeeds and persists host.json/host.lock with mode 0600.
+            let ok_dir = base.join("TabReaper");
+            assert!(set_sync_folder("dev1", Some(ok_dir.to_str().unwrap())).is_ok());
+            let cfg_mode = fs::metadata(&cfg_file).unwrap().permissions().mode() & 0o777;
+            let lock_mode = fs::metadata(cfg_file.with_extension("lock"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            let dir_mode = fs::metadata(cfg_file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(cfg_mode, 0o600);
+            assert_eq!(lock_mode, 0o600);
+            assert_eq!(dir_mode, 0o700);
         }
 
         env::remove_var("TAB_REAPER_HOST_CONFIG");

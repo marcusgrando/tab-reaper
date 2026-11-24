@@ -1,8 +1,9 @@
-import { createAsyncQueue, isInternalUrl, loadConfig } from "../shared/config.ts";
+import { HTTP_HOST_ORIGINS, createAsyncQueue, isInternalUrl, loadConfig, withTimeout } from "../shared/config.ts";
 import { hasHostAccessPermission } from "./sampler.ts";
 
 const scriptId = "tab-reaper-form-observer";
 const scriptFile = "form-observer.js";
+const TAB_OP_TIMEOUT_MS = 1000;
 const enqueue = createAsyncQueue();
 
 export function reconcileFormObserver(refreshOpenTabs = false): Promise<void> {
@@ -16,7 +17,7 @@ export function reconcileFormObserver(refreshOpenTabs = false): Promise<void> {
     if (enabled && canRegister) {
       if (!registered) {
         await scripting.registerContentScripts([{
-          id: scriptId, js: [scriptFile], matches: ["<all_urls>"], allFrames: true,
+          id: scriptId, js: [scriptFile], matches: HTTP_HOST_ORIGINS, allFrames: true,
           runAt: "document_start", matchOriginAsFallback: true,
         }]);
       }
@@ -30,12 +31,15 @@ export function reconcileFormObserver(refreshOpenTabs = false): Promise<void> {
       if (tab.id === undefined || tab.discarded || tab.incognito || isInternalUrl(tab.url)) return;
       try {
         if (enabled && canRegister) {
-          await scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: [scriptFile], injectImmediately: true });
+          await withTimeout(
+            scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: [scriptFile], injectImmediately: true }),
+            TAB_OP_TIMEOUT_MS,
+          );
         } else {
-          await chrome.tabs.sendMessage(tab.id, "tab-reaper-stop-form-observer");
+          await withTimeout(chrome.tabs.sendMessage(tab.id, "tab-reaper-stop-form-observer"), TAB_OP_TIMEOUT_MS);
         }
       } catch {
-        // Restricted documents, closed tabs and frames without an observer are expected.
+        // Restricted documents, closed tabs, hung renderers, and frames without an observer are expected.
       }
     }));
   }).catch(error => {

@@ -1,8 +1,10 @@
-import { isInternalUrl } from "../shared/config.ts";
+import { HTTP_HOST_ORIGINS, isInternalUrl, withTimeout } from "../shared/config.ts";
 import type { TabSummary, TabWeightSample } from "../shared/types.ts";
 
 const SAMPLE_CACHE_KEY = "tabReaper.weightSamples";
 const SAMPLE_TTL_MS = 2 * 60 * 1000;
+/** Bound per-tab executeScript calls so one hung renderer cannot stall sweeps or the popup. */
+export const SCRIPT_INSPECT_TIMEOUT_MS = 500;
 
 interface RawLiveState {
   hasUnsavedForm: boolean;
@@ -65,7 +67,7 @@ export async function hasHostAccessPermission(): Promise<boolean> {
   try {
     return await chrome.permissions.contains({
       permissions: ["scripting"],
-      origins: ["<all_urls>"],
+      origins: HTTP_HOST_ORIGINS,
     });
   } catch {
     return false;
@@ -77,6 +79,7 @@ export async function sampleTabWeights(
   now = Date.now(),
   protectUnsavedForms = true,
   refreshFormState = true,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
 ): Promise<Map<number, TabWeightSample>> {
   const weights = new Map<number, TabWeightSample>();
   if (tabs.length === 0) return weights;
@@ -95,7 +98,7 @@ export async function sampleTabWeights(
     if (cached && now - cached.sampledAt < SAMPLE_TTL_MS) {
       cacheable = cached;
       if (refreshFormState) {
-        const inspected = await inspectLiveTabState(tab.id, protectUnsavedForms);
+        const inspected = await inspectLiveTabState(tab.id, protectUnsavedForms, timeoutMs);
         live = { isVisible: inspected.isVisible, hasPictureInPicture: inspected.hasPictureInPicture };
         const dirty = protectUnsavedForms ? inspected.hasUnsavedForm : false;
         if (dirty !== undefined && dirty !== cached.hasUnsavedForm) {
@@ -103,7 +106,7 @@ export async function sampleTabWeights(
         }
       }
     } else {
-      const sampled = await sampleSingleTab(tab.id, now, protectUnsavedForms);
+      const sampled = await sampleSingleTab(tab.id, now, protectUnsavedForms, timeoutMs);
       cacheable = sampled?.cacheable ?? null;
       live = sampled?.live;
     }
@@ -141,13 +144,14 @@ export async function sampleTabFormsOnly(
   tabs: TabSummary[],
   now = Date.now(),
   protectUnsavedForms = true,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
 ): Promise<Map<number, TabWeightSample>> {
   const results = new Map<number, TabWeightSample>();
   if (tabs.length === 0 || !(await hasHostAccessPermission())) return results;
   await Promise.all(
     tabs.map(async (tab) => {
       if (tab.discarded || isInternalUrl(tab.url)) return;
-      const live = await inspectLiveTabState(tab.id, protectUnsavedForms);
+      const live = await inspectLiveTabState(tab.id, protectUnsavedForms, timeoutMs);
       if (live.hasUnsavedForm === true || live.isVisible || live.hasPictureInPicture) {
         results.set(tab.id, {
           jsHeapBytes: 0,
@@ -186,31 +190,56 @@ export async function loadCachedWeights(now = Date.now()): Promise<Map<number, T
 }
 
 function inspectPageInTab(includeMetrics: boolean, protectUnsavedForms = true): RawPageMetrics | RawLiveState {
-  const hasUnsavedForm = protectUnsavedForms && window.tabReaperFormObserver?.dirty === true;
+  // Read observer via a Symbol key and built-ins via prototype descriptors/type checks
+  // so page DOM clobbering (e.g. <form id="documentPictureInPicture">) cannot spoof state.
+  const observer = (globalThis as Record<symbol, { dirty?: unknown } | undefined>)[
+    Symbol.for("tabReaper.formObserver")
+  ];
+  const hasUnsavedForm = protectUnsavedForms && observer?.dirty === true;
   const isTop = window === window.top;
   // HeadlessChrome keeps every tab's visibilityState === "visible" regardless of activation,
   // so only treat an inactive visible document as screen-shared/split-view in headed browsers.
   const isHeadless = typeof navigator !== "undefined" && /\bHeadlessChrome\//i.test(navigator.userAgent);
-  const isVisible = isTop && !isHeadless && document.visibilityState === "visible";
-  const docPip = (window as Window & { documentPictureInPicture?: { window?: unknown } }).documentPictureInPicture;
-  const hasPictureInPicture = Boolean(document.pictureInPictureElement || docPip?.window);
+  const visState =
+    Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState")?.get?.call(document) ??
+    document.visibilityState;
+  const isVisible = isTop && !isHeadless && visState === "visible";
+
+  const rawPipEl =
+    Object.getOwnPropertyDescriptor(Document.prototype, "pictureInPictureElement")?.get?.call(document) ??
+    document.pictureInPictureElement;
+  const hasVideoPip = rawPipEl instanceof Element;
+  const docPipCtor = (globalThis as { DocumentPictureInPicture?: new (...args: never[]) => { window?: unknown } })
+    .DocumentPictureInPicture;
+  const docPip = window.isSecureContext
+    ? (window as Window & { documentPictureInPicture?: unknown }).documentPictureInPicture
+    : undefined;
+  const hasDocPip =
+    typeof docPipCtor === "function" &&
+    docPip instanceof docPipCtor &&
+    Boolean((docPip as { window?: unknown }).window);
+  const hasPictureInPicture = hasVideoPip || hasDocPip;
   if (!includeMetrics) return { hasUnsavedForm, isVisible, hasPictureInPicture };
 
   const perf = performance as Performance & {
     memory?: { usedJSHeapSize?: number };
   };
   const jsHeapBytes = typeof perf.memory?.usedJSHeapSize === "number" ? perf.memory.usedJSHeapSize : 0;
-  const domNodes = document.getElementsByTagName("*").length;
-  const mediaNodes = document.querySelectorAll("iframe, canvas, video").length;
+  const domNodes = Document.prototype.getElementsByTagName.call(document, "*").length;
+  const mediaNodes = Document.prototype.querySelectorAll.call(document, "iframe, canvas, video").length;
   const origin = typeof location?.origin === "string" ? location.origin : "";
   return { jsHeapBytes, domNodes, mediaNodes, origin, hasUnsavedForm, isVisible, hasPictureInPicture };
 }
 
-export async function checkTabLiveProtection(tabId: number, protectUnsavedForms = true): Promise<LiveTabProtection> {
+export async function checkTabLiveProtection(
+  tabId: number,
+  protectUnsavedForms = true,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
+): Promise<LiveTabProtection> {
   if (!chrome.scripting?.executeScript || !(await hasHostAccessPermission())) {
     return { hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false };
   }
-  const live = await inspectLiveTabState(tabId, protectUnsavedForms);
+  const live = await inspectLiveTabState(tabId, protectUnsavedForms, timeoutMs);
   let hasUnsavedForm = false;
   if (protectUnsavedForms) {
     if (live.hasUnsavedForm !== undefined) {
@@ -231,13 +260,20 @@ export async function checkTabHasUnsavedForm(tabId: number): Promise<boolean> {
   return (await checkTabLiveProtection(tabId, true)).hasUnsavedForm;
 }
 
-async function inspectLiveTabState(tabId: number, protectUnsavedForms: boolean): Promise<LiveTabInspection> {
+async function inspectLiveTabState(
+  tabId: number,
+  protectUnsavedForms: boolean,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
+): Promise<LiveTabInspection> {
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: inspectPageInTab,
-      args: [false, protectUnsavedForms],
-    });
+    const results = await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: inspectPageInTab,
+        args: [false, protectUnsavedForms],
+      }),
+      timeoutMs,
+    );
     const frames = results
       .map(frame => frame?.result as Partial<RawLiveState> | undefined)
       .filter((res): res is Partial<RawLiveState> => Boolean(res && typeof res === "object"));
@@ -261,14 +297,18 @@ async function sampleSingleTab(
   tabId: number,
   now: number,
   protectUnsavedForms: boolean,
+  timeoutMs = SCRIPT_INSPECT_TIMEOUT_MS,
 ): Promise<{ cacheable: TabWeightSample; live: Pick<LiveTabProtection, "isVisible" | "hasPictureInPicture"> } | null> {
   if (!chrome.scripting?.executeScript) return null;
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: inspectPageInTab,
-      args: [true, protectUnsavedForms],
-    });
+    const results = await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: inspectPageInTab,
+        args: [true, protectUnsavedForms],
+      }),
+      timeoutMs,
+    );
     const topFrame = results.find((frame) => frame.frameId === 0) ?? results[0];
     const topMetrics = topFrame?.result as Partial<RawPageMetrics> | undefined;
     if (!topMetrics || typeof topMetrics !== "object") return null;

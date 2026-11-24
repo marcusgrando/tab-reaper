@@ -285,7 +285,15 @@ verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$HOST_ASSET" "$TMP_DIR/tab-reaper-hos
 install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
 ok "Local Companion installed to $BIN_PATH"
 
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 step "3/4" "Registering Local Companion with browsers..."
+ESCAPED_BIN_PATH="$(json_escape "$BIN_PATH")"
 REGISTERED_LIST=""
 for i in "${!HOST_DIRS[@]}"; do
   DIR="${HOST_DIRS[$i]}"
@@ -297,7 +305,7 @@ for i in "${!HOST_DIRS[@]}"; do
 {
   "name": "com.tabreaper.host",
   "description": "Tab Reaper exact Chrome memory reporter",
-  "path": "$BIN_PATH",
+  "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXT_ID/"
@@ -319,7 +327,7 @@ if [ -z "$REGISTERED_LIST" ]; then
 {
   "name": "com.tabreaper.host",
   "description": "Tab Reaper exact Chrome memory reporter",
-  "path": "$BIN_PATH",
+  "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXT_ID/"

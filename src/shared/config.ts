@@ -3,12 +3,41 @@ import type { TabReaperConfig } from "./types.ts";
 export const CONFIG_STORAGE_KEY = "tabReaper.config";
 export const REOPEN_OPTIONS_KEY = "tabReaper.reopenOptions";
 export const SETUP_PENDING_KEY = "tabReaper.setupPending";
+export const HTTP_HOST_ORIGINS = ["http://*/*", "https://*/*"];
 
-export function buildQuickUpdateCommand(userAgent = typeof navigator !== "undefined" ? navigator.userAgent : ""): string {
+export function buildQuickUpdateCommand(
+  version?: string,
+  userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "",
+): string {
+  const cleanVersion = typeof version === "string" ? version.trim().replace(/^v/, "") : "";
+  const pinnedTag = /^\d+\.\d+\.\d+$/.test(cleanVersion) ? `v${cleanVersion}` : null;
   if (/Windows/i.test(userAgent)) {
+    if (pinnedTag) {
+      return `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/${pinnedTag}/install.ps1))) -Version ${pinnedTag}`;
+    }
     return "irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.ps1 | iex";
   }
+  if (pinnedTag) {
+    return `curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/${pinnedTag}/install.sh | TAB_REAPER_VERSION=${pinnedTag} bash`;
+  }
   return "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash";
+}
+
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("Operation timed out")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 export const DEFAULT_CONFIG: TabReaperConfig = {

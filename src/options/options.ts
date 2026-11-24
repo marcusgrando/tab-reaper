@@ -1,5 +1,6 @@
 import {
   DEFAULT_CONFIG,
+  HTTP_HOST_ORIGINS,
   MAX_DISCARDS_WITHOUT_RELIEF,
   REOPEN_OPTIONS_KEY,
   SETUP_PENDING_KEY,
@@ -440,12 +441,12 @@ function populateForm(config: TabReaperConfig): void {
 
 const WEIGHTED_EVICTION_PERMS: chrome.permissions.Permissions = {
   permissions: ["scripting"],
-  origins: ["<all_urls>"],
+  origins: HTTP_HOST_ORIGINS,
 };
 
 const UPLOAD_PROTECTION_PERMS: chrome.permissions.Permissions = {
   permissions: ["webRequest"],
-  origins: ["<all_urls>"],
+  origins: HTTP_HOST_ORIGINS,
 };
 
 function buildInstallCommand(extensionId: string): string {
@@ -1345,15 +1346,19 @@ async function init(): Promise<void> {
   renderSetupCard();
 }
 
+let latestAvailableVersion: string | null = null;
+
 function renderUpdateCheckStatus(status: StatusPayload): void {
   const version = chrome.runtime.getManifest().version;
   if (!status.config.checkForUpdates) {
+    latestAvailableVersion = null;
     updateCheckStatus.textContent = `Automatic checks are off (installed v${version}).`;
     updateCheckStatus.className = "status-text";
     btnCopyUpdateOpt.classList.add("hidden");
     return;
   }
   const latest = status.updateAvailable?.latestVersion ?? status.updateStatus?.latestVersion ?? null;
+  latestAvailableVersion = latest;
   if (latest) {
     const dismissedNote = status.updateStatus?.dismissed ? " · popup banner dismissed" : "";
     updateCheckStatus.textContent = `Update available: v${latest} (installed v${version}${dismissedNote}).`;
@@ -1383,7 +1388,7 @@ checkUpdates.addEventListener("change", async () => {
 
 btnCopyUpdateOpt.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(buildQuickUpdateCommand());
+    await navigator.clipboard.writeText(buildQuickUpdateCommand(latestAvailableVersion ?? undefined));
     btnCopyUpdateOpt.textContent = "Copied";
     setTimeout(() => {
       btnCopyUpdateOpt.textContent = "Copy update command";

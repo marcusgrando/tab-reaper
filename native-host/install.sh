@@ -126,20 +126,33 @@ build_from_source() {
   install -m 755 "$target_dir/release/tab-reaper-host" "$BIN_PATH"
 }
 
+TMP_DIR=""
+cleanup() {
+  if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 download_prebuilt() {
   local asset="tab-reaper-host-${PLATFORM}-${ARCH_NAME}"
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' RETURN
+  TMP_DIR="$(mktemp -d)"
 
   echo "Downloading release checksums..."
-  curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$tmp_dir/SHA256SUMS.txt"
+  curl -fsSL "$(release_url SHA256SUMS.txt)" -o "$TMP_DIR/SHA256SUMS.txt"
 
   echo "Downloading ${asset} from GitHub Releases..."
-  curl -fsSL "$(release_url "$asset")" -o "$tmp_dir/tab-reaper-host"
+  curl -fsSL "$(release_url "$asset")" -o "$TMP_DIR/tab-reaper-host"
 
-  verify_checksum "$tmp_dir/SHA256SUMS.txt" "$asset" "$tmp_dir/tab-reaper-host"
-  install -m 755 "$tmp_dir/tab-reaper-host" "$BIN_PATH"
+  verify_checksum "$TMP_DIR/SHA256SUMS.txt" "$asset" "$TMP_DIR/tab-reaper-host"
+  install -m 755 "$TMP_DIR/tab-reaper-host" "$BIN_PATH"
 }
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
@@ -162,6 +175,7 @@ else
   )
 fi
 
+ESCAPED_BIN_PATH="$(json_escape "$BIN_PATH")"
 REGISTERED=0
 for DIR in "${HOST_DIRS[@]}"; do
   PARENT_DIR="$(dirname "$DIR")"
@@ -171,7 +185,7 @@ for DIR in "${HOST_DIRS[@]}"; do
 {
   "name": "com.tabreaper.host",
   "description": "Tab Reaper exact Chrome memory reporter",
-  "path": "$BIN_PATH",
+  "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXT_ID/"
@@ -190,7 +204,7 @@ if [ "$REGISTERED" -eq 0 ]; then
 {
   "name": "com.tabreaper.host",
   "description": "Tab Reaper exact Chrome memory reporter",
-  "path": "$BIN_PATH",
+  "path": "$ESCAPED_BIN_PATH",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXT_ID/"

@@ -1,8 +1,30 @@
+import { isHttpUrl } from "../shared/config.ts";
 import type { SnapshotWindow, TabSummary } from "../shared/types.ts";
-import { captureWindowMetadata, isAutoSnapshotsActive, type CachedGroups } from "./session.ts";
+import {
+  MAX_SNAPSHOT_FAVICON_LEN,
+  MAX_SNAPSHOT_TITLE_LEN,
+  MAX_SNAPSHOT_URL_LEN,
+  captureWindowMetadata,
+  isAutoSnapshotsActive,
+  type CachedGroups,
+} from "./session.ts";
 
 export const WINDOW_TABS_SESSION_KEY = "tabReaper.windowTabsCache";
 const WINDOW_ACTIVE_TABS_KEY = "tabReaper.windowActiveTabs";
+const MAX_CACHED_GROUP_TITLE_LEN = 64;
+
+function sanitizeCachedTab(tab: TabSummary): TabSummary | null {
+  if (!isHttpUrl(tab.url) || tab.url.length > MAX_SNAPSHOT_URL_LEN) return null;
+  const title = tab.title.length > MAX_SNAPSHOT_TITLE_LEN ? tab.title.slice(0, MAX_SNAPSHOT_TITLE_LEN) : tab.title;
+  const favIconUrl =
+    isHttpUrl(tab.favIconUrl) && tab.favIconUrl.length <= MAX_SNAPSHOT_FAVICON_LEN ? tab.favIconUrl : undefined;
+  return { ...tab, title, favIconUrl };
+}
+
+function sanitizeCachedGroupTitle(title: string | undefined): string | undefined {
+  if (!title) return title;
+  return title.length > MAX_CACHED_GROUP_TITLE_LEN ? title.slice(0, MAX_CACHED_GROUP_TITLE_LEN) : title;
+}
 
 export interface CachedWindow {
   tabs: TabSummary[];
@@ -53,17 +75,23 @@ export async function cacheWindowTabs(tabs: TabSummary[], inserted = false): Pro
   const byWindow = new Map<number, Map<number, TabSummary>>();
   for (const tab of tabs) {
     const known = byWindow.get(tab.windowId) ?? new Map((windows[tab.windowId]?.tabs ?? []).map((t) => [t.id, t]));
-    if (inserted && tab.index !== undefined && !known.has(tab.id)) {
+    const sanitized = sanitizeCachedTab(tab);
+    if (!sanitized) {
+      known.delete(tab.id);
+      byWindow.set(tab.windowId, known);
+      continue;
+    }
+    if (inserted && sanitized.index !== undefined && !known.has(sanitized.id)) {
       for (const other of known.values()) {
-        if (other.index !== undefined && other.index >= tab.index) other.index++;
+        if (other.index !== undefined && other.index >= sanitized.index) other.index++;
       }
     }
-    if (tab.active) {
+    if (sanitized.active) {
       for (const other of known.values()) {
-        if (other.id !== tab.id && other.active) other.active = false;
+        if (other.id !== sanitized.id && other.active) other.active = false;
       }
     }
-    known.set(tab.id, tab);
+    known.set(sanitized.id, sanitized);
     byWindow.set(tab.windowId, known);
   }
   for (const [id, known] of byWindow) {
@@ -71,7 +99,11 @@ export async function cacheWindowTabs(tabs: TabSummary[], inserted = false): Pro
     const cachedGroups = { ...previous?.groups };
     for (const group of groups) {
       if (group.windowId === id) {
-        cachedGroups[group.id] = { title: group.title, color: group.color, collapsed: group.collapsed };
+        cachedGroups[group.id] = {
+          title: sanitizeCachedGroupTitle(group.title),
+          color: group.color,
+          collapsed: group.collapsed,
+        };
       }
     }
     windows[id] = {
@@ -139,7 +171,11 @@ export async function updateCachedTabGroup(group: chrome.tabGroups.TabGroup): Pr
   const windows = await loadWindowTabs();
   const cached = windows[group.windowId];
   if (cached) {
-    (cached.groups ??= {})[group.id] = { title: group.title, color: group.color, collapsed: group.collapsed };
+    (cached.groups ??= {})[group.id] = {
+      title: sanitizeCachedGroupTitle(group.title),
+      color: group.color,
+      collapsed: group.collapsed,
+    };
     await chrome.storage.session.set({ [WINDOW_TABS_SESSION_KEY]: windows });
   }
 }

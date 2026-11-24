@@ -125,7 +125,10 @@ const SWEEP_PERIOD_MINUTES = 0.5;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let sweepInFlight = false;
 let sweepPromise: Promise<{ discarded: number }> | null = null;
-const privateStorage = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+const privateStorage = Promise.all([
+  chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }),
+  chrome.storage.session?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }),
+]);
 const LAST_SYNC_ATTEMPT_KEY = "tabReaper.lastSyncAttempt";
 const STARTUP_RECONCILED_KEY = "tabReaper.startupReconciled";
 let startupReconciled = false;
@@ -820,16 +823,53 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+const TRUSTED_UI_PATHS = new Set(["/popup.html", "/options.html"]);
+
+function isTrustedUiSender(sender: chrome.runtime.MessageSender): boolean {
+  const extId = chrome.runtime?.id;
+  if (!extId || sender.id !== extId) return false;
+  const expectedOrigin = `chrome-extension://${extId}`;
+  if (sender.origin !== expectedOrigin) return false;
+  if (sender.frameId !== undefined && sender.frameId !== 0) return false;
+  if (typeof sender.url !== "string") return false;
+  try {
+    const parsed = new URL(sender.url);
+    return (
+      parsed.protocol === "chrome-extension:" &&
+      parsed.hostname === extId &&
+      parsed.port === "" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      TRUSTED_UI_PATHS.has(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 chrome.runtime.onMessage.addListener((message: BackgroundMessage | string, sender, sendResponse) => {
   if (message === "tab-reaper-form-access") {
+    if (!chrome.runtime?.id || sender.id !== chrome.runtime.id) return false;
     void Promise.all([loadConfig(), hasHostAccessPermission(), privateStorage])
       .then(([config, access]) => sendResponse(config.protectUnsavedForms && access))
       .catch(() => sendResponse(false));
     return true;
   }
-  if (typeof message === "string") return false;
-  if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL(""))) return false;
-  void handleMessage(message)
+  if (!isPlainRecord(message) || typeof message.type !== "string") return false;
+  if (!isTrustedUiSender(sender)) return false;
+  void handleMessage(message as unknown as BackgroundMessage)
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
   return true;
@@ -840,6 +880,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     case "get_status":
       return buildStatus(message.includeTabs !== false);
     case "discard_tab":
+      if (!isPositiveInt(message.tabId)) return { ok: false, error: "Invalid tabId." };
       try {
         const config = await loadConfig();
         return { ok: await discardTabSafely(message.tabId, config, "manual") };
@@ -847,6 +888,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
         return { ok: false };
       }
     case "toggle_keep_tab": {
+      if (!isPositiveInt(message.tabId)) return { ok: false, error: "Invalid tabId." };
       const kept = await enqueueActivityUpdate(async () => {
         const nextKept = await toggleKeptTabId(message.tabId);
         await updateCachedTabKept(message.tabId, nextKept);
@@ -865,6 +907,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: true, kept };
     }
     case "close_tab": {
+      if (!isPositiveInt(message.tabId)) return { ok: false, error: "Invalid tabId." };
       try {
         const [raw, keptIds] = await Promise.all([chrome.tabs.get(message.tabId), loadKeptTabIds()]);
         if (raw.pinned || keptIds.has(message.tabId)) {
@@ -879,11 +922,13 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     case "discard_idle_now":
       return runSweep("sweep");
     case "dismiss_update": {
+      if (!isNonEmptyString(message.version)) return { ok: false, error: "Invalid version." };
       await dismissUpdateVersion(message.version);
       await refreshActionBadge();
       return { ok: true };
     }
     case "save_config": {
+      if (!isPlainRecord(message.config)) return { ok: false, error: "Invalid config payload." };
       const previousConfig = await loadConfig();
       // Maintain identical lock order (configMutationQueue -> localSnapshotQueue) as pullConfigFromSync.
       const saved = await enqueueConfigMutation(async () => {
@@ -923,18 +968,21 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     case "get_snapshots":
       return listAllSnapshots();
     case "get_snapshot_details": {
-      const snapshot = await getSnapshotDetails(message.id, message.relPath);
+      if (!isNonEmptyString(message.id)) return { ok: false, error: "Invalid snapshot id." };
+      const relPath = typeof message.relPath === "string" ? message.relPath : undefined;
+      const snapshot = await getSnapshotDetails(message.id, relPath);
       return snapshot ? { ok: true, snapshot } : { ok: false, error: "Snapshot unavailable." };
     }
     case "capture_snapshot_now": {
       if (!(await isFolderSyncOptedIn())) {
         return { ok: false, error: "Configure a sync folder first to save session snapshots." };
       }
+      const label = typeof message.label === "string" ? message.label : undefined;
       const [tabs, activity] = await Promise.all([queryAllTabs(), loadActivityState()]);
       const snapshot = await captureSessionSnapshot(tabs, {
         force: true,
         trigger: "manual",
-        label: message.label,
+        label,
         activity,
       });
       return { ok: Boolean(snapshot), snapshot };
@@ -944,15 +992,18 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return { ok: true };
     }
     case "delete_snapshot": {
-      const ok = await deleteSnapshot(message.id, message.syncDir, message.ownerDeviceId);
+      if (!isNonEmptyString(message.id)) return { ok: false, error: "Invalid snapshot id." };
+      const syncDir = message.syncDir === null || typeof message.syncDir === "string" ? message.syncDir : undefined;
+      const ownerDeviceId = typeof message.ownerDeviceId === "string" ? message.ownerDeviceId : undefined;
+      const ok = await deleteSnapshot(message.id, syncDir, ownerDeviceId);
       return { ok };
     }
     case "restore_snapshot": {
-      const res = await restoreSessionSnapshot(message.id, {
-        targetWindowId: message.targetWindowId,
-        mode: message.mode,
-        relPath: message.relPath,
-      });
+      if (!isNonEmptyString(message.id)) return { ok: false, error: "Invalid snapshot id." };
+      const targetWindowId = isPositiveInt(message.targetWindowId) ? message.targetWindowId : undefined;
+      const mode = message.mode === "windows" || message.mode === "current_window" ? message.mode : undefined;
+      const relPath = typeof message.relPath === "string" ? message.relPath : undefined;
+      const res = await restoreSessionSnapshot(message.id, { targetWindowId, mode, relPath });
       return { ok: true, ...res };
     }
     case "test_native_host":
@@ -962,14 +1013,19 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
     case "get_synced_devices":
       return listSyncedDevices();
     case "remove_synced_device":
+      if (!isNonEmptyString(message.targetDeviceId)) return { ok: false, error: "Invalid targetDeviceId." };
       return removeSyncedDevice(message.targetDeviceId);
     case "adopt_synced_device":
+      if (!isNonEmptyString(message.targetDeviceId)) return { ok: false, error: "Invalid targetDeviceId." };
       return adoptDeviceHistory(message.targetDeviceId);
     case "detect_sync_folders":
       return detectSyncFolders();
     case "pick_sync_folder":
       return pickSyncFolder();
     case "set_sync_folder": {
+      if (message.path !== null && typeof message.path !== "string") {
+        return { ok: false, error: "Invalid sync folder path." };
+      }
       const status = await setSyncFolder(message.path);
       if (status.ok && status.enabled) {
         await runPeriodicSync(true);
@@ -977,6 +1033,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       return status;
     }
     case "set_device_name": {
+      if (typeof message.deviceName !== "string") return { ok: false, error: "Invalid deviceName." };
       const identity = await setDeviceName(message.deviceName);
       return { ok: true, ...identity };
     }
@@ -995,6 +1052,8 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       const status = await getSyncStatus();
       return { ...res, ok: res.ok && status.hostConnected && status.enabled && status.writable, status };
     }
+    default:
+      return { ok: false, error: "Unknown message type." };
   }
 }
 

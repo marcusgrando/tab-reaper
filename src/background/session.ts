@@ -44,6 +44,7 @@ export const MAX_SNAPSHOT_URL_LEN = 4096;
 export const MAX_SNAPSHOT_TITLE_LEN = 256;
 export const MAX_SNAPSHOT_FAVICON_LEN = 512;
 export const MAX_SNAPSHOTS_TOTAL_BYTES = 1_000_000; // 1 MB cap, well under chrome.storage.local 10 MB quota
+const MAX_RESTORE_WINDOWS = 50;
 const RECOVERY_MAX_CURRENT_TABS = 2;
 const RECOVERY_MIN_SNAPSHOT_TABS = 5;
 const RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -732,6 +733,20 @@ export async function restoreSessionSnapshot(
       for (const [origWinId, winTabs] of tabsByWindow.entries()) {
         const ordered = [...winTabs].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
         if (ordered.length === 0) continue;
+
+        if (windowsCreated >= MAX_RESTORE_WINDOWS) {
+          const res = await restoreTabsIntoWindow(
+            ordered,
+            targetWindowId,
+            undefined,
+            null,
+            newlyKeptIds,
+            createdRecords,
+          );
+          restored += res.restored;
+          skippedExisting += res.skippedExisting;
+          continue;
+        }
 
         // Preserve every saved tab occurrence in new-window mode (duplicate suppression
         // is scoped to current-window recovery so multi-window snapshots never drop a window).

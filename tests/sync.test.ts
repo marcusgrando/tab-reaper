@@ -1052,4 +1052,81 @@ describe("multi-device single-writer folder sync integration", () => {
     expect(listed.every((s) => s.deviceId === "dev-original")).toBe(true);
     expect((await loadSnapshots())[0]?.deviceId).toBe("dev-original");
   });
+
+  test("rejects tampered sync index entries with spoofed relPath or excessive partCount", async () => {
+    const now = 1_700_000_000_000;
+    virtualFs.set("devices/dev-tampered/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-tampered",
+      deviceName: "Tampered",
+      updatedAt: now,
+      snapshots: [
+        {
+          id: "spoofed-path",
+          complete: true,
+          capturedAt: now,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "auto",
+          relPath: "devices/dev-mac/snapshots/stolen.json",
+        },
+        {
+          id: "huge-parts",
+          complete: true,
+          capturedAt: now - 1000,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "auto",
+          relPath: "devices/dev-tampered/snapshots/huge.json",
+          partCount: 1_000_000,
+        },
+        {
+          id: "valid-entry",
+          complete: true,
+          capturedAt: now - 2000,
+          tabCount: 1,
+          windowCount: 1,
+          trigger: "auto",
+          relPath: "devices/dev-tampered/snapshots/valid.json",
+        },
+      ],
+    }));
+    virtualFs.set("devices/dev-tampered/snapshots/huge.json", JSON.stringify({
+      id: "huge-parts",
+      complete: true,
+      capturedAt: now - 1000,
+      tabCount: 1,
+      partCount: 1_000_000,
+      tabs: [{ url: "https://a.test/", title: "A", pinned: false, kept: false, windowId: 1 }],
+    }));
+    virtualFs.set("devices/dev-tampered/snapshots/valid.json", JSON.stringify({
+      id: "valid-entry",
+      complete: true,
+      capturedAt: now - 2000,
+      tabCount: 1,
+      tabs: [{ url: "https://valid.test/", title: "Valid", pinned: false, kept: false, windowId: 1 }],
+    }));
+
+    // Spoofed relPath outside dev-tampered/snapshots/ must be ignored; excessive partCount entry must be ignored.
+    const listed = await listSyncedSnapshots();
+    expect(listed.map((s) => s.id)).toEqual(["valid-entry"]);
+
+    // Reading a snapshot claiming excessive partCount must fail fast without looping.
+    expect(await readSyncedSnapshot("devices/dev-tampered/snapshots/huge.json")).toBeNull();
+
+    // Deleting a tampered snapshot entry with huge partCount must not OOM or hang.
+    expect(await deleteSyncedSnapshot("huge-parts", activeSyncDir, "dev-tampered")).toBe(true);
+
+    // An index claiming excessive index-parts count must fail validation immediately.
+    virtualFs.set("devices/dev-bad-idx/index.json", JSON.stringify({
+      schemaVersion: 1,
+      deviceId: "dev-bad-idx",
+      deviceName: "BadIdx",
+      updatedAt: now,
+      generation: "11111111-1111-4111-8111-111111111111",
+      partCount: 1_000_000,
+      snapshots: [],
+    }));
+    expect((await listSyncedSnapshots()).some((s) => s.deviceId === "dev-bad-idx")).toBe(false);
+  });
 });

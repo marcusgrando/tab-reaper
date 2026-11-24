@@ -428,7 +428,7 @@ btnDismissUpdate.innerHTML = CLOSE_ICON_SVG;
 
 btnCopyUpdate.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(buildQuickUpdateCommand());
+    await navigator.clipboard.writeText(buildQuickUpdateCommand(updateAvailable?.latestVersion));
     btnCopyUpdate.textContent = "Copied";
     showActionStatus("Update command copied. Run it in Terminal, then click Reload in chrome://extensions.");
     setTimeout(() => {

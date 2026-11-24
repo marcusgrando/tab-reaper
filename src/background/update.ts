@@ -38,7 +38,16 @@ export function isNewerVersion(candidate: string, current: string): boolean {
 }
 
 export function isSafeReleaseUrl(url: string | undefined | null): url is string {
-  return typeof url === "string" && url.startsWith(ALLOWED_RELEASE_URL_PREFIX);
+  if (typeof url !== "string" || url.includes("\\")) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== "https://github.com") return false;
+    if (parsed.username !== "" || parsed.password !== "") return false;
+    if (/(?:^|\/)(?:\.\.?|%2e(?:%2e|\.)?|\.%2e)(?:\/|$)/i.test(parsed.pathname)) return false;
+    return parsed.href.startsWith(ALLOWED_RELEASE_URL_PREFIX);
+  } catch {
+    return false;
+  }
 }
 
 export function resolveUpdateAvailable(
@@ -130,7 +139,12 @@ export async function checkForUpdate(options?: {
   if (existing?.etag) headers["If-None-Match"] = existing.etag;
 
   try {
-    const response = await fetchFn(LATEST_RELEASE_API_URL, { headers, cache: "no-store" });
+    const response = await fetchFn(LATEST_RELEASE_API_URL, {
+      headers,
+      cache: "no-store",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    });
     if (response.status === 304) {
       const refreshed: UpdateCheckState = { ...(existing ?? { checkedAt: now }), checkedAt: now };
       await saveUpdateState(refreshed);

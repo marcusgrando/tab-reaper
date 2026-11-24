@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { computeBadge } from "../src/background/badge.ts";
+import { buildQuickUpdateCommand } from "../src/shared/config.ts";
 import {
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_STATE_KEY,
@@ -7,6 +8,7 @@ import {
   dismissUpdateVersion,
   getUpdateStatus,
   isNewerVersion,
+  isSafeReleaseUrl,
   parseSemver,
   resolveUpdateAvailable,
 } from "../src/background/update.ts";
@@ -56,6 +58,25 @@ describe("update semver and resolution", () => {
     expect(resolveUpdateAvailable({ ...state, dismissedVersion: "0.10.0" }, "0.9.0", true)).toBeNull();
     expect(resolveUpdateAvailable({ ...state, dismissedVersion: "0.9.5" }, "0.9.0", true)?.latestVersion).toBe("0.10.0");
     expect(resolveUpdateAvailable({ ...state, releaseUrl: "https://evil.example/v0.10.0" }, "0.9.0", true)).toBeNull();
+    // Reject path traversal, encoded dot segments, backslashes, and userinfo spoofing.
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/../../../evil/repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/%2e%2e/%2e%2e/evil/repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/..\\..\\evil\\repo")).toBe(false);
+    expect(isSafeReleaseUrl("https://user@github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0")).toBe(false);
+    expect(isSafeReleaseUrl("https://github.com/marcusgrando/tab-reaper/releases/tag/v0.10.0")).toBe(true);
+  });
+
+  test("pins quick update command to validated release tag when provided", () => {
+    expect(buildQuickUpdateCommand("0.10.0", "Mozilla/5.0 (Macintosh)")).toBe(
+      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/v0.10.0/install.sh | TAB_REAPER_VERSION=v0.10.0 bash",
+    );
+    expect(buildQuickUpdateCommand("0.10.0", "Mozilla/5.0 (Windows NT 10.0)")).toBe(
+      "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/marcusgrando/tab-reaper/v0.10.0/install.ps1))) -Version v0.10.0",
+    );
+    // Rejects malformed/injected version strings and falls back safely.
+    expect(buildQuickUpdateCommand("0.10.0; rm -rf /", "Mozilla/5.0 (Linux)")).toBe(
+      "curl -fsSL https://raw.githubusercontent.com/marcusgrando/tab-reaper/main/install.sh | bash",
+    );
   });
 });
 
@@ -63,9 +84,11 @@ describe("checkForUpdate caching and network handling", () => {
   test("fetches release metadata, respects 24h cache, uses ETag, and persists dismissal", async () => {
     let calls = 0;
     const seenEtags: Array<string | null> = [];
+    const seenInits: Array<RequestInit | undefined> = [];
     const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       calls++;
       seenEtags.push((init?.headers as Record<string, string> | undefined)?.["If-None-Match"] ?? null);
+      seenInits.push(init);
       if (calls === 1) {
         return new Response(
           JSON.stringify({
@@ -83,6 +106,8 @@ describe("checkForUpdate caching and network handling", () => {
     const t0 = 1_000_000;
     const first = await checkForUpdate({ now: t0, fetchImpl: fakeFetch });
     expect(calls).toBe(1);
+    expect(seenInits[0]?.credentials).toBe("omit");
+    expect(seenInits[0]?.referrerPolicy).toBe("no-referrer");
     expect(first?.latestVersion).toBe("0.10.0");
     expect(first?.etag).toBe('"abc123"');
 

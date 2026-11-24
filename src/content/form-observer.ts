@@ -1,5 +1,19 @@
-interface Window {
-  tabReaperFormObserver?: { readonly dirty: boolean; readonly active: boolean };
+interface FormObserverHandle {
+  readonly dirty: boolean;
+  readonly active: boolean;
+}
+
+const OBSERVER_KEY = Symbol.for("tabReaper.formObserver");
+const formElementsGetter = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, "elements")?.get;
+
+function getObserverHandle(): FormObserverHandle | undefined {
+  return (globalThis as Record<symbol, FormObserverHandle | undefined>)[OBSERVER_KEY];
+}
+
+function setObserverHandle(handle: FormObserverHandle | undefined): void {
+  const store = globalThis as Record<symbol, FormObserverHandle | undefined>;
+  if (handle) store[OBSERVER_KEY] = handle;
+  else delete store[OBSERVER_KEY];
 }
 
 function hasRuntime(): boolean {
@@ -7,7 +21,7 @@ function hasRuntime(): boolean {
 }
 
 function installObserver() {
-  if (window.tabReaperFormObserver || !hasRuntime() || !chrome.runtime.onMessage) return;
+  if (getObserverHandle() || !hasRuntime() || !chrome.runtime.onMessage) return;
   const controller = new AbortController();
   // Signature of each field before its pending edit. undefined: no comparable signature.
   const originals = new WeakMap<HTMLElement, string | undefined>();
@@ -21,7 +35,7 @@ function installObserver() {
     active = false;
     controller.abort();
     edited.clear();
-    delete window.tabReaperFormObserver;
+    setObserverHandle(undefined);
     try {
       if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onMessage);
     } catch {
@@ -36,10 +50,10 @@ function installObserver() {
   } catch {
     return;
   }
-  window.tabReaperFormObserver = {
+  setObserverHandle({
     get active() { return active; },
     get dirty() { return hasPendingEdits(); },
-  };
+  });
 
   // Cheap checks only. Edited fields skip the layout checks in eligible() on later keystrokes.
   function control(event: Event): HTMLElement | undefined {
@@ -97,7 +111,10 @@ function installObserver() {
 
   function controls(el: HTMLElement): HTMLElement[] {
     if (!(el instanceof HTMLInputElement) || el.type !== "radio" || !el.name || !el.form) return [el];
-    const group = el.form.elements.namedItem(el.name);
+    // Bypass HTMLFormElement named-property overrides (e.g. <input name="elements">).
+    const formElements = formElementsGetter ? formElementsGetter.call(el.form) : el.form.elements;
+    if (!(formElements instanceof HTMLFormControlsCollection)) return [el];
+    const group = formElements.namedItem(el.name);
     if (!(group instanceof RadioNodeList)) return [el];
     return Array.from(group).filter((radio): radio is HTMLInputElement =>
       radio instanceof HTMLInputElement && radio.type === "radio" && radio.name === el.name);

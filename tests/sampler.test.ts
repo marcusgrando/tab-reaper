@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkTabHasUnsavedForm, checkTabLiveProtection, loadCachedWeights, sampleTabWeights } from "../src/background/sampler.ts";
+import { checkTabHasUnsavedForm, checkTabLiveProtection, loadCachedWeights, sampleTabFormsOnly, sampleTabWeights } from "../src/background/sampler.ts";
 
 test("cached form, sharing, and PiP protection follow live frame results without caching transient visibility", async () => {
   const previous = globalThis.chrome;
@@ -149,6 +149,49 @@ test("fresh page sampling aggregates DOM and media across frames and deduplicate
       hasUnsavedForm: true,
       sampledAt: 2000,
     });
+  } finally {
+    Object.assign(globalThis, { chrome: previous });
+  }
+});
+
+test("hung executeScript calls time out without stalling other tabs or discard checks", async () => {
+  const previous = globalThis.chrome;
+  const hungTab = { id: 1, url: "https://hung.test/", title: "Hung", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
+  const healthyTab = { id: 2, url: "https://ok.test/", title: "OK", windowId: 1, active: false, audible: false, pinned: false, discarded: false };
+  const cache: Record<string, Record<string, unknown>> = {};
+  try {
+    Object.assign(globalThis, { chrome: {
+      permissions: { contains: async () => true },
+      tabs: { query: async () => [{ id: 1 }, { id: 2 }] },
+      storage: { session: {
+        get: async () => structuredClone(cache),
+        set: async (update: typeof cache) => Object.assign(cache, structuredClone(update)),
+      } },
+      scripting: { executeScript: ({ target }: { target: { tabId: number } }) => {
+        if (target.tabId === 1) return new Promise(() => {}); // Never resolves (frozen renderer).
+        return Promise.resolve([
+          { frameId: 0, result: { jsHeapBytes: 1024, domNodes: 10, mediaNodes: 0, origin: "https://ok.test", hasUnsavedForm: true, isVisible: false, hasPictureInPicture: false } },
+        ]);
+      } },
+    } });
+
+    const t0 = Date.now();
+    const weights = await sampleTabWeights([hungTab, healthyTab], 3000, true, true, 40);
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(weights.has(1)).toBe(false);
+    expect(weights.get(2)?.hasUnsavedForm).toBe(true);
+
+    const t1 = Date.now();
+    const forms = await sampleTabFormsOnly([hungTab, healthyTab], 3000, true, 40);
+    expect(Date.now() - t1).toBeLessThan(500);
+    expect(forms.has(1)).toBe(false);
+    expect(forms.get(2)?.hasUnsavedForm).toBe(true);
+
+    // Without a cached draft, a hung tab does not stay permanently undiscardable.
+    const t2 = Date.now();
+    const live = await checkTabLiveProtection(1, true, 40);
+    expect(Date.now() - t2).toBeLessThan(500);
+    expect(live).toEqual({ hasUnsavedForm: false, isVisible: false, hasPictureInPicture: false });
   } finally {
     Object.assign(globalThis, { chrome: previous });
   }

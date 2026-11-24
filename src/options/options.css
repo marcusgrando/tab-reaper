@@ -92,6 +92,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 }
 textarea { display: block; resize: vertical; }
 .checkbox-row { border-top: 1px solid var(--line); min-height: 45px; padding: 6px 0; }
+.checkbox-row.compact { border-top: 0; min-height: 32px; padding: 0; }
 #protections .section-head { margin-bottom: 12px; }
 .checkbox { display: flex; align-items: center; gap: 11px; cursor: pointer; flex: 1; }
 .checkbox input { margin: 0; width: 17px; height: 17px; flex: none; accent-color: var(--action); }

@@ -418,4 +418,39 @@ describe("session snapshots and recovery", () => {
     expect(closedSnap).toBeNull();
     expect(await loadSnapshots()).toEqual([]);
   });
+
+  test("caps created windows during multi-window restore and folds excess windows into targetWindowId", async () => {
+    let createdWinCount = 0;
+    const chromeMock = (globalThis as unknown as { chrome: Record<string, unknown> }).chrome;
+    chromeMock.windows = {
+      getLastFocused: async () => ({ id: 31 }),
+      update: async () => {},
+      create: async (opts: chrome.windows.CreateData) => {
+        createdWinCount++;
+        const firstTab = { id: nextTabId++, url: String(opts.url) };
+        createdTabs.push(firstTab);
+        openChromeTabs.push(firstTab);
+        return { id: 500 + createdWinCount, tabs: [firstTab] };
+      },
+    };
+    storageData["tabReaper.sessionSnapshots"] = [{
+      id: "many-windows",
+      complete: true,
+      capturedAt: 1_700_000_000_000,
+      tabCount: 60,
+      windowCount: 60,
+      tabs: Array.from({ length: 60 }, (_, i) => ({
+        url: `https://win-${i}.example.test/`,
+        title: `Win ${i}`,
+        pinned: false,
+        kept: false,
+        windowId: i + 1,
+        index: 0,
+      })),
+    }];
+    const res = await restoreSessionSnapshot("many-windows", { mode: "windows", targetWindowId: 31 });
+    expect(res.windowsCreated).toBeLessThanOrEqual(50);
+    expect(createdWinCount).toBeLessThanOrEqual(50);
+    expect(res.restored).toBe(60);
+  });
 });

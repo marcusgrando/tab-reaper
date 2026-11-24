@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_TRACKED_INFLIGHT_UPLOADS,
+  MAX_TRACKED_UPLOADS_PER_TAB,
   UPLOAD_CHUNK_COOLDOWN_MS,
+  UPLOAD_INFLIGHT_MAX_AGE_MS,
   UPLOAD_MIN_BYTES,
   UPLOAD_TEXT_API_MIN_BYTES,
   clearTabUploads,
@@ -277,5 +280,33 @@ describe("upload state machine", () => {
     state = clearTabUploads(state, 300);
     state = clearTabUploads(state, 310);
     expect(state).toEqual(createEmptyUploadState());
+  });
+
+  test("caps tracked in-flight uploads per tab and globally so one tab cannot exhaust state or starve others", () => {
+    let state = createEmptyUploadState();
+    for (let i = 0; i < MAX_TRACKED_UPLOADS_PER_TAB + 20; i++) {
+      state = recordUploadStart(state, `flood-${i}`, 50, t0 + i);
+    }
+    expect(Object.keys(state.inFlight)).toHaveLength(MAX_TRACKED_UPLOADS_PER_TAB);
+
+    // Another tab can still track uploads after tab 50 hits its per-tab cap.
+    state = recordUploadStart(state, "other-tab-1", 51, t0 + 1000);
+    expect(isTabUploading(state, 51, t0 + 1000)).toBe(true);
+
+    // Global cap bounds total tracked in-flight requests across all tabs.
+    let globalState = createEmptyUploadState();
+    for (let i = 0; i < MAX_TRACKED_INFLIGHT_UPLOADS + 40; i++) {
+      globalState = recordUploadStart(globalState, `g-${i}`, 100 + Math.floor(i / 2), t0 + i);
+    }
+    expect(Object.keys(globalState.inFlight)).toHaveLength(MAX_TRACKED_INFLIGHT_UPLOADS);
+  });
+
+  test("expires orphaned in-flight entries older than UPLOAD_INFLIGHT_MAX_AGE_MS", () => {
+    let state = recordUploadStart(createEmptyUploadState(), "stale-1", 60, t0);
+    state = recordUploadStart(state, "fresh-1", 61, t0 + UPLOAD_INFLIGHT_MAX_AGE_MS - 1000);
+    const pruned = pruneUploadState(state, t0 + UPLOAD_INFLIGHT_MAX_AGE_MS + 1);
+    expect(Object.keys(pruned.inFlight)).toEqual(["fresh-1"]);
+    expect(isTabUploading(pruned, 60, t0 + UPLOAD_INFLIGHT_MAX_AGE_MS + 1)).toBe(false);
+    expect(isTabUploading(pruned, 61, t0 + UPLOAD_INFLIGHT_MAX_AGE_MS + 1)).toBe(true);
   });
 });

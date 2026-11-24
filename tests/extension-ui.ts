@@ -11,7 +11,15 @@ const context = await chromium.launchPersistentContext("", {
 
 try {
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  const consoleErrors: string[] = [];
+  const trackErrors = (page: import("playwright-core").Page) => {
+    page.on("pageerror", (err) => consoleErrors.push(err.message));
+    page.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+  };
   const options = await context.newPage();
+  trackErrors(options);
   await options.goto(new URL("options.html", worker.url()).href);
   await options.getByRole("link", { name: "Protections", exact: true }).click();
   assert.equal(new URL(options.url()).hash, "#protections");
@@ -112,6 +120,7 @@ try {
   }
 
   const popup = await context.newPage();
+  trackErrors(popup);
   await popup.setViewportSize({ width: 800, height: 600 });
   await popup.goto(new URL("popup.html", worker.url()).href);
   await popup.locator(".tab-item").first().waitFor();
@@ -264,6 +273,7 @@ try {
   assert.equal(await jsMeta.innerText(), "JS 120 MB · docs.example.test · 5m idle");
   assert.match((await jsMeta.getAttribute("title")) ?? "", /JS heap estimate only/);
   await memPopup.close();
+  assert.deepEqual(consoleErrors, [], "options.html and popup.html must load without CSP or runtime console errors");
 
   console.log("Settings and tab palette passed in Chromium.");
 } finally {

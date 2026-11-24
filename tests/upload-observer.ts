@@ -415,9 +415,28 @@ try {
   await setProtectUploads(false);
   await waitUploadState(uploaderUrl, false, "disabling protectActiveUploads should clear active protection");
 
-  // 7. Unchecking #protect-uploads in Settings revokes webRequest while keeping <all_urls> for Weighted Eviction,
-  // and unchecking both Weighted Eviction and unsaved forms revokes scripting + <all_urls>.
+  // 7. Burst of rapid PATCH requests must not wedge get_status or prevent inspecting other tabs.
   await setProtectUploads(true);
+  await uploader.evaluate(() => {
+    (window as unknown as { burstCtrls?: AbortController[] }).burstCtrls = [];
+    for (let i = 0; i < 40; i++) {
+      const ctrl = new AbortController();
+      (window as unknown as { burstCtrls: AbortController[] }).burstCtrls.push(ctrl);
+      void fetch("/hold/burst-" + i, { method: "PATCH", body: new Uint8Array(64), signal: ctrl.signal }).catch(() => {});
+    }
+  });
+  await waitHeld("burst-0");
+  const burstT0 = Date.now();
+  const burstStatus = await waitUploadState(uploaderUrl, true, "tab with active PATCH burst should stay protected");
+  assert.equal(burstStatus.hasActiveUpload, true);
+  assert.ok(Date.now() - burstT0 < 1500, "PATCH burst must not wedge status queries");
+  await uploader.evaluate(() => {
+    for (const ctrl of (window as unknown as { burstCtrls?: AbortController[] }).burstCtrls ?? []) ctrl.abort();
+  });
+  for (let i = 0; i < 40; i++) release("burst-" + i);
+
+  // 8. Unchecking #protect-uploads in Settings revokes webRequest while keeping http(s) host access for Weighted Eviction,
+  // and unchecking both Weighted Eviction and unsaved forms revokes scripting + http(s) host access.
   await options.reload();
   await options.locator("#protect-uploads").waitFor();
   assert.equal(await options.locator("#protect-uploads").isChecked(), true);
@@ -425,13 +444,13 @@ try {
   await options.locator("#protect-uploads").uncheck();
   await options.waitForFunction(async () => !(await chrome.permissions.contains({ permissions: ["webRequest"] })));
   const hostStillGranted = await options.evaluate(() =>
-    chrome.permissions.contains({ permissions: ["scripting"], origins: ["<all_urls>"] }),
+    chrome.permissions.contains({ permissions: ["scripting"], origins: ["http://*/*", "https://*/*"] }),
   );
-  assert.equal(hostStillGranted, true, "turning off upload protection must not revoke <all_urls> used by Weighted Eviction");
+  assert.equal(hostStillGranted, true, "turning off upload protection must not revoke host access used by Weighted Eviction");
 
   await options.locator("#weighted-eviction").uncheck();
   await options.waitForFunction(
-    async () => !(await chrome.permissions.contains({ permissions: ["scripting"], origins: ["<all_urls>"] })),
+    async () => !(await chrome.permissions.contains({ permissions: ["scripting"], origins: ["http://*/*", "https://*/*"] })),
   );
 
   console.log("Upload protection passed in Chromium.");
